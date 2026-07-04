@@ -1,0 +1,101 @@
+name: Build & Release Desktop Clients
+
+# Push to `publish` to cut a new desktop release. Each OS builds its own
+# native installer (electron-builder can't cross-compile mac targets from
+# Linux/Windows, so we use one runner per platform), then a final job
+# collects all three artifacts into a single GitHub Release.
+on:
+  push:
+    branches:
+      - publish
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: mac
+            build_args: --mac --universal
+            artifact_name: fastnote-mac
+            artifact_glob: apps/desktop/release/*.dmg
+          - os: windows-latest
+            platform: win
+            build_args: --win
+            artifact_name: fastnote-win
+            artifact_glob: apps/desktop/release/*.exe
+          - os: ubuntu-latest
+            platform: linux
+            build_args: --linux
+            artifact_name: fastnote-linux
+            artifact_glob: |
+              apps/desktop/release/*.AppImage
+              apps/desktop/release/*.deb
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build renderer + Electron main/preload
+        run: pnpm --filter @fastnote/desktop build
+
+      - name: Package installer (${{ matrix.platform }})
+        working-directory: apps/desktop
+        run: npx electron-builder ${{ matrix.build_args }}
+        env:
+          # No Apple Developer / code-signing certs configured — produce an
+          # unsigned build instead of failing. Users will need to right
+          # click → Open (macOS Gatekeeper) on first launch.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_glob }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Read desktop app version
+        id: version
+        run: echo "version=$(node -p "require('./apps/desktop/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: desktop-v${{ steps.version.outputs.version }}-${{ github.run_number }}
+          name: FastNote Desktop v${{ steps.version.outputs.version }} (build ${{ github.run_number }})
+          target_commitish: ${{ github.sha }}
+          files: artifacts/**/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true

@@ -1,0 +1,22 @@
+{
+  "name": "@fastnote/table",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fastnote/crypto": "workspace:*",
+    "@fastnote/shared": "workspace:*",
+    "@fastnote/ui": "workspace:*",
+    "@fastnote/i18n": "workspace:*",
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.2",
+    "typescript": "^5.7.2"
+  }
+}

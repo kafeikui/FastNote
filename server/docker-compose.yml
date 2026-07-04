@@ -1,0 +1,19 @@
+services:
+  relay:
+    build: .
+    restart: unless-stopped
+    # Bind to localhost only — nginx is the single public-facing entry point
+    # (port 80/443) and reverse-proxies to this container over loopback.
+    # Never publish 8787 directly to 0.0.0.0 on a host that's exposed to the
+    # internet, or you bypass TLS termination entirely.
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      PORT: 8787
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in server/.env — never use the default in production}
+      DATA_DIR: /data
+    volumes:
+      - relay-data:/data
+
+volumes:
+  relay-data:

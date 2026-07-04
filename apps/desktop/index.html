@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      Content-Security-Policy bootstrap — kept identical to apps/web/index.html.
+      See that file's comment (and packages/shared/src/csp.ts) for why this
+      has to be a synchronous document.write() during parsing rather than a
+      runtime update from React.
+    -->
+    <script>
+      (function () {
+        function originsForServerUrl(serverUrl) {
+          try {
+            var u = new URL(serverUrl);
+            var httpOrigin = u.protocol + '//' + u.host;
+            var wsProtocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+            var wsOrigin = wsProtocol + '//' + u.host;
+            return [httpOrigin, wsOrigin];
+          } catch (e) {
+            return [];
+          }
+        }
+        var serverUrl = 'http://localhost:8787';
+        try {
+          serverUrl = window.localStorage.getItem('fastnote_server_url') || serverUrl;
+        } catch (e) {
+          // localStorage unavailable — fall back to the default.
+        }
+        window.__FASTNOTE_CSP_SERVER_URL__ = serverUrl;
+        var connectSrc = ["'self'"].concat(originsForServerUrl(serverUrl)).join(' ');
+        var policy = [
+          "default-src 'self'",
+          "script-src 'self'",
+          "style-src 'self' 'unsafe-inline'",
+          "img-src 'self' data: blob:",
+          "font-src 'self' data:",
+          "media-src 'self' blob:",
+          'connect-src ' + connectSrc,
+          "object-src 'none'",
+          "base-uri 'self'",
+          "form-action 'none'",
+        ].join('; ');
+        document.write('<meta http-equiv="Content-Security-Policy" content="' + policy + '">');
+      })();
+    </script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FastNote</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

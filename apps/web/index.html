@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      Content-Security-Policy bootstrap.
+
+      Browsers apply a <meta http-equiv="Content-Security-Policy"> exactly
+      once, at HTML parse time — any later attempt to add or modify it via
+      JavaScript (e.g. from a React effect, after the page has loaded) is
+      silently ignored by the CSP engine, even though the DOM node itself
+      updates fine. So the policy has to be computed and written into the
+      document *synchronously while it is still being parsed*, which is what
+      this plain (non-module, non-async) inline script does via
+      `document.write` — it must run as the very first thing in <head>,
+      before any other resource-loading tag.
+
+      It reads the user's persisted server address straight out of
+      localStorage (the same `fastnote_server_url` key `packages/api` uses)
+      so `connect-src` allows exactly `'self'` plus that one server's HTTP(S)
+      and WS(S) origins — everything else stays locked down. This mirrors
+      `buildContentSecurityPolicy` in packages/shared/src/csp.ts; keep both
+      in sync by hand if the policy ever changes (this snippet can't import
+      that module — nothing has loaded yet at this point).
+
+      Changing the server address later (Settings, or the unlock screen's
+      cloud-sync tab) cannot widen this already-applied policy — the app
+      detects this (`serverUrlNeedsReload`) and prompts for a full reload,
+      which re-runs this script against the freshly saved value.
+    -->
+    <script>
+      (function () {
+        function originsForServerUrl(serverUrl) {
+          try {
+            var u = new URL(serverUrl);
+            var httpOrigin = u.protocol + '//' + u.host;
+            var wsProtocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+            var wsOrigin = wsProtocol + '//' + u.host;
+            return [httpOrigin, wsOrigin];
+          } catch (e) {
+            return [];
+          }
+        }
+        var serverUrl = 'http://localhost:8787';
+        try {
+          serverUrl = window.localStorage.getItem('fastnote_server_url') || serverUrl;
+        } catch (e) {
+          // localStorage unavailable (e.g. private browsing) — fall back to the default.
+        }
+        window.__FASTNOTE_CSP_SERVER_URL__ = serverUrl;
+        var connectSrc = ["'self'"].concat(originsForServerUrl(serverUrl)).join(' ');
+        var policy = [
+          "default-src 'self'",
+          "script-src 'self'",
+          "style-src 'self' 'unsafe-inline'",
+          "img-src 'self' data: blob:",
+          "font-src 'self' data:",
+          "media-src 'self' blob:",
+          'connect-src ' + connectSrc,
+          "object-src 'none'",
+          "base-uri 'self'",
+          "form-action 'none'",
+        ].join('; ');
+        document.write('<meta http-equiv="Content-Security-Policy" content="' + policy + '">');
+      })();
+    </script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FastNote</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

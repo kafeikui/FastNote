@@ -1,0 +1,20 @@
+{
+  "name": "@fastnote/crypto",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fastnote/shared": "workspace:*",
+    "@noble/ciphers": "^1.0.0",
+    "@noble/curves": "^1.7.0",
+    "@noble/hashes": "^1.6.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  }
+}

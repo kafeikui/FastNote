@@ -1,0 +1,316 @@
+import type { TableColumn, TableDocument, TableRow } from '@fastnote/shared';
+import { TABLE_FILE_MAGIC, TABLE_FILE_VERSION, expandAttachmentRefsForExport } from '@fastnote/shared';
+import {
+  decryptString,
+  encryptString,
+  packEncrypted,
+  unpackEncrypted,
+  type EncryptedPayload,
+} from '@fastnote/crypto';
+import { translate, type Locale } from '@fastnote/i18n';
+import { cellDisplayValue } from './formula';
+
+export function createEmptyTable(locale: Locale = 'zh'): TableDocument {
+  const colA: TableColumn = { id: crypto.randomUUID(), name: translate(locale, 'tableUtils.defaultColumnA') };
+  const colB: TableColumn = { id: crypto.randomUUID(), name: translate(locale, 'tableUtils.defaultColumnB') };
+  return {
+    version: 1,
+    columns: [colA, colB],
+    rows: [
+      { id: crypto.randomUUID(), cells: { [colA.id]: '', [colB.id]: '' } },
+      { id: crypto.randomUUID(), cells: { [colA.id]: '', [colB.id]: '' } },
+    ],
+  };
+}
+
+export function parseTableDocument(raw: string, locale: Locale = 'zh'): TableDocument {
+  if (!raw.trim()) return createEmptyTable(locale);
+  try {
+    const doc = JSON.parse(raw) as TableDocument;
+    if (doc.version === 1 && Array.isArray(doc.columns) && Array.isArray(doc.rows)) {
+      return doc;
+    }
+  } catch {
+    /* fall through */
+  }
+  return createEmptyTable(locale);
+}
+
+export function serializeTable(doc: TableDocument): string {
+  return JSON.stringify(doc);
+}
+
+export function tableToSearchText(doc: TableDocument): string {
+  const parts: string[] = [];
+  for (const col of doc.columns) parts.push(col.name);
+  for (const row of doc.rows) {
+    for (const col of doc.columns) parts.push(row.cells[col.id] ?? '');
+  }
+  return parts.join(' ');
+}
+
+type SortDir = 'asc' | 'desc' | null;
+
+/**
+ * Sorts/filters compare the *computed* value of formula cells (via `cellDisplayValue`)
+ * rather than the raw `=...` string, so a column of formulas sorts/filters numerically
+ * like any other column. `doc` must be the full (unfiltered/unsorted) document so cross-row
+ * formula references resolve correctly regardless of the current view.
+ */
+export function sortRows(
+  doc: TableDocument,
+  rows: TableRow[],
+  columnId: string | null,
+  direction: SortDir,
+): TableRow[] {
+  if (!columnId || !direction) return rows;
+  return [...rows].sort((a, b) => {
+    const av = cellDisplayValue(doc, a.id, columnId);
+    const bv = cellDisplayValue(doc, b.id, columnId);
+    const cmp = av.localeCompare(bv, undefined, { numeric: true, sensitivity: 'base' });
+    return direction === 'asc' ? cmp : -cmp;
+  });
+}
+
+export function filterRows(
+  doc: TableDocument,
+  rows: TableRow[],
+  filters: Record<string, string>,
+): TableRow[] {
+  const active = Object.entries(filters).filter(([, v]) => v.trim());
+  if (active.length === 0) return rows;
+  return rows.filter((row) =>
+    active.every(([colId, q]) => cellDisplayValue(doc, row.id, colId).toLowerCase().includes(q.toLowerCase())),
+  );
+}
+
+function parseCsvRow(line: string): string[] {
+  const result: string[] = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        cur += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      result.push(cur);
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  result.push(cur);
+  return result;
+}
+
+export function importTableCsv(text: string, locale: Locale = 'zh'): TableDocument {
+  const lines = text
+    .replace(/^\uFEFF/, '')
+    .split(/\r?\n/)
+    .filter((l) => l.trim().length > 0);
+  if (lines.length === 0) throw new Error(translate(locale, 'tableUtils.csvEmpty'));
+
+  let headerIdx = 0;
+  if (lines.length >= 2) {
+    const first = parseCsvRow(lines[0]);
+    const second = parseCsvRow(lines[1]);
+    if (first.length === 1 && second.length > 1) {
+      headerIdx = 1;
+    }
+  }
+
+  const headers = parseCsvRow(lines[headerIdx]);
+  if (headers.length === 0) throw new Error(translate(locale, 'tableUtils.csvNoHeader'));
+
+  const columns: TableColumn[] = headers.map((name, i) => ({
+    id: crypto.randomUUID(),
+    name: name.trim() || translate(locale, 'tableUtils.defaultColumnN', { index: i + 1 }),
+  }));
+
+  const dataLines = lines.slice(headerIdx + 1);
+  const rows: TableRow[] =
+    dataLines.length > 0
+      ? dataLines.map((line) => {
+          const values = parseCsvRow(line);
+          const cells: Record<string, string> = {};
+          columns.forEach((col, i) => {
+            cells[col.id] = values[i] ?? '';
+          });
+          return { id: crypto.randomUUID(), cells };
+        })
+      : [{ id: crypto.randomUUID(), cells: Object.fromEntries(columns.map((c) => [c.id, ''])) }];
+
+  return { version: 1, columns, rows };
+}
+
+export async function importCsvFile(file: File, locale: Locale = 'zh'): Promise<TableDocument> {
+  const text = await file.text();
+  return importTableCsv(text, locale);
+}
+
+function escapeCsv(value: string): string {
+  if (/[",\n\r]/.test(value)) return `"${value.replace(/"/g, '""')}"`;
+  return value;
+}
+
+export function exportTableCsv(
+  title: string,
+  doc: TableDocument,
+  resolveAttachment?: (id: string) => { description: string; fileName: string } | undefined,
+): string {
+  const header = doc.columns.map((c) => escapeCsv(c.name)).join(',');
+  const lines = doc.rows.map((row) =>
+    doc.columns
+      .map((c) => {
+        const raw = row.cells[c.id] ?? '';
+        const exported = resolveAttachment ? expandAttachmentRefsForExport(raw, resolveAttachment) : raw;
+        return escapeCsv(exported);
+      })
+      .join(','),
+  );
+  return `\uFEFF${escapeCsv(title)}\n${header}\n${lines.join('\n')}`;
+}
+
+export function downloadTextFile(filename: string, content: string, mime: string): void {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+export function downloadBinaryFile(filename: string, bytes: Uint8Array, mime: string): void {
+  const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  const blob = new Blob([buffer], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+export interface EncryptedTableFile {
+  format: 'fastnote-table-v1';
+  title: string;
+  exported_at: string;
+  payload: string;
+}
+
+export function exportEncryptedTableFile(
+  title: string,
+  doc: TableDocument,
+  notesKey: Uint8Array,
+): EncryptedTableFile {
+  const enc = encryptString(notesKey, serializeTable(doc));
+  return {
+    format: 'fastnote-table-v1',
+    title,
+    exported_at: new Date().toISOString(),
+    payload: packEncrypted(enc),
+  };
+}
+
+export function buildFnxtBytes(file: EncryptedTableFile): Uint8Array {
+  const json = JSON.stringify(file);
+  const body = new TextEncoder().encode(json);
+  const magic = new TextEncoder().encode(TABLE_FILE_MAGIC);
+  const out = new Uint8Array(magic.length + 1 + body.length);
+  out.set(magic, 0);
+  out[magic.length] = TABLE_FILE_VERSION;
+  out.set(body, magic.length + 1);
+  return out;
+}
+
+export function importEncryptedTableFile(
+  file: EncryptedTableFile,
+  notesKey: Uint8Array,
+  locale: Locale = 'zh',
+): TableDocument {
+  if (file.format !== 'fastnote-table-v1') throw new Error(translate(locale, 'tableUtils.unsupportedTableFormat'));
+  const plain = decryptString(notesKey, unpackEncrypted(file.payload));
+  return parseTableDocument(plain, locale);
+}
+
+export async function importFnxtFile(
+  file: File,
+  notesKey: Uint8Array,
+  locale: Locale = 'zh',
+): Promise<{ title: string; doc: TableDocument }> {
+  const buf = new Uint8Array(await file.arrayBuffer());
+  const magic = new TextDecoder().decode(buf.slice(0, 4));
+  if (magic !== TABLE_FILE_MAGIC) throw new Error(translate(locale, 'tableUtils.invalidFnxtFile'));
+  const json = new TextDecoder().decode(buf.slice(5));
+  const parsed = JSON.parse(json) as EncryptedTableFile;
+  return { title: parsed.title, doc: importEncryptedTableFile(parsed, notesKey, locale) };
+}
+
+export function addColumn(doc: TableDocument, locale: Locale = 'zh'): TableDocument {
+  const col: TableColumn = {
+    id: crypto.randomUUID(),
+    name: translate(locale, 'tableUtils.defaultColumnN', { index: doc.columns.length + 1 }),
+  };
+  return {
+    ...doc,
+    columns: [...doc.columns, col],
+    rows: doc.rows.map((r) => ({ ...r, cells: { ...r.cells, [col.id]: '' } })),
+  };
+}
+
+export function addRow(doc: TableDocument): TableDocument {
+  const cells: Record<string, string> = {};
+  for (const c of doc.columns) cells[c.id] = '';
+  return { ...doc, rows: [...doc.rows, { id: crypto.randomUUID(), cells }] };
+}
+
+export function removeColumn(doc: TableDocument, columnId: string): TableDocument {
+  if (doc.columns.length <= 1) return doc;
+  return {
+    ...doc,
+    columns: doc.columns.filter((c) => c.id !== columnId),
+    rows: doc.rows.map((r) => {
+      const cells = { ...r.cells };
+      delete cells[columnId];
+      return { ...r, cells };
+    }),
+  };
+}
+
+export function removeRow(doc: TableDocument, rowId: string): TableDocument {
+  if (doc.rows.length <= 1) return doc;
+  return { ...doc, rows: doc.rows.filter((r) => r.id !== rowId) };
+}
+
+export function updateCell(
+  doc: TableDocument,
+  rowId: string,
+  columnId: string,
+  value: string,
+): TableDocument {
+  return {
+    ...doc,
+    rows: doc.rows.map((r) =>
+      r.id === rowId ? { ...r, cells: { ...r.cells, [columnId]: value } } : r,
+    ),
+  };
+}
+
+export function renameColumn(doc: TableDocument, columnId: string, name: string): TableDocument {
+  return {
+    ...doc,
+    columns: doc.columns.map((c) => (c.id === columnId ? { ...c, name } : c)),
+  };
+}

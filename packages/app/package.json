@@ -1,0 +1,30 @@
+{
+  "name": "@fastnote/app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fastnote/api": "workspace:*",
+    "@fastnote/crypto": "workspace:*",
+    "@fastnote/editor": "workspace:*",
+    "@fastnote/i18n": "workspace:*",
+    "@fastnote/search": "workspace:*",
+    "@fastnote/shared": "workspace:*",
+    "@fastnote/storage": "workspace:*",
+    "@fastnote/sync": "workspace:*",
+    "@fastnote/im": "workspace:*",
+    "@fastnote/table": "workspace:*",
+    "@fastnote/ui": "workspace:*",
+    "@tiptap/core": "^3.27.1",
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.2",
+    "typescript": "^5.7.2"
+  }
+}

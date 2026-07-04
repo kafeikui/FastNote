@@ -1,0 +1,25 @@
+{
+  "name": "fastnote",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Encrypted notes + E2E messaging for personal use",
+  "license": "MIT",
+  "scripts": {
+    "proxy:sync": "bash scripts/sync-proxy.sh",
+    "dev:web": "pnpm --filter @fastnote/web dev",
+    "dev:desktop": "pnpm --filter @fastnote/desktop dev",
+    "dev:server": "pnpm --filter @fastnote/server dev",
+    "build": "pnpm -r build",
+    "build:web": "pnpm --filter @fastnote/web build",
+    "build:desktop": "pnpm --filter @fastnote/desktop build",
+    "build:server": "pnpm --filter @fastnote/server build",
+    "dist:mac": "pnpm --filter @fastnote/desktop dist:mac",
+    "dist:win": "pnpm --filter @fastnote/desktop dist:win",
+    "dist:linux": "pnpm --filter @fastnote/desktop dist:linux",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@9.15.0"
+}

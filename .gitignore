@@ -1,0 +1,27 @@
+# Dependencies
+node_modules
+
+# Build output
+dist
+dist-electron
+release
+*.tsbuildinfo
+
+# Local/machine-specific config — never share proxy settings, local secrets, etc.
+*.local
+.env
+.env.*
+!.env.example
+!*.env.example
+.npmrc
+
+# Self-hosted relay runtime data (usernames + ciphertext blobs).
+# Even though everything inside is E2E-encrypted, this is real local/user
+# data and must never be pushed to a shared or public remote.
+server/data/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.log

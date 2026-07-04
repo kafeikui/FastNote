@@ -1,0 +1,145 @@
+# FastNote
+
+[English](README.md) | 简体中文
+
+加密笔记 + 1:1 端到端加密即时通讯。个人/小圈子使用，零知识，自托管，无埋点/无遥测。
+
+- **本地优先**：笔记、聊天记录都先加密存在本地（IndexedDB），联网只是可选的同步/中继手段。
+- **零知识服务器**：自托管中继只存密文和无法反推明文的元数据，忘记主密码数据不可恢复（严格模式，无后门/无恢复码）。
+- **无异常外部通信**：不引入任何埋点/统计/崩溃上报/自动更新类库；所有网络请求都必须经过你自己配置的服务器地址，并受运行时 CSP 白名单约束。
+
+## 文档
+
+- [架构设计](docs/ARCHITECTURE.md)
+- [协议规范](docs/PROTOCOL.md)
+- [数据库 Schema](docs/DATABASE.md)
+- [Phase 1 任务](docs/PHASE1.md)
+- [部署文档](docs/DEPLOYMENT.md)（HTTPS + nginx 共存 + certbot 自动续期）
+- [Memory Bank](memory-bank/)（项目背景、当前进度、技术约定的持久化记录，AI 协作/新贡献者上手请先读这里）
+
+## 功能一览
+
+**笔记**
+- 树状目录（文件夹/笔记/表格），拖拽排序、多级目录
+- 编辑器：Tiptap WYSIWYG（默认）↔ CodeMirror 源码模式，自动保存
+- 表格节点：列排序/筛选、增删行列；列/选中区域的统计条（计数、求和、平均值）；类电子表格公式（`=SUM(A1:A3)`、`AVERAGE`、`COUNT`、`MIN`、`MAX`、四则运算与乘方），支持拖拽/整行/整列选中；导出 CSV（明文）/ `.fnxt`（加密），支持导入
+- 批量导入文件夹：保留目录结构，无扩展名文件作为笔记、`.csv` 作为表格导入
+- 本地全文搜索（加密索引快照，不上传服务器）
+- 笔记内容区宽度可拖拽调整；左侧目录侧边栏可一键收起，为内容区腾出更大空间
+- 多本地保险库（vault），解锁页可切换
+
+**聊天（1:1 端到端加密）**
+- 本地永久保存聊天记录（手动删除前不丢失），与是否登录云账号无关
+- 附件收发（图片预览、文件下载，可编辑/删除，删除收到的附件需二次确认）
+- 会话列表 + smart scroll（贴底自动追新 / 悬浮"新消息"提示跳转）
+- 未读消息提醒：主导航红点 + 会话列表未读数 + 可配置的提示音效/音量/气泡开关
+
+**界面**
+- 四套 UI 主题（温馨/典雅/商务/清新），选中/未选中的深浅色规范贯穿主界面和解锁页
+- 多语言：中文/英文，可在设置中随时切换，偏好本地持久化
+- 设置弹窗内容过多时可滚动
+
+**安全**
+- 主密码仅用于本地派生密钥，绝不上传服务器
+- 全 E2E：笔记与聊天服务端均只见密文
+- 运行时 CSP 白名单：只允许连接到你配置的服务器地址，其它任何网络目的地（包括依赖引入的）都会被浏览器直接拦截
+- Electron 硬化：`contextIsolation`/无 `nodeIntegration`、拒绝所有系统权限请求、应用内链接一律用系统浏览器打开、禁用 webview
+
+## 快速开始
+
+```bash
+# 安装依赖
+corepack enable && pnpm install
+
+# Web 版（快速验证）
+pnpm dev:web
+
+# Electron 桌面版
+pnpm dev:desktop
+
+# 自托管中继（另开终端）
+pnpm dev:server
+```
+
+### 云同步验证
+
+1. 启动中继：`pnpm dev:server`
+2. Web 端解锁本地库 → ⚙ 设置 → 保存服务器 `http://localhost:8787`
+3. 登录/注册（需输入本地密码验证）
+4. 点击「立即同步」；另一浏览器同账号登录后可双向拉取笔记
+
+### 聊天验证（M7）
+
+1. 设置 → 登录账号（会上传交换公钥）
+2. 切到「聊天」→ 输入对方用户名 → 发起聊天
+3. 消息经密钥交换 + AEAD 端到端加密，中继只见密文
+
+## 项目结构
+
+```
+apps/web        — 浏览器版（Vite + React）
+apps/desktop    — Electron 桌面版（macOS / Windows / Linux）
+packages/*      — Web 与 Electron 共享的业务逻辑（crypto / storage / editor / im / sync / ui / …）
+server/         — 自托管中继（Fastify + WebSocket，仅存密文）
+```
+
+Web 与 Electron **共享** `packages/*`，只有壳层不同；桌面版额外通过 `window.fastnote` IPC 提供"选择本地数据目录"等原生能力。
+
+## 构建三端
+
+```bash
+pnpm build:web       # apps/web/dist            — 静态资源，任意静态托管 + 反代皆可部署
+pnpm build:desktop   # apps/desktop/dist(-electron) — Electron 渲染层 + 主进程/preload 产物
+pnpm build:server    # server/dist               — 编译后的中继服务
+
+# 或者一次性构建所有 workspace 包
+pnpm build
+```
+
+### 桌面安装包（需在对应平台本机执行）
+
+```bash
+pnpm dist:mac      # macOS dmg
+pnpm dist:win      # Windows nsis
+pnpm dist:linux    # Ubuntu: AppImage + deb
+```
+
+### 自托管中继部署（HTTPS）
+
+```bash
+cd server
+cp .env.example .env   # 填入 JWT_SECRET（openssl rand -hex 32）
+docker compose up -d   # 只监听 127.0.0.1:8787，不直接暴露公网
+```
+
+面向公网部署时，中继本身只监听本机端口，由 nginx 负责 443/80 的 TLS 终止与反向代理。完整的「和已有 nginx 站点共存 + certbot 申请/自动续期证书」步骤见 **[部署文档](docs/DEPLOYMENT.md)**，nginx 站点配置示例在 `server/deploy/nginx/fastnote.conf`（独立文件，不影响你已有的其它站点配置）。
+
+> ⚠️ **`JWT_SECRET` 没有默认值**，`docker-compose.yml` 会在缺失时直接拒绝启动，避免生产环境不小心用了占位符导致任何人都能伪造登录令牌。
+
+### 桌面客户端发布（CI）
+
+推送到 `publish` 分支会触发 `.github/workflows/release-desktop.yml`：并行在 macOS / Windows / Ubuntu runner 上分别构建 dmg / nsis / AppImage+deb，然后汇总发布成一个 GitHub Release（未做代码签名，macOS 首次打开需要"右键 → 打开"绕过 Gatekeeper）。
+
+## 安全说明
+
+- 主密码仅用于本地派生密钥，不上传服务器
+- **忘记密码无法恢复数据**（严格模式）
+- 服务端只见密文；笔记与聊天均为 E2E 加密
+- 应用运行时受 CSP 约束，只能连接到你自己配置的服务器地址；依赖库审计详见 [Memory Bank / techContext](memory-bank/techContext.md)
+- `server/data/`（本地开发时的中继运行数据）已加入 `.gitignore`，不会被提交
+
+## 请作者喝杯咖啡 ☕
+
+如果 FastNote 对你有帮助，欢迎请作者喝杯咖啡（完全自愿，不影响任何功能）：
+
+- **加密货币地址（EVM 通用，支持 ETH / BNB / MATIC / USDT 等 ERC-20/BEP-20 代币）**：
+
+  ```
+  0x9bdb90629ee0967A97e7db89F44A32fe7a822117
+  ```
+
+  转账前请自行核对网络（Ethereum / BNB Chain / Polygon 等）与代币类型，转错网络可能导致资产丢失。
+
+## License
+
+[MIT](LICENSE) — 欢迎自行审查代码、自托管部署、二次开发。
