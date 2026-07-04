@@ -2,6 +2,12 @@
   "name": "@fastnote/desktop",
   "version": "0.1.0",
   "private": true,
+  "description": "FastNote desktop client - encrypted notes + E2E messaging",
+  "author": "kafeikui",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kafeikui/FastNote.git"
+  },
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
@@ -39,15 +45,23 @@
       "output": "release",
       "buildResources": "build"
     },
+    "publish": null,
     "mac": {
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "category": "public.app-category.productivity"
     },
     "win": {
-      "target": ["nsis"]
+      "target": [
+        "nsis"
+      ]
     },
     "linux": {
-      "target": ["AppImage", "deb"],
+      "target": [
+        "AppImage",
+        "deb"
+      ],
       "category": "Office",
       "maintainer": "FastNote <fastnote@localhost>"
     },

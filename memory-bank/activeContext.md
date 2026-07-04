@@ -18,6 +18,12 @@
 - 附件拖拽"松开无变化"是 `moveSegment` 的插入位置算法错了：把索引 0 拖到索引 1（比如两个附件互换）时，`insertAt = to - 1 = 0`，插入位置和移除前一样，等于没动。正确算法是**始终 `insertAt = to`**（不需要按方向区分/减一），验证：`[A,B]` 从 0 拖到 1 → 先移除 A 得 `[B]` → 在下标 1 插入 A → `[B,A]`，正确互换。
 - "不能拖到别的格子"是因为原设计里拖拽状态（`dragIndex`）是 `TableCellContent` 组件本地 state，天生只能感知同一个单元格内的拖拽。改为通过 `e.dataTransfer.setData()` 携带 `{rowId, colId, index}` payload（自定义 MIME `application/x-fastnote-table-attachment`），拖到任意单元格（哪怕原本没有附件、只有纯文本）都能在 `onDrop` 里解析出来源坐标；实际的增删逻辑上移到 `TableEditor.tsx` 的 `handleMoveAttachment`（能访问整个 `doc`，可以同时改源格和目标格两处 cell 内容）。单元格 wrapper div 也加了兜底的 `onDragOver`/`onDrop`（附加到末尾），这样即使目标格没有现成的附件 chip 可以当放置目标，也能接住拖进来的附件。
 
+## 桌面端打包发布 CI 失败（同日修复）
+
+`release-desktop.yml` 三个平台的 `electron-builder` 步骤全部在 `afterPack` 阶段报错退出：`Cannot detect repository by .git/config. Please specify "repository" in the package.json`。根因：workflow 给 `electron-builder` 传了 `GH_TOKEN` 环境变量，这会让它自动进入"CI 检测到，尝试解析发布配置"分支（日志里的 `artifacts will be published if draft release exists reason=CI detected`），即使我们从不打算让 electron-builder 自己发布——实际发布是由同一 workflow 后面的 `release` job 用 `softprops/action-gh-release` 单独完成的。`actions/checkout@v4` 产生的 `.git` 目录在这些 runner 上无法被 electron-builder 正确解析出 owner/repo，且 `apps/desktop/package.json` 也没有 `repository` 字段兜底，于是直接抛错。
+
+修复：`apps/desktop/package.json` 的 `build` 字段加了 `"publish": null`（官方文档确认的正确关闭方式，注意不是字符串 `"never"`，那是 CLI 参数专用值，写进配置文件里反而会报另一个错），彻底跳过发布配置解析这条代码路径；顺带补上了之前一直提示缺失的 `description`/`author`/`repository` 字段。本地用 `CSC_IDENTITY_AUTO_DISCOVERY=false GH_TOKEN=dummy npx electron-builder --mac --dir` 复现并验证修复（该命令会走到与 CI 完全相同的 `afterPack` 发布配置解析逻辑）。
+
 ## 更早会话（已完成，供参考）
 
 用户提出两件事：
