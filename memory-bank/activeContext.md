@@ -24,6 +24,12 @@
 
 修复：`apps/desktop/package.json` 的 `build` 字段加了 `"publish": null`（官方文档确认的正确关闭方式，注意不是字符串 `"never"`，那是 CLI 参数专用值，写进配置文件里反而会报另一个错），彻底跳过发布配置解析这条代码路径；顺带补上了之前一直提示缺失的 `description`/`author`/`repository` 字段。本地用 `CSC_IDENTITY_AUTO_DISCOVERY=false GH_TOKEN=dummy npx electron-builder --mac --dir` 复现并验证修复（该命令会走到与 CI 完全相同的 `afterPack` 发布配置解析逻辑）。
 
+**追加修复（同日，Linux deb 打包仍失败）**：上面的 `publish: null` 解决了三端都会遇到的"检测仓库"报错后，Linux 的 `deb` 目标又暴露出新问题：`fpm ⨯ Parent directory does not exist: .../release/@fastnote - cannot write to .../release/@fastnote/desktop_0.1.0_amd64.deb`。
+
+根因：`apps/desktop/package.json` 的顶层 `name` 是 scoped npm 包名 `@fastnote/desktop`（monorepo workspace 约定所需，不能随便改）。electron-builder 的默认 `artifactName` 模板是 `${name}-${version}.${ext}`，这里的 `${name}` 取的是 **package.json 的 `name` 字段（原始 npm 包名）**，而不是 `productName`。由于 `@fastnote/desktop` 里含有 `/`，被当成了路径分隔符，导致 electron-builder 试图先创建/写入一个字面上叫 `@fastnote` 的目录，而这个目录在 `release/` 下并不存在（且不会被自动创建），于是 fpm 报错退出。日志里那条 `oldname=>FastNote, fixedname=>fastnote` 的 warn 只是 fpm 自己对**包内部标识符**（`--name` 参数、Debian control 文件里的 `Package:` 字段）做的大小写规范化，和这里报错的**文件路径**问题是两回事——这也是为什么这个 bug 在解决了 repository 检测报错之后才第一次在 Linux 目标上暴露出来（mac/win 默认的 artifactName 模板本来就用 `productName` 而不是 `name`，只有 Linux 的 deb 目标走了这条使用原始 `name` 的代码路径）。
+
+修复：在 `build` 字段顶层显式加了 `"artifactName": "${productName}-${version}-${arch}.${ext}"`（对 mac/win/linux 所有目标统一生效，用 `productName`("FastNote") 代替默认的 `name`，从根上避免任何 scoped 包名泄漏进输出路径），并在 `linux` 字段下加了 `"executableName": "fastnote"`（规范化 Linux 下实际安装的可执行文件名，避免依赖 productName 里的大写字母）。参考了 electron-builder 官方 issue #2963/#5918 中对同类问题的确认与修复方式。本地因为 fpm 是预编译的 Linux ELF 二进制、无法在 macOS 上跨平台验证完整 deb 构建，已通过 `builder-effective-config.yaml` 校验配置能正确解析，实际打包效果需等 CI 跑一次确认。
+
 ## 更早会话（已完成，供参考）
 
 用户提出两件事：

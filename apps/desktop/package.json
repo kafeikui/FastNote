@@ -46,6 +46,7 @@
       "buildResources": "build"
     },
     "publish": null,
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
     "mac": {
       "target": [
         "dmg"
@@ -63,7 +64,8 @@
         "deb"
       ],
       "category": "Office",
-      "maintainer": "FastNote <fastnote@localhost>"
+      "maintainer": "FastNote <fastnote@localhost>",
+      "executableName": "fastnote"
     },
     "files": [
       "dist/**/*",
