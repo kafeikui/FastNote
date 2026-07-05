@@ -1,6 +1,6 @@
 {
   "name": "@fastnote/editor",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
@@ -18,15 +18,18 @@
     "@tiptap/core": "^3.27.1",
     "@tiptap/extension-code-block": "^3.27.1",
     "@tiptap/extension-link": "^3.27.1",
+    "@tiptap/extension-mathematics": "^3.27.1",
     "@tiptap/extension-placeholder": "^3.27.1",
     "@tiptap/markdown": "^3.27.1",
     "@tiptap/pm": "^3.27.1",
     "@tiptap/react": "^3.27.1",
     "@tiptap/starter-kit": "^3.27.1",
+    "katex": "^0.16.11",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@types/katex": "^0.16.7",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
     "typescript": "^5.7.2"

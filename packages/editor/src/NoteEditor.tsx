@@ -2,8 +2,9 @@ import { useEditor, EditorContent, type Editor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Link from '@tiptap/extension-link';
 import Placeholder from '@tiptap/extension-placeholder';
+import { Mathematics } from '@tiptap/extension-mathematics';
 import { Markdown } from '@tiptap/markdown';
-import { EditorView, lineNumbers } from '@codemirror/view';
+import { EditorView } from '@codemirror/view';
 import { basicSetup } from 'codemirror';
 import { markdown } from '@codemirror/lang-markdown';
 import { useEffect, useRef } from 'react';
@@ -12,6 +13,8 @@ import { useT } from '@fastnote/i18n';
 import { AttachmentRef } from './AttachmentRefExtension';
 import { EnhancedCodeBlock } from './CodeBlockExtension';
 import { serializeDocJsonToMarkdown } from './markdownSerialize';
+import { normalizeLatexDelimiters } from './latexDelimiters';
+import 'katex/dist/katex.min.css';
 
 export interface NoteEditorProps {
   noteId: string;
@@ -24,6 +27,7 @@ export interface NoteEditorProps {
   onAttachmentDownload?: (attachmentId: string) => void;
   onAttachmentEdit?: (attachmentId: string, description: string) => void | Promise<void>;
   placeholder?: string;
+  showLineNumbers?: boolean;
 }
 
 function getMarkdown(editor: NonNullable<ReturnType<typeof useEditor>>): string {
@@ -41,6 +45,7 @@ export function NoteEditor({
   onAttachmentDownload,
   onAttachmentEdit,
   placeholder,
+  showLineNumbers = true,
 }: NoteEditorProps) {
   const t = useT();
   const effectivePlaceholder = placeholder ?? t('noteEditor.placeholder');
@@ -59,6 +64,11 @@ export function NoteEditor({
   onDownloadRef.current = onAttachmentDownload;
   const onEditRef = useRef(onAttachmentEdit);
   onEditRef.current = onAttachmentEdit;
+  const onEditorReadyRef = useRef(onEditorReady);
+  onEditorReadyRef.current = onEditorReady;
+  const editorRef = useRef<Editor | null>(null);
+  const editFormulaPromptRef = useRef(t('noteEditor.editFormulaPrompt'));
+  editFormulaPromptRef.current = t('noteEditor.editFormulaPrompt');
 
   const editor = useEditor(
     {
@@ -76,10 +86,27 @@ export function NoteEditor({
           onDownload: (id: string) => onDownloadRef.current?.(id),
           onEdit: (id: string, desc: string) => onEditRef.current?.(id, desc),
         }),
+        Mathematics.configure({
+          katexOptions: { throwOnError: false },
+          inlineOptions: {
+            onClick: (node, pos) => {
+              const latex = window.prompt(editFormulaPromptRef.current, (node.attrs.latex as string) ?? '');
+              if (latex === null) return;
+              editorRef.current?.chain().focus().updateInlineMath({ latex, pos }).run();
+            },
+          },
+          blockOptions: {
+            onClick: (node, pos) => {
+              const latex = window.prompt(editFormulaPromptRef.current, (node.attrs.latex as string) ?? '');
+              if (latex === null) return;
+              editorRef.current?.chain().focus().updateBlockMath({ latex, pos }).run();
+            },
+          },
+        }),
         Markdown,
         Placeholder.configure({ placeholder: effectivePlaceholder }),
       ],
-      content,
+      content: normalizeLatexDelimiters(content),
       contentType: 'markdown',
       onUpdate: ({ editor: e }) => {
         if (modeRef.current !== 'wysiwyg') return;
@@ -90,9 +117,13 @@ export function NoteEditor({
   );
 
   useEffect(() => {
+    editorRef.current = editor;
+  }, [editor]);
+
+  useEffect(() => {
     if (!editor) return;
     if (lastLoadedNoteRef.current !== noteId) {
-      editor.commands.setContent(content, { contentType: 'markdown', emitUpdate: false });
+      editor.commands.setContent(normalizeLatexDelimiters(content), { contentType: 'markdown', emitUpdate: false });
       lastLoadedNoteRef.current = noteId;
     }
   }, [noteId, content, editor]);
@@ -100,7 +131,7 @@ export function NoteEditor({
   useEffect(() => {
     if (!editor) return;
     if (prevModeRef.current === 'source' && mode === 'wysiwyg') {
-      editor.commands.setContent(content, { contentType: 'markdown', emitUpdate: false });
+      editor.commands.setContent(normalizeLatexDelimiters(content), { contentType: 'markdown', emitUpdate: false });
     }
     prevModeRef.current = mode;
   }, [mode, content, editor]);
@@ -111,9 +142,9 @@ export function NoteEditor({
   }, [attachments, editor, mode]);
 
   useEffect(() => {
-    onEditorReady?.(mode === 'wysiwyg' ? editor : null);
-    return () => onEditorReady?.(null);
-  }, [editor, mode, onEditorReady]);
+    onEditorReadyRef.current?.(mode === 'wysiwyg' ? editor : null);
+    return () => onEditorReadyRef.current?.(null);
+  }, [editor, mode]);
 
   useEffect(() => {
     if (!onRegisterInsert) return;
@@ -143,7 +174,7 @@ export function NoteEditor({
     cmView.current?.destroy();
     cmView.current = new EditorView({
       doc: content,
-      extensions: [basicSetup, lineNumbers(), markdown()],
+      extensions: [basicSetup, markdown()],
       parent: cmRef.current,
       dispatch: (tr) => {
         cmView.current?.update([tr]);
@@ -182,11 +213,16 @@ export function NoteEditor({
   }, [content, mode]);
 
   if (mode === 'source') {
-    return <div ref={cmRef} className="fn-editor fn-editor--source" />;
+    return (
+      <div
+        ref={cmRef}
+        className={`fn-editor fn-editor--source${showLineNumbers ? '' : ' fn-editor--no-line-numbers'}`}
+      />
+    );
   }
 
   return (
-    <div className="fn-editor fn-editor--wysiwyg fn-editor--lined">
+    <div className={`fn-editor fn-editor--wysiwyg${showLineNumbers ? ' fn-editor--lined' : ''}`}>
       <EditorContent editor={editor} />
     </div>
   );

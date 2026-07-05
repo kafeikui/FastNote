@@ -23,6 +23,26 @@ import {
   NOTE_WIDTH_DEFAULT,
   loadSidebarCollapsed,
   saveSidebarCollapsed,
+  loadSidebarWidth,
+  saveSidebarWidth,
+  SIDEBAR_WIDTH_MIN,
+  SIDEBAR_WIDTH_MAX,
+  SIDEBAR_WIDTH_DEFAULT,
+  loadCollapsedFolderIds,
+  saveCollapsedFolderIds,
+  loadTreeSortMode,
+  saveTreeSortMode,
+  loadShowLineNumbers,
+  saveShowLineNumbers,
+  loadTabState,
+  saveTabState,
+  defaultTabState,
+  loadGroupSplitRatio,
+  saveGroupSplitRatio,
+  GROUP_SPLIT_RATIO_MIN,
+  GROUP_SPLIT_RATIO_MAX,
+  loadShortcuts,
+  saveShortcuts,
   loadStorageNamespace,
   saveStorageNamespace,
   loadStoragePathLabel,
@@ -50,8 +70,9 @@ import {
 import { NoteEditor, flushEditorMarkdown } from '@fastnote/editor';
 import { IMClient, verifyExchangeKeypair } from '@fastnote/im';
 import { NoteSearchIndex } from '@fastnote/search';
-import type { ChatMessage, EditorMode, NodeType, NoteAttachment, NoteNode, UserSession, TreeDropPosition, ChatAttachmentRef, ChatWireAttachment } from '@fastnote/shared';
-import { META_KEYS, downloadBlob, isEditableContentNode, computeTreeMove, buildAttachmentMarkdownRef, decodeChatWire, toStoredPayload, storedToChatMessage, serverUrlNeedsReload } from '@fastnote/shared';
+import type { ChatMessage, EditorMode, NodeType, NoteAttachment, NoteNode, UserSession, TreeDropPosition, ChatAttachmentRef, ChatWireAttachment, TabGroupState, ShortcutBindings } from '@fastnote/shared';
+import { META_KEYS, downloadBlob, isEditableContentNode, computeTreeMove, applySortMode, buildAttachmentMarkdownRef, decodeChatWire, toStoredPayload, storedToChatMessage, serverUrlNeedsReload, matchesShortcut, expandAttachmentRefsForExport } from '@fastnote/shared';
+import type { TreeSortMode } from '@fastnote/shared';
 import { createStorage } from '@fastnote/storage';
 import { SyncClient } from '@fastnote/sync';
 import { I18nProvider, loadLocale, saveLocale, translate, type Locale, type TFunction } from '@fastnote/i18n';
@@ -74,6 +95,8 @@ import {
   AppShell,
   UnlockScreen,
   NoteTree,
+  TreeToolbar,
+  TabBar,
   EditorToolbar,
   SettingsModal,
   AuthModal,
@@ -151,11 +174,31 @@ export function VaultApp() {
   const [isFirstRun, setIsFirstRun] = useState<boolean | null>(null);
   const [keys, setKeys] = useState<VaultKeys | null>(null);
   const [notes, setNotes] = useState<NoteNode[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
+  const [unlockProgress, setUnlockProgress] = useState<{ current: number; total: number } | null>(null);
+  const [isLocking, setIsLocking] = useState(false);
+  const [groups, setGroups] = useState<TabGroupState[]>(() => loadTabState().groups);
+  const [activeGroupId, setActiveGroupId] = useState<string>(() => loadTabState().activeGroupId);
+  const [editorModeByGroup, setEditorModeByGroup] = useState<Record<string, EditorMode>>({});
+  const [tiptapEditorByGroup, setTiptapEditorByGroup] = useState<Record<string, Editor | null>>({});
+  const activeGroup = groups.find((g) => g.id === activeGroupId) ?? groups[0];
+  const activeId = activeGroup?.activeTabId ?? null;
+  useEffect(() => {
+    if (!groups.some((g) => g.id === activeGroupId)) {
+      setActiveGroupId(groups[0]?.id ?? 'g1');
+    }
+  }, [groups, activeGroupId]);
+  // Guards against a race where the intermediate render right after
+  // `setKeys(derived)` (but before the async `restoreTabState` call inside
+  // `loadNotes` has run) would otherwise persist the still-empty/default
+  // `groups` left over from the previous lock, clobbering the real saved
+  // tab state before it gets a chance to be restored.
+  const tabStateReadyRef = useRef(false);
+  useEffect(() => {
+    if (!keys || !tabStateReadyRef.current) return;
+    saveTabState({ groups, activeGroupId }, loadStorageNamespace());
+  }, [keys, groups, activeGroupId]);
   const [appView, setAppView] = useState<AppView>('notes');
-  const [editorMode, setEditorMode] = useState<EditorMode>('wysiwyg');
   const [searchQuery, setSearchQuery] = useState('');
-  const [tiptapEditor, setTiptapEditor] = useState<Editor | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showAuth, setShowAuth] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
@@ -194,6 +237,30 @@ export function VaultApp() {
       saveSidebarCollapsed(next);
       return next;
     });
+  }, []);
+  const [sidebarWidth, setSidebarWidth] = useState(() => loadSidebarWidth());
+  const [collapsedFolderIds, setCollapsedFolderIds] = useState<Set<string>>(() => loadCollapsedFolderIds());
+  const [treeSortMode, setTreeSortMode] = useState<TreeSortMode>(() => loadTreeSortMode());
+  const [revealId, setRevealId] = useState<string | null>(null);
+  const [showLineNumbers, setShowLineNumbers] = useState(() => loadShowLineNumbers());
+  const toggleLineNumbers = useCallback(() => {
+    setShowLineNumbers((prev) => {
+      const next = !prev;
+      saveShowLineNumbers(next);
+      return next;
+    });
+  }, []);
+  const sidebarWidthRef = useRef(sidebarWidth);
+  sidebarWidthRef.current = sidebarWidth;
+  const sidebarDraggedRef = useRef(false);
+  const [groupSplitRatio, setGroupSplitRatio] = useState(() => loadGroupSplitRatio());
+  const groupSplitRatioRef = useRef(groupSplitRatio);
+  groupSplitRatioRef.current = groupSplitRatio;
+  const [shortcuts, setShortcuts] = useState<ShortcutBindings>(() => loadShortcuts());
+  const [renameRequestId, setRenameRequestId] = useState<string | null>(null);
+  const handleShortcutsChange = useCallback((next: ShortcutBindings) => {
+    setShortcuts(next);
+    saveShortcuts(next);
   }, []);
 
   useEffect(() => {
@@ -742,21 +809,65 @@ export function VaultApp() {
     [ensureImReady, session, serverUrl, t],
   );
 
+  const pruneStaleTabs = useCallback((survivingIds: Set<string>) => {
+    setGroups((prev) => {
+      const next = prev.map((g) => {
+        const tabs = g.tabs.filter((tb) => survivingIds.has(tb.id));
+        const activeTabId =
+          g.activeTabId && survivingIds.has(g.activeTabId) ? g.activeTabId : (tabs[0]?.id ?? null);
+        return { ...g, tabs, activeTabId };
+      });
+      const collapsed = next.length > 1 ? next.filter((g) => g.tabs.length > 0) : next;
+      return collapsed.length > 0 ? collapsed : [{ id: 'g1', tabs: [], activeTabId: null }];
+    });
+  }, []);
+
+  const restoreTabState = useCallback((decrypted: NoteNode[]) => {
+    const survivingIds = new Set(decrypted.filter((n) => isEditableContentNode(n)).map((n) => n.id));
+    const stored = loadTabState(loadStorageNamespace());
+    const filteredGroups: TabGroupState[] = stored.groups.map((g) => {
+      const tabs = g.tabs.filter((tb) => survivingIds.has(tb.id));
+      const activeTabId = g.activeTabId && survivingIds.has(g.activeTabId) ? g.activeTabId : (tabs[0]?.id ?? null);
+      return { ...g, tabs, activeTabId };
+    });
+    let finalGroups = filteredGroups.length > 0 ? filteredGroups : defaultTabState().groups;
+    if (!finalGroups.some((g) => g.tabs.length > 0)) {
+      const firstId = decrypted.find((n) => isEditableContentNode(n))?.id;
+      finalGroups = firstId
+        ? [{ id: 'g1', tabs: [{ id: firstId, pinned: false }], activeTabId: firstId }]
+        : [{ id: 'g1', tabs: [], activeTabId: null }];
+    }
+    setGroups(finalGroups);
+    setActiveGroupId(
+      stored.activeGroupId && finalGroups.some((g) => g.id === stored.activeGroupId)
+        ? stored.activeGroupId
+        : (finalGroups[0]?.id ?? 'g1'),
+    );
+    tabStateReadyRef.current = true;
+  }, []);
+
   const loadNotes = useCallback(
     async (derived: VaultKeys) => {
       await loadSearchSnapshot(derived.indexKey);
       const stubs = await storage.listNotes();
+      const total = stubs.length;
       const decrypted: NoteNode[] = [];
-      for (const stub of stubs) {
-        const full = await storage.loadNoteDecrypted(stub.id, derived.notesKey);
+      // Decrypting is CPU-bound (pure-JS AES-GCM) and can take a while for large vaults, so we
+      // periodically yield back to the browser between batches. This keeps the tab responsive and
+      // lets the unlock-screen's progress bar actually repaint instead of the UI looking frozen.
+      if (total > 0) setUnlockProgress({ current: 0, total });
+      for (let i = 0; i < stubs.length; i += 1) {
+        const full = await storage.loadNoteDecrypted(stubs[i].id, derived.notesKey);
         if (full) decrypted.push(full);
+        if (total > 0 && (i % 6 === 5 || i === stubs.length - 1)) {
+          setUnlockProgress({ current: i + 1, total });
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
       }
+      setUnlockProgress(null);
       setNotes(decrypted);
       rebuildSearchIndex(decrypted);
-      setActiveId((prev) => {
-        if (prev && decrypted.some((n) => n.id === prev)) return prev;
-        return decrypted.find((n) => isEditableContentNode(n))?.id ?? null;
-      });
+      restoreTabState(decrypted);
       const priv = await loadExchangePrivate(derived.masterKey);
       if (priv) void priv;
       if (session) {
@@ -778,7 +889,7 @@ export function VaultApp() {
         await loadChatHistory(derived);
       }
     },
-    [storage, loadSearchSnapshot, session, initIM, rebuildSearchIndex, serverUrl, loadChatHistory],
+    [storage, loadSearchSnapshot, session, initIM, rebuildSearchIndex, serverUrl, loadChatHistory, restoreTabState],
   );
 
   const handleCreateVault = async (password: string) => {
@@ -789,12 +900,16 @@ export function VaultApp() {
     await storage.setMeta(META_KEYS.passwordVerifier, toBase64(derived.passwordVerifier));
     await setupIdentityKeys(derived);
     keysRef.current = derived;
+    // Load (and decrypt) notes before flipping `keys`/switching away from the unlock screen, so
+    // the main app shell never mounts with an empty note tree mid-decrypt (previously this showed
+    // as a long blank sidebar for larger vaults). The unlock screen keeps showing its progress bar
+    // in the meantime.
+    await loadNotes(derived);
     setKeys(derived);
     setIsFirstRun(false);
     setVaultListItems((prev) =>
       prev.map((v) => (v.id === activeVaultId ? { ...v, initialized: true } : v)),
     );
-    await loadNotes(derived);
   };
 
   const handleUnlockLocal = async (password: string) => {
@@ -807,24 +922,64 @@ export function VaultApp() {
     }
     await setupIdentityKeys(derived);
     keysRef.current = derived;
-    setKeys(derived);
     await loadNotes(derived);
+    setKeys(derived);
   };
 
   const handleLock = async () => {
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    if (keys) await saveSearchSnapshot(keys.indexKey);
-    imRef.current?.disconnect();
-    imRef.current = null;
-    setKeys(null);
-    setNotes([]);
-    setChatMessages([]);
-    setActiveId(null);
-    setActivePeerId(null);
-    setActivePeerName(null);
-    setTiptapEditor(null);
-    setExpandedSearch(false);
+    setIsLocking(true);
+    // Let the "locking…" overlay actually paint before the (synchronous) teardown below, which
+    // can otherwise make the app feel like it hangs for a moment on vaults with lots of open tabs.
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    try {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+      if (keys) await saveSearchSnapshot(keys.indexKey);
+      imRef.current?.disconnect();
+      imRef.current = null;
+      tabStateReadyRef.current = false;
+      setKeys(null);
+      setNotes([]);
+      setChatMessages([]);
+      setGroups(defaultTabState().groups);
+      setActiveGroupId(defaultTabState().activeGroupId);
+      setEditorModeByGroup({});
+      setTiptapEditorByGroup({});
+      setActivePeerId(null);
+      setActivePeerName(null);
+      setExpandedSearch(false);
+    } finally {
+      setIsLocking(false);
+    }
   };
+
+  const handleLockRef = useRef(handleLock);
+  handleLockRef.current = handleLock;
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
+  const shortcutsRef = useRef(shortcuts);
+  shortcutsRef.current = shortcuts;
+  const modalOpenRef = useRef(false);
+  modalOpenRef.current = showSettings || showAuth || showAbout;
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (modalOpenRef.current) return;
+      const bindings = shortcutsRef.current;
+      if (matchesShortcut(e, bindings.lockVault)) {
+        e.preventDefault();
+        void handleLockRef.current();
+        return;
+      }
+      if (matchesShortcut(e, bindings.renameNote)) {
+        const id = activeIdRef.current;
+        if (!id) return;
+        e.preventDefault();
+        setRenameRequestId(id);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   const persistNote = useCallback(
     async (note: NoteNode) => {
@@ -876,7 +1031,7 @@ export function VaultApp() {
     const node = newNode(nodeType, parentId, sortOrder, locale);
     await saveNoteNow(node);
     if (isEditableContentNode(node)) {
-      setActiveId(node.id);
+      openNote(node.id, { pin: true });
       setAppView('notes');
     }
   };
@@ -1113,12 +1268,224 @@ export function VaultApp() {
     const next = computeTreeMove(notes, dragId, targetId, position);
     if (!next) return;
     setNotes(next);
+    // Manual drag reordering always reverts the sort mode back to "manual".
+    if (treeSortMode !== 'manual') {
+      setTreeSortMode('manual');
+      saveTreeSortMode('manual');
+    }
     for (const n of next) {
       const prev = notes.find((x) => x.id === n.id);
       if (!prev || prev.parentId !== n.parentId || prev.sortOrder !== n.sortOrder) {
         await persistNote(n);
       }
     }
+  };
+
+  const handleSidebarToggleClick = useCallback(() => {
+    if (sidebarDraggedRef.current) {
+      sidebarDraggedRef.current = false;
+      return;
+    }
+    toggleSidebar();
+  }, [toggleSidebar]);
+
+  const handleSidebarResizeStart = (e: ReactMouseEvent) => {
+    if (sidebarCollapsed) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = sidebarWidthRef.current;
+    sidebarDraggedRef.current = false;
+
+    const onMove = (ev: MouseEvent) => {
+      const delta = ev.clientX - startX;
+      if (Math.abs(delta) > 4) sidebarDraggedRef.current = true;
+      const next = Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, startWidth + delta));
+      setSidebarWidth(next);
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.classList.remove('fn-resizing-sidebar');
+      if (sidebarDraggedRef.current) saveSidebarWidth(sidebarWidthRef.current);
+    };
+    document.body.classList.add('fn-resizing-sidebar');
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  const handleToggleFolderCollapse = useCallback((id: string) => {
+    setCollapsedFolderIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      saveCollapsedFolderIds(next);
+      return next;
+    });
+  }, []);
+
+  const handleExpandAll = useCallback(() => {
+    const empty = new Set<string>();
+    saveCollapsedFolderIds(empty);
+    setCollapsedFolderIds(empty);
+  }, []);
+
+  const handleCollapseAll = useCallback(() => {
+    setCollapsedFolderIds(() => {
+      const all = new Set(notes.filter((n) => n.nodeType === 'folder' && !n.deleted).map((n) => n.id));
+      saveCollapsedFolderIds(all);
+      return all;
+    });
+  }, [notes]);
+
+  const handleTreeSortMode = useCallback(
+    (mode: TreeSortMode) => {
+      setTreeSortMode(mode);
+      saveTreeSortMode(mode);
+      if (mode === 'manual') return;
+      const next = applySortMode(notes, mode);
+      if (next === notes) return;
+      setNotes(next);
+      next.forEach((n) => {
+        const prev = notes.find((x) => x.id === n.id);
+        if (!prev || prev.sortOrder !== n.sortOrder) {
+          void persistNote(n);
+        }
+      });
+    },
+    [notes, persistNote],
+  );
+
+  const revealNoteInTree = useCallback(
+    (id: string) => {
+      const ancestors: string[] = [];
+      let current = notes.find((n) => n.id === id);
+      while (current?.parentId) {
+        ancestors.push(current.parentId);
+        current = notes.find((n) => n.id === current!.parentId);
+      }
+      if (ancestors.length > 0) {
+        setCollapsedFolderIds((prev) => {
+          if (!ancestors.some((a) => prev.has(a))) return prev;
+          const next = new Set(prev);
+          ancestors.forEach((a) => next.delete(a));
+          saveCollapsedFolderIds(next);
+          return next;
+        });
+      }
+      setRevealId(id);
+      setTimeout(() => setRevealId((prev) => (prev === id ? null : prev)), 1500);
+    },
+    [notes],
+  );
+
+  const openNoteInGroup = (groupId: string, id: string, opts?: { pin?: boolean }) => {
+    const existingGroup = groups.find((g) => g.tabs.some((tb) => tb.id === id));
+    if (existingGroup) {
+      setGroups((prev) =>
+        prev.map((g) => {
+          if (g.id !== existingGroup.id) return g;
+          const tabs = opts?.pin ? g.tabs.map((tb) => (tb.id === id ? { ...tb, pinned: true } : tb)) : g.tabs;
+          return { ...g, tabs, activeTabId: id };
+        }),
+      );
+      setActiveGroupId(existingGroup.id);
+      return;
+    }
+    setGroups((prev) =>
+      prev.map((g) => {
+        if (g.id !== groupId) return g;
+        if (opts?.pin) {
+          return { ...g, tabs: [...g.tabs, { id, pinned: true }], activeTabId: id };
+        }
+        const previewIdx = g.tabs.findIndex((tb) => !tb.pinned);
+        if (previewIdx !== -1) {
+          const tabs = [...g.tabs];
+          tabs[previewIdx] = { id, pinned: false };
+          return { ...g, tabs, activeTabId: id };
+        }
+        return { ...g, tabs: [...g.tabs, { id, pinned: false }], activeTabId: id };
+      }),
+    );
+    setActiveGroupId(groupId);
+  };
+
+  const openNote = (id: string, opts?: { pin?: boolean }) => openNoteInGroup(activeGroupId, id, opts);
+
+  const selectTabInGroup = (groupId: string, tabId: string) => {
+    setGroups((prev) => prev.map((g) => (g.id === groupId ? { ...g, activeTabId: tabId } : g)));
+    setActiveGroupId(groupId);
+  };
+
+  const pinTabInGroup = (groupId: string, tabId: string) => {
+    setGroups((prev) =>
+      prev.map((g) =>
+        g.id === groupId ? { ...g, tabs: g.tabs.map((tb) => (tb.id === tabId ? { ...tb, pinned: true } : tb)) } : g,
+      ),
+    );
+  };
+
+  const closeTabInGroup = (groupId: string, tabId: string) => {
+    const idx = groups.findIndex((g) => g.id === groupId);
+    if (idx === -1) return;
+    const group = groups[idx];
+    const tabIdx = group.tabs.findIndex((tb) => tb.id === tabId);
+    if (tabIdx === -1) return;
+    const tabs = group.tabs.filter((tb) => tb.id !== tabId);
+    let activeTabId = group.activeTabId;
+    if (activeTabId === tabId) {
+      activeTabId = (tabs[tabIdx] ?? tabs[tabIdx - 1] ?? null)?.id ?? null;
+    }
+    let next = groups.map((g, i) => (i === idx ? { ...g, tabs, activeTabId } : g));
+    if (tabs.length === 0 && next.length > 1) {
+      next = next.filter((g) => g.id !== groupId);
+      if (activeGroupId === groupId) setActiveGroupId(next[0]?.id ?? 'g1');
+    }
+    setGroups(next);
+  };
+
+  const reorderTabInGroup = (groupId: string, dragId: string, targetId: string, position: 'before' | 'after') => {
+    setGroups((prev) =>
+      prev.map((g) => {
+        if (g.id !== groupId) return g;
+        const tabs = [...g.tabs];
+        const dragIdx = tabs.findIndex((tb) => tb.id === dragId);
+        if (dragIdx === -1) return g;
+        const [dragTab] = tabs.splice(dragIdx, 1);
+        let targetIdx = tabs.findIndex((tb) => tb.id === targetId);
+        if (targetIdx === -1) {
+          tabs.push(dragTab);
+          return { ...g, tabs };
+        }
+        if (position === 'after') targetIdx += 1;
+        tabs.splice(targetIdx, 0, dragTab);
+        return { ...g, tabs };
+      }),
+    );
+  };
+
+  const splitTabToOtherGroup = (fromGroupId: string, tabId: string) => {
+    const fromIdx = groups.findIndex((g) => g.id === fromGroupId);
+    if (fromIdx === -1) return;
+    const fromGroup = groups[fromIdx];
+    const tab = fromGroup.tabs.find((tb) => tb.id === tabId);
+    if (!tab) return;
+    const otherGroup = groups.find((g) => g.id !== fromGroupId);
+    const targetGroupId = otherGroup ? otherGroup.id : fromGroupId === 'g1' ? 'g2' : 'g1';
+    let next: TabGroupState[] = otherGroup ? [...groups] : [...groups, { id: targetGroupId, tabs: [], activeTabId: null }];
+
+    const fromTabs = fromGroup.tabs.filter((tb) => tb.id !== tabId);
+    const fromActiveTabId = fromGroup.activeTabId === tabId ? (fromTabs[0]?.id ?? null) : fromGroup.activeTabId;
+
+    next = next.map((g) => {
+      if (g.id === fromGroupId) return { ...g, tabs: fromTabs, activeTabId: fromActiveTabId };
+      if (g.id === targetGroupId) return { ...g, tabs: [...g.tabs, tab], activeTabId: tab.id };
+      return g;
+    });
+    if (fromTabs.length === 0 && next.length > 1) {
+      next = next.filter((g) => g.id !== fromGroupId);
+    }
+    setGroups(next);
+    setActiveGroupId(targetGroupId);
   };
 
   const handleDelete = async (id: string) => {
@@ -1129,8 +1496,9 @@ export function VaultApp() {
     const updated = buildUpdated({ ...target, deleted: true }, { deleted: true });
     await storage.saveNote(updated, keys.notesKey);
     upsertSearch(updated);
-    setNotes((prev) => prev.filter((n) => n.id !== id && n.parentId !== id));
-    if (activeId === id) setActiveId(null);
+    const remaining = notes.filter((n) => n.id !== id && n.parentId !== id);
+    setNotes(remaining);
+    pruneStaleTabs(new Set(remaining.filter((n) => isEditableContentNode(n)).map((n) => n.id)));
     void syncAttachmentsIfOnline();
   };
 
@@ -1339,6 +1707,9 @@ export function VaultApp() {
       keysRef.current = derived;
       setKeys(derived);
       setIsFirstRun(false);
+      // Brand-new cloud account: there is no prior tab state to restore, so
+      // this session's tabs are immediately eligible for persistence.
+      tabStateReadyRef.current = true;
       await uploadKeysIfNeeded(userSession, derived, nextServerUrl);
       await initIM(derived, userSession);
       await runCloudSync(derived, userSession, [], nextServerUrl);
@@ -1554,21 +1925,22 @@ export function VaultApp() {
     );
   };
 
-  const handleEditorMode = (next: EditorMode) => {
-    if (editorMode === 'wysiwyg' && next === 'source' && activeId) {
-      const note = notes.find((n) => n.id === activeId && n.nodeType === 'note');
+  const handleEditorModeForGroup = (groupId: string, next: EditorMode) => {
+    const group = groups.find((g) => g.id === groupId);
+    const current = editorModeByGroup[groupId] ?? 'wysiwyg';
+    if (current === 'wysiwyg' && next === 'source' && group?.activeTabId) {
+      const note = notes.find((n) => n.id === group.activeTabId && n.nodeType === 'note');
       if (note) {
-        const md = flushEditorMarkdown(tiptapEditor);
+        const md = flushEditorMarkdown(tiptapEditorByGroup[groupId] ?? null);
         if (md !== null) {
           updateNoteById(note.id, { contentMd: md });
         }
       }
     }
-    setEditorMode(next);
+    setEditorModeByGroup((prev) => ({ ...prev, [groupId]: next }));
   };
-
-  const activeContent =
-    notes.find((n) => n.id === activeId && isEditableContentNode(n)) ?? null;
+  const contentForGroup = (group: TabGroupState) =>
+    notes.find((n) => n.id === group.activeTabId && isEditableContentNode(n)) ?? null;
   const searchResults = useMemo(
     () => (searchQuery ? searchIndexRef.current.search(searchQuery) : []),
     [searchQuery, searchTick],
@@ -1611,6 +1983,200 @@ export function VaultApp() {
   const activeVaultLabel =
     vaultRegistry.find((v) => v.id === activeVaultId)?.label ?? activeVault?.label ?? t('vaultApp.defaultVaultLabel');
 
+  const handleGroupDividerResizeStart = (e: ReactMouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const container = e.currentTarget.parentElement;
+    if (!container) return;
+    const totalWidth = container.getBoundingClientRect().width;
+    const startX = e.clientX;
+    const startRatio = groupSplitRatioRef.current;
+
+    const onMove = (ev: MouseEvent) => {
+      const delta = ev.clientX - startX;
+      const next = Math.min(GROUP_SPLIT_RATIO_MAX, Math.max(GROUP_SPLIT_RATIO_MIN, startRatio + delta / totalWidth));
+      setGroupSplitRatio(next);
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.classList.remove('fn-resizing-group');
+      saveGroupSplitRatio(groupSplitRatioRef.current);
+    };
+    document.body.classList.add('fn-resizing-group');
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  const renderGroupPane = (group: TabGroupState, idx: number) => {
+    const isFocused = group.id === activeGroupId;
+    const content = contentForGroup(group);
+    const mode = editorModeByGroup[group.id] ?? 'wysiwyg';
+    const groupEditor = tiptapEditorByGroup[group.id] ?? null;
+    const flexGrow = groups.length === 2 ? (idx === 0 ? groupSplitRatio : 1 - groupSplitRatio) : 1;
+    return (
+      <div
+        key={group.id}
+        className={`fn-tab-group${isFocused ? ' fn-tab-group--focused' : ''}`}
+        style={{ flex: `${flexGrow} 1 0%` }}
+        onMouseDownCapture={() => {
+          if (activeGroupId !== group.id) setActiveGroupId(group.id);
+        }}
+      >
+        <TabBar
+          tabs={group.tabs}
+          activeTabId={group.activeTabId}
+          notes={notes}
+          canSplit
+          onSelectTab={(tabId) => selectTabInGroup(group.id, tabId)}
+          onPinTab={(tabId) => pinTabInGroup(group.id, tabId)}
+          onCloseTab={(tabId) => closeTabInGroup(group.id, tabId)}
+          onSplitTab={(tabId) => splitTabToOtherGroup(group.id, tabId)}
+          onReorderTab={(dragId, targetId, position) => reorderTabInGroup(group.id, dragId, targetId, position)}
+        />
+        {content?.nodeType === 'table' ? (
+          <div className="fn-note" style={{ maxWidth: noteWidth }}>
+            {renderNoteResizeHandle()}
+            <input
+              className="fn-note__title"
+              value={content.title}
+              onChange={(e) => updateNoteById(content.id, { title: e.target.value })}
+              placeholder={t('vaultApp.tableTitlePlaceholder')}
+            />
+            <div className="fn-table-export">
+              <button
+                type="button"
+                onClick={() =>
+                  downloadTextFile(
+                    `${content.title || 'table'}.csv`,
+                    exportTableCsv(content.title, parseTableDocument(content.contentMd, locale), attachmentLookup),
+                    'text/csv',
+                  )
+                }
+              >
+                {t('vaultApp.exportCsv')}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!keys) return;
+                  const f = exportEncryptedTableFile(content.title, parseTableDocument(content.contentMd, locale), keys.notesKey);
+                  downloadBinaryFile(`${content.title || 'table'}.fnxt`, buildFnxtBytes(f), 'application/octet-stream');
+                }}
+              >
+                {t('vaultApp.exportFnxt')}
+              </button>
+              <label className="fn-import-btn">
+                {t('vaultApp.importCsv')}
+                <input
+                  type="file"
+                  accept=".csv,text/csv"
+                  hidden
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    void importCsvFile(file, locale)
+                      .then((doc) => updateNoteById(content.id, { contentMd: serializeTable(doc) }))
+                      .catch((err) => alert(err instanceof Error ? err.message : t('vaultApp.csvImportFailed')));
+                    e.target.value = '';
+                  }}
+                />
+              </label>
+              <label className="fn-import-btn">
+                {t('vaultApp.importFnxt')}
+                <input
+                  type="file"
+                  accept=".fnxt"
+                  hidden
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (!file || !keys) return;
+                    void importFnxtFile(file, keys.notesKey, locale).then(({ doc }) => updateNoteById(content.id, { contentMd: serializeTable(doc) }));
+                    e.target.value = '';
+                  }}
+                />
+              </label>
+            </div>
+            <TableEditor
+              document={parseTableDocument(content.contentMd, locale)}
+              onChange={(doc) => updateNoteById(content.id, { contentMd: serializeTable(doc) })}
+              attachments={isFocused ? attachments : []}
+              onRegisterInsert={
+                isFocused
+                  ? (insert) => {
+                      insertTableRef.current = insert;
+                    }
+                  : undefined
+              }
+              onAttachmentDownload={handleAttachmentDownload}
+              onAttachmentEdit={handleAttachmentEdit}
+              repeatActionShortcut={shortcuts.tableRepeatAction}
+            />
+            {isFocused && renderAttachmentsPanel(content.id, true)}
+          </div>
+        ) : content?.nodeType === 'note' ? (
+          <div className="fn-note" style={{ maxWidth: noteWidth }}>
+            {renderNoteResizeHandle()}
+            <input
+              className="fn-note__title"
+              value={content.title}
+              onChange={(e) => updateNoteById(content.id, { title: e.target.value })}
+              placeholder={t('vaultApp.notePlaceholder')}
+            />
+            <div className="fn-tab-group__controls">
+              <button type="button" className={mode === 'wysiwyg' ? 'active' : ''} onClick={() => handleEditorModeForGroup(group.id, 'wysiwyg')}>
+                {t('vaultApp.modeWysiwyg')}
+              </button>
+              <button type="button" className={mode === 'source' ? 'active' : ''} onClick={() => handleEditorModeForGroup(group.id, 'source')}>
+                {t('vaultApp.modeSource')}
+              </button>
+              <button
+                type="button"
+                className={showLineNumbers ? 'active' : ''}
+                onClick={toggleLineNumbers}
+                title={t('vaultApp.toggleLineNumbers')}
+              >
+                #
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const plain = expandAttachmentRefsForExport(content.contentMd, attachmentLookup);
+                  downloadTextFile(`${content.title || t('common.untitled')}.md`, plain, 'text/markdown');
+                }}
+                title={t('vaultApp.exportNoteMd')}
+              >
+                ⇩
+              </button>
+            </div>
+            <EditorToolbar editor={groupEditor} mode={mode} />
+            <NoteEditor
+              key={content.id}
+              noteId={content.id}
+              mode={mode}
+              content={content.contentMd}
+              onChange={(md) => updateNoteById(content.id, { contentMd: md })}
+              onEditorReady={(editor) => setTiptapEditorByGroup((prev) => ({ ...prev, [group.id]: editor }))}
+              onRegisterInsert={
+                isFocused
+                  ? (insert) => {
+                      insertDocRef.current = insert;
+                    }
+                  : undefined
+              }
+              attachments={isFocused ? attachments : []}
+              onAttachmentDownload={handleAttachmentDownload}
+              onAttachmentEdit={handleAttachmentEdit}
+              showLineNumbers={showLineNumbers}
+            />
+            {isFocused && renderAttachmentsPanel(content.id, true)}
+          </div>
+        ) : (
+          <div className="fn-empty fn-empty--inline">{t('vaultApp.emptySelectOrCreate')}</div>
+        )}
+      </div>
+    );
+  };
+
   if (isFirstRun === null) return <div className="fn-loading">{t('vaultApp.loading')}</div>;
   if (!keys) {
     return (
@@ -1626,6 +2192,7 @@ export function VaultApp() {
           onCreateVault={handleCreateVault}
           onUnlockLocal={handleUnlockLocal}
           onCloudSync={handleCloudSync}
+          progress={unlockProgress}
         />
       </I18nProvider>
     );
@@ -1633,6 +2200,12 @@ export function VaultApp() {
 
   return (
     <I18nProvider locale={locale}>
+      {isLocking && (
+        <div className="fn-locking-overlay">
+          <div className="fn-locking-overlay__spinner" />
+          <span>{t('vaultApp.locking')}</span>
+        </div>
+      )}
       <input
         ref={importFolderInputRef}
         type="file"
@@ -1677,7 +2250,9 @@ export function VaultApp() {
       />
       <AppShell
         sidebarCollapsed={sidebarCollapsed}
-        onToggleSidebar={toggleSidebar}
+        onToggleSidebar={handleSidebarToggleClick}
+        sidebarWidth={sidebarWidth}
+        onSidebarResizeStart={handleSidebarResizeStart}
         toolbar={
           <div className="fn-toolbar">
             <button type="button" className={appView === 'notes' ? 'active' : ''} onClick={() => setAppView('notes')}>
@@ -1707,12 +2282,6 @@ export function VaultApp() {
                   <button type="button" title={t('vaultApp.importFolderTitle')} onClick={() => openImportFolder(null)}>{t('vaultApp.importFolder')}</button>
                   <button type="button" title={t('vaultApp.importFolderForceTitle')} onClick={() => openImportFolder(null, true)}>{t('vaultApp.importFolderForce')}</button>
                 </DropdownMenu>
-                {activeContent?.nodeType === 'note' && (
-                  <>
-                    <button type="button" className={editorMode === 'wysiwyg' ? 'active' : ''} onClick={() => handleEditorMode('wysiwyg')}>{t('vaultApp.modeWysiwyg')}</button>
-                    <button type="button" className={editorMode === 'source' ? 'active' : ''} onClick={() => handleEditorMode('source')}>{t('vaultApp.modeSource')}</button>
-                  </>
-                )}
                 <input className="fn-search" placeholder={t('vaultApp.searchPlaceholder')} value={searchQuery} onChange={(e) => { setSearchQuery(e.target.value); setExpandedSearch(!!e.target.value); }} />
               </>
             )}
@@ -1742,7 +2311,16 @@ export function VaultApp() {
               ) : (
                 searchResults.map((r) => (
                   <li key={r.id}>
-                    <button type="button" className="fn-search-result" onClick={() => { setActiveId(r.id); setExpandedSearch(false); setSearchQuery(''); }}>
+                    <button
+                      type="button"
+                      className="fn-search-result"
+                      onClick={() => {
+                        openNote(r.id);
+                        setExpandedSearch(false);
+                        setSearchQuery('');
+                        revealNoteInTree(r.id);
+                      }}
+                    >
                       <span className="fn-search-result__title">{r.title || t('common.untitled')}</span>
                       {r.snippet && <span className="fn-search-result__snippet">{r.snippet}</span>}
                     </button>
@@ -1751,18 +2329,32 @@ export function VaultApp() {
               )}
             </ul>
           ) : (
-            <NoteTree
-              notes={notes}
-              activeId={activeId}
-              onSelect={setActiveId}
-              onCreateFolder={(pid) => void handleCreate('folder', pid)}
-              onCreateNote={(pid) => void handleCreate('note', pid)}
-              onCreateTable={(pid) => void handleCreate('table', pid)}
-              onImportFolder={(pid) => openImportFolder(pid)}
-              onRename={(id, title) => updateNoteById(id, { title })}
-              onDelete={(id) => void handleDelete(id)}
-              onMove={(dragId, targetId, position) => void handleMove(dragId, targetId, position)}
-            />
+            <>
+              <TreeToolbar
+                sortMode={treeSortMode}
+                onSortMode={handleTreeSortMode}
+                onExpandAll={handleExpandAll}
+                onCollapseAll={handleCollapseAll}
+              />
+              <NoteTree
+                notes={notes}
+                activeId={activeId}
+                collapsedIds={collapsedFolderIds}
+                onToggleCollapse={handleToggleFolderCollapse}
+                revealId={revealId}
+                onSelect={(id) => openNote(id)}
+                onOpenPinned={(id) => openNote(id, { pin: true })}
+                onCreateFolder={(pid) => void handleCreate('folder', pid)}
+                onCreateNote={(pid) => void handleCreate('note', pid)}
+                onCreateTable={(pid) => void handleCreate('table', pid)}
+                onImportFolder={(pid) => openImportFolder(pid)}
+                onRename={(id, title) => updateNoteById(id, { title })}
+                onDelete={(id) => void handleDelete(id)}
+                onMove={(dragId, targetId, position) => void handleMove(dragId, targetId, position)}
+                renameRequestId={renameRequestId}
+                onRenameRequestHandled={() => setRenameRequestId(null)}
+              />
+            </>
           )
         }
         main={
@@ -1778,69 +2370,21 @@ export function VaultApp() {
               onRemoveAttachment={handleChatAttachmentRemove}
               onLoadAttachmentPreview={handleChatAttachmentPreview}
             />
-          ) : activeContent?.nodeType === 'table' ? (
-            <div className="fn-note" style={{ maxWidth: noteWidth }}>
-              {renderNoteResizeHandle()}
-              <input className="fn-note__title" value={activeContent.title} onChange={(e) => updateNoteById(activeContent.id, { title: e.target.value })} placeholder={t('vaultApp.tableTitlePlaceholder')} />
-              <div className="fn-table-export">
-                <button type="button" onClick={() => downloadTextFile(`${activeContent.title || 'table'}.csv`, exportTableCsv(activeContent.title, parseTableDocument(activeContent.contentMd, locale), attachmentLookup), 'text/csv')}>{t('vaultApp.exportCsv')}</button>
-                <button type="button" onClick={() => { if (!keys) return; const f = exportEncryptedTableFile(activeContent.title, parseTableDocument(activeContent.contentMd, locale), keys.notesKey); downloadBinaryFile(`${activeContent.title || 'table'}.fnxt`, buildFnxtBytes(f), 'application/octet-stream'); }}>{t('vaultApp.exportFnxt')}</button>
-                <label className="fn-import-btn">
-                  {t('vaultApp.importCsv')}
-                  <input type="file" accept=".csv,text/csv" hidden onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (!file) return;
-                    void importCsvFile(file, locale)
-                      .then((doc) => updateNoteById(activeContent.id, { contentMd: serializeTable(doc) }))
-                      .catch((err) => alert(err instanceof Error ? err.message : t('vaultApp.csvImportFailed')));
-                    e.target.value = '';
-                  }} />
-                </label>
-                <label className="fn-import-btn">
-                  {t('vaultApp.importFnxt')}
-                  <input type="file" accept=".fnxt" hidden onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (!file || !keys) return;
-                    void importFnxtFile(file, keys.notesKey, locale).then(({ doc }) => updateNoteById(activeContent.id, { contentMd: serializeTable(doc) }));
-                    e.target.value = '';
-                  }} />
-                </label>
-              </div>
-              <TableEditor
-                document={parseTableDocument(activeContent.contentMd, locale)}
-                onChange={(doc) => updateNoteById(activeContent.id, { contentMd: serializeTable(doc) })}
-                attachments={attachments}
-                onRegisterInsert={(insert) => {
-                  insertTableRef.current = insert;
-                }}
-                onAttachmentDownload={handleAttachmentDownload}
-                onAttachmentEdit={handleAttachmentEdit}
-              />
-              {renderAttachmentsPanel(activeContent.id, true)}
-            </div>
-          ) : activeContent?.nodeType === 'note' ? (
-            <div className="fn-note" style={{ maxWidth: noteWidth }}>
-              {renderNoteResizeHandle()}
-              <input className="fn-note__title" value={activeContent.title} onChange={(e) => updateNoteById(activeContent.id, { title: e.target.value })} placeholder={t('vaultApp.notePlaceholder')} />
-              <EditorToolbar editor={tiptapEditor} mode={editorMode} />
-              <NoteEditor
-                key={activeContent.id}
-                noteId={activeContent.id}
-                mode={editorMode}
-                content={activeContent.contentMd}
-                onChange={(md) => updateNoteById(activeContent.id, { contentMd: md })}
-                onEditorReady={setTiptapEditor}
-                onRegisterInsert={(insert) => {
-                  insertDocRef.current = insert;
-                }}
-                attachments={attachments}
-                onAttachmentDownload={handleAttachmentDownload}
-                onAttachmentEdit={handleAttachmentEdit}
-              />
-              {renderAttachmentsPanel(activeContent.id, true)}
-            </div>
           ) : (
-            <div className="fn-empty fn-empty--inline">{t('vaultApp.emptySelectOrCreate')}</div>
+            <>
+              {groups.flatMap((group, idx) => [
+                ...(idx > 0
+                  ? [
+                      <div
+                        key={`divider-${group.id}`}
+                        className="fn-tab-group-divider"
+                        onMouseDown={handleGroupDividerResizeStart}
+                      />,
+                    ]
+                  : []),
+                renderGroupPane(group, idx),
+              ])}
+            </>
           )
         }
       />
@@ -1861,6 +2405,8 @@ export function VaultApp() {
           chatNotify={chatNotify}
           uiTheme={uiTheme}
           locale={locale}
+          shortcuts={shortcuts}
+          onShortcutsChange={handleShortcutsChange}
           onLocaleChange={handleLocaleChange}
           onClose={() => setShowSettings(false)}
           onSaveServer={commitServerUrl}
@@ -1886,7 +2432,7 @@ export function VaultApp() {
         />
       )}
       {showAuth && <AuthModal onClose={() => setShowAuth(false)} onRegister={handleRegister} onLogin={handleLogin} />}
-      {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}
+      {showAbout && <AboutModal onClose={() => setShowAbout(false)} version={__APP_VERSION__} />}
     </I18nProvider>
   );
 }

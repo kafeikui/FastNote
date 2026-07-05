@@ -119,6 +119,17 @@ export const HKDF_INFO = {
 
 export type EditorMode = 'wysiwyg' | 'source';
 
+export interface OpenTab {
+  id: string;
+  pinned: boolean;
+}
+
+export interface TabGroupState {
+  id: string;
+  tabs: OpenTab[];
+  activeTabId: string | null;
+}
+
 export interface NoteAttachment {
   id: string;
   noteId: string;
@@ -295,6 +306,103 @@ export function computeTreeMove(
 
 export function countChildren(notes: NoteNode[], folderId: string): number {
   return notes.filter((n) => n.parentId === folderId && !n.deleted).length;
+}
+
+export type TreeSortMode = 'manual' | 'name' | 'modified';
+
+/**
+ * Recomputes and persists sortOrder for every folder's children according to
+ * the given mode (name ascending, or modified time descending). Manual drag
+ * order is left untouched until the user picks a non-manual mode again.
+ */
+export function applySortMode(notes: NoteNode[], mode: Exclude<TreeSortMode, 'manual'>): NoteNode[] {
+  const parentIds = new Set<string | null>();
+  notes.forEach((n) => {
+    if (!n.deleted) parentIds.add(n.parentId);
+  });
+
+  let changed = false;
+  const result = notes.map((n) => ({ ...n }));
+
+  parentIds.forEach((parentId) => {
+    const siblings = result
+      .filter((n) => n.parentId === parentId && !n.deleted)
+      .sort((a, b) => {
+        if (mode === 'name') return a.title.localeCompare(b.title);
+        return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+      });
+    siblings.forEach((node, index) => {
+      const idx = result.findIndex((n) => n.id === node.id);
+      if (idx !== -1 && result[idx].sortOrder !== index) {
+        result[idx] = {
+          ...result[idx],
+          sortOrder: index,
+          version: result[idx].version + 1,
+          syncStatus: 'pending',
+        };
+        changed = true;
+      }
+    });
+  });
+
+  return changed ? result : notes;
+}
+
+export type ShortcutAction = 'renameNote' | 'lockVault' | 'tableRepeatAction';
+
+export interface ShortcutBinding {
+  key: string;
+  ctrl?: boolean;
+  shift?: boolean;
+  alt?: boolean;
+}
+
+export type ShortcutBindings = Record<ShortcutAction, ShortcutBinding>;
+
+export const DEFAULT_SHORTCUTS: ShortcutBindings = {
+  renameNote: { key: 'F2' },
+  lockVault: { key: 'l', ctrl: true },
+  tableRepeatAction: { key: 'F4' },
+};
+
+interface ShortcutKeyEventLike {
+  key: string;
+  ctrlKey: boolean;
+  shiftKey: boolean;
+  altKey: boolean;
+  metaKey: boolean;
+}
+
+/** `ctrl` in a binding matches either Ctrl (Win/Linux) or Cmd (macOS). */
+export function matchesShortcut(e: ShortcutKeyEventLike, binding: ShortcutBinding | undefined): boolean {
+  if (!binding) return false;
+  if (e.key.toLowerCase() !== binding.key.toLowerCase()) return false;
+  if (!!binding.ctrl !== (e.ctrlKey || e.metaKey)) return false;
+  if (!!binding.shift !== e.shiftKey) return false;
+  if (!!binding.alt !== e.altKey) return false;
+  return true;
+}
+
+export function formatShortcutBinding(binding: ShortcutBinding): string {
+  const parts: string[] = [];
+  if (binding.ctrl) parts.push('Ctrl');
+  if (binding.alt) parts.push('Alt');
+  if (binding.shift) parts.push('Shift');
+  parts.push(binding.key.length === 1 ? binding.key.toUpperCase() : binding.key);
+  return parts.join('+');
+}
+
+const IGNORED_SHORTCUT_KEYS = new Set(['Control', 'Shift', 'Alt', 'Meta']);
+
+/** Builds a binding from a captured keydown event; returns null for bare modifier presses. */
+export function shortcutBindingFromEvent(e: ShortcutKeyEventLike): ShortcutBinding | null {
+  if (IGNORED_SHORTCUT_KEYS.has(e.key)) return null;
+  return {
+    key: e.key.length === 1 ? e.key.toUpperCase() : e.key,
+    ctrl: e.ctrlKey || e.metaKey,
+    shift: e.shiftKey,
+    alt: e.altKey,
+  };
 }
 
 export function isTableNode(node: NoteNode): boolean {

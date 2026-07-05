@@ -386,6 +386,47 @@ button:active:not(:disabled) {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--text) 8%, transparent);
 }
 
+.fn-shortcuts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.fn-shortcuts-list__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.fn-shortcuts-list__label {
+  font-size: 0.85rem;
+  color: var(--text);
+}
+
+.fn-shortcuts-list__key {
+  min-width: 96px;
+  padding: 0.3rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-elevated);
+  color: var(--text);
+  font-size: 0.8rem;
+  text-align: center;
+  cursor: pointer;
+}
+
+.fn-shortcuts-list__key:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+
+.fn-shortcuts-list__key.recording {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .fn-search {
   margin-left: auto;
   padding: 0.4rem 0.85rem;
@@ -412,7 +453,14 @@ button:active:not(:disabled) {
   flex-shrink: 0;
   border-right: 1px solid var(--border-soft);
   background: var(--surface);
-  overflow: auto;
+  /* Long file/folder names truncate with an ellipsis instead of forcing horizontal scroll (see
+     .fn-tree-node__label's grid-template-columns); explicitly disabling x-scroll keeps that true
+     even if some future row content doesn't shrink correctly. (Note: `scrollbar-gutter` is NOT
+     used here — `.fn-sidebar__content` below has a fixed pixel width equal to this container's,
+     so reserving a gutter on this outer box just pushes that fixed-width inner box to overflow by
+     the same amount, clipping it right back onto the action buttons instead of clearing them.) */
+  overflow-x: hidden;
+  overflow-y: auto;
   transition: width 0.15s ease, border-color 0.15s ease;
 }
 
@@ -424,6 +472,11 @@ button:active:not(:disabled) {
 
 .fn-sidebar__content {
   width: 280px;
+  /* Reserve a fixed buffer for the vertical scrollbar so it never overlaps the row action buttons
+     (delete/rename), regardless of whether the OS/browser uses an overlay or classic scrollbar —
+     `box-sizing: border-box` (set globally) means this comes out of the already-fixed width above
+     rather than adding to it, so long titles simply truncate a little earlier instead. */
+  padding-right: 14px;
 }
 
 .fn-sidebar-toggle {
@@ -434,7 +487,7 @@ button:active:not(:disabled) {
   border-right: 1px solid var(--border-soft);
   background: var(--surface);
   color: var(--muted);
-  cursor: pointer;
+  cursor: col-resize;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -445,6 +498,55 @@ button:active:not(:disabled) {
 .fn-sidebar-toggle:hover {
   background: var(--accent-soft);
   color: var(--accent);
+}
+
+body.fn-resizing-sidebar {
+  cursor: col-resize;
+  user-select: none;
+}
+
+/* While actively dragging, disable the width transition so the sidebar
+   tracks the mouse in real time instead of visibly lagging behind it. */
+body.fn-resizing-sidebar .fn-sidebar {
+  transition: none;
+}
+
+.fn-tree-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.375rem 0.5rem;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.fn-tree-toolbar__group {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.fn-tree-toolbar__group button {
+  border: 1px solid var(--border-soft);
+  background: var(--surface);
+  color: var(--muted);
+  border-radius: 4px;
+  font-size: 0.7rem;
+  padding: 0.15rem 0.4rem;
+  cursor: pointer;
+}
+
+.fn-tree-toolbar__group button:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.fn-tree-toolbar__sort {
+  font-size: 0.75rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0.15rem 0.3rem;
 }
 
 .fn-tree {
@@ -459,9 +561,136 @@ button:active:not(:disabled) {
 
 .fn-main {
   flex: 1;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+.fn-main > .fn-chat {
+  flex: 1;
+  min-width: 0;
+  height: auto;
+  margin: 1.5rem 2rem;
+}
+
+.fn-tab-group {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
   overflow: auto;
   padding: 1.5rem 2rem;
   background: linear-gradient(180deg, var(--bg) 0%, var(--bg-soft) 100%);
+}
+
+.fn-tab-group--focused {
+  background: linear-gradient(180deg, var(--bg) 0%, color-mix(in srgb, var(--accent) 3%, var(--bg-soft)) 100%);
+}
+
+.fn-tab-group-divider {
+  flex-shrink: 0;
+  width: 5px;
+  margin: 0 -2px;
+  padding: 0 2px;
+  background: var(--border-soft);
+  background-clip: content-box;
+  box-sizing: border-box;
+  cursor: col-resize;
+  position: relative;
+  z-index: 1;
+}
+
+.fn-tab-group-divider:hover,
+body.fn-resizing-group .fn-tab-group-divider {
+  background: var(--accent);
+}
+
+body.fn-resizing-group {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.fn-tabbar {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  flex-shrink: 0;
+  margin: -1.5rem -2rem 1rem;
+  padding: 0.4rem 0.5rem 0;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.fn-tab {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  max-width: 200px;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.fn-tab:hover {
+  background: var(--accent-soft);
+}
+
+.fn-tab--active {
+  background: var(--surface-elevated);
+  border-color: var(--border-soft);
+  color: var(--text);
+}
+
+.fn-tab--drop-before {
+  box-shadow: inset 2px 0 0 0 var(--accent);
+}
+
+.fn-tab--drop-after {
+  box-shadow: inset -2px 0 0 0 var(--accent);
+}
+
+.fn-tab__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82rem;
+}
+
+.fn-tab__title--preview {
+  font-style: italic;
+}
+
+.fn-tab__split,
+.fn-tab__close {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  opacity: 0.55;
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1;
+  padding: 1px 2px;
+  border-radius: 3px;
+}
+
+.fn-tab__split:hover,
+.fn-tab__close:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.fn-tab-group__controls {
+  display: flex;
+  flex-shrink: 0;
+  gap: 0.35rem;
+  margin-bottom: 0.5rem;
 }
 
 .fn-note {
@@ -535,6 +764,10 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   min-height: 360px;
 }
 
+.fn-editor--no-line-numbers .cm-gutters {
+  display: none;
+}
+
 .fn-editor--wysiwyg .ProseMirror {
   outline: none;
   min-height: 360px;
@@ -566,6 +799,25 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   opacity: 0.65;
   user-select: none;
   border-right: 1px solid var(--border-soft);
+}
+
+.tiptap-mathematics-render--editable {
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 0 2px;
+}
+
+.tiptap-mathematics-render--editable:hover {
+  background: var(--accent-soft);
+}
+
+.tiptap-mathematics-render.block-math-error,
+.tiptap-mathematics-render.inline-math-error {
+  color: var(--danger, #d33);
+  font-family: monospace;
+  background: color-mix(in srgb, #d33 10%, transparent);
+  border-radius: 4px;
+  padding: 0 4px;
 }
 
 .fn-code-block-wrap {
@@ -1027,6 +1279,62 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   font-size: 0.9rem;
 }
 
+.fn-unlock__progress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-bottom: 0.25rem;
+}
+
+.fn-unlock__progress-bar {
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border, rgba(0, 0, 0, 0.1));
+  overflow: hidden;
+}
+
+.fn-unlock__progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.15s ease;
+}
+
+.fn-unlock__progress-text {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.fn-locking-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font-size: 0.95rem;
+  backdrop-filter: blur(2px);
+}
+
+.fn-locking-overlay__spinner {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  animation: fn-locking-spin 0.8s linear infinite;
+}
+
+@keyframes fn-locking-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .fn-empty--inline {
   min-height: auto;
   height: 100%;
@@ -1066,6 +1374,15 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   outline: 1px dashed var(--accent);
 }
 
+.fn-tree-node__row--flash {
+  animation: fn-tree-flash 1.4s ease-out;
+}
+
+@keyframes fn-tree-flash {
+  0% { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+  100% { background: transparent; }
+}
+
 .fn-tree-root-zone {
   min-height: 100%;
 }
@@ -1099,10 +1416,16 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   border-radius: var(--radius);
 }
 
-.fn-tree-node__toggle,
-.fn-tree-node__spacer {
+.fn-tree-node__row .fn-tree-node__toggle,
+.fn-tree-node__row .fn-tree-node__spacer {
   width: 18px;
+  min-width: 18px;
+  max-width: 18px;
+  flex: 0 0 18px;
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   border: none;
   background: transparent;
   cursor: pointer;
@@ -1110,11 +1433,21 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   color: var(--muted);
 }
 
-.fn-tree-node__label {
+.fn-tree-node__row .fn-tree-node__label {
   flex: 1 1 0;
-  display: flex;
+  /* Grid (not flex) for the icon/text columns: the icon column's width is
+     then a hard track size that never depends on the glyph's own natural
+     advance width (emoji metrics vary slightly between 📁/📝/📊), so every
+     row's text starts at exactly the same x-offset regardless of node type. */
+  display: grid;
+  /* `minmax(0, 1fr)`, not plain `1fr`: an `fr` track's automatic minimum size is based on its
+     content's max-content width by default, which for a `white-space: nowrap` text span is the
+     full, untruncated title width. That silently forced this column (and the whole row) wider
+     than the sidebar for long file names, which is what pushed a horizontal scrollbar into the
+     tree instead of letting `.fn-tree-node__text`'s ellipsis truncation kick in. */
+  grid-template-columns: 20px minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 4px;
+  column-gap: 4px;
   padding: 0.4rem 0.25rem;
   border: none;
   background: transparent;
@@ -1125,7 +1458,10 @@ body.fn-resizing-note .fn-note-resize-handle::after {
 }
 
 .fn-tree-node__icon {
-  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
 }
 
 .fn-tree-node__text {

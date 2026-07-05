@@ -2,6 +2,8 @@ export { AppShell } from './AppShell';
 export { UnlockScreen } from './UnlockScreen';
 export type { CloudSyncParams, UnlockTab, VaultListItem } from './UnlockScreen';
 export { NoteTree } from './NoteTree';
+export { TreeToolbar } from './TreeToolbar';
+export { TabBar } from './TabBar';
 export { EditorToolbar } from './EditorToolbar';
 export { SettingsModal } from './SettingsModal';
 export { AuthModal } from './AuthModal';

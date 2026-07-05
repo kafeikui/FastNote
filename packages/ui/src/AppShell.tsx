@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react';
 import { APP_NAME } from '@fastnote/shared';
 import { useT } from '@fastnote/i18n';
 
@@ -8,10 +8,21 @@ interface AppShellProps {
   toolbar?: ReactNode;
   sidebarCollapsed?: boolean;
   onToggleSidebar?: () => void;
+  sidebarWidth?: number;
+  onSidebarResizeStart?: (e: ReactMouseEvent) => void;
 }
 
-export function AppShell({ sidebar, main, toolbar, sidebarCollapsed = false, onToggleSidebar }: AppShellProps) {
+export function AppShell({
+  sidebar,
+  main,
+  toolbar,
+  sidebarCollapsed = false,
+  onToggleSidebar,
+  sidebarWidth,
+  onSidebarResizeStart,
+}: AppShellProps) {
   const t = useT();
+  const width = sidebarCollapsed ? 0 : sidebarWidth;
   return (
     <div className="fn-app">
       <header className="fn-header">
@@ -19,14 +30,20 @@ export function AppShell({ sidebar, main, toolbar, sidebarCollapsed = false, onT
         {toolbar}
       </header>
       <div className="fn-body">
-        <aside className={`fn-sidebar${sidebarCollapsed ? ' fn-sidebar--collapsed' : ''}`}>
-          <div className="fn-sidebar__content">{sidebar}</div>
+        <aside
+          className={`fn-sidebar${sidebarCollapsed ? ' fn-sidebar--collapsed' : ''}`}
+          style={width !== undefined ? { width } : undefined}
+        >
+          <div className="fn-sidebar__content" style={sidebarWidth !== undefined ? { width: sidebarWidth } : undefined}>
+            {sidebar}
+          </div>
         </aside>
         {onToggleSidebar && (
           <button
             type="button"
             className="fn-sidebar-toggle"
             onClick={onToggleSidebar}
+            onMouseDown={onSidebarResizeStart}
             title={sidebarCollapsed ? t('appShell.expandSidebar') : t('appShell.collapseSidebar')}
             aria-label={sidebarCollapsed ? t('appShell.expandSidebar') : t('appShell.collapseSidebar')}
           >
