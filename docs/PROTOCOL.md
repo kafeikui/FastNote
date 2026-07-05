@@ -151,6 +151,39 @@
 }
 ```
 
+### PUT `/api/v1/sync/chat/:messageId`（需鉴权，聊天历史云同步）
+
+```json
+{
+  "peer_id": "uuid",
+  "direction": "out",
+  "sent_at": "...",
+  "ciphertext": "<base64，本地已用 notes_key 加密的消息信封，服务端原样存储、不解密>"
+}
+```
+
+聊天消息视为不可变，没有版本号/冲突检测——每条消息只在本地首次标记为「未同步」时推送一次（`upsert` 按 `message_id` 去重，重复调用是幂等的）。
+
+### GET `/api/v1/sync/chat`（需鉴权）
+
+一次性返回该账号下**全部**聊天消息密文条目（无分页/增量游标）：
+
+```json
+{
+  "items": [
+    {
+      "message_id": "uuid",
+      "peer_id": "uuid",
+      "direction": "in",
+      "sent_at": "...",
+      "ciphertext": "<base64>"
+    }
+  ]
+}
+```
+
+客户端对本地已存在的 `message_id` 直接跳过、不覆盖（详见 `docs/DATABASE.md` §2.5）。这是登录云账号后能在新设备上看到历史聊天记录的机制；离线消息实时/补发投递仍走独立的 `message_queue` + WebSocket（见下）。
+
 ### 笔记明文结构（加密前，由客户端自行约定，服务端不感知）
 
 ```json
@@ -215,11 +248,14 @@
 
 > 附件是**内嵌在聊天消息明文里**一起加密传输的（`dataB64` 直接放进 `attachments[]`），**不是**单独的附件同步接口——这与"笔记/表格附件走 `/api/v1/sync/attachments`"是两条完全独立的路径。
 
-客户端收到并成功解密后，通过 WebSocket 回发 `delivery_ack`（服务端当前**不处理**该消息类型，仅作为客户端侧的记录钩子，不影响 `message_queue`）：
+客户端收到并成功解密后，通过 WebSocket 回发 `delivery_ack`；当用户实际打开会话线程查看某条消息时，再额外回发 `read_ack`。服务端会把这两种 ack **原样转发**给原始发送者（把 `to` 换成转发对象、加上 `from` 字段标明是谁发来的 ack），发送者的客户端据此把本地那条**自己发出的**消息状态从 `sent` 推进到 `delivered`/`read`（`packages/im/src/index.ts` 的 `setOnDeliveryAck`/`setOnReadAck`；`packages/app/src/VaultApp.tsx` 的 `updateChatMessageStatus`，状态只会前进不会倒退）。收到 `delivery_ack` 时服务端还会顺手把这条消息从接收方的 `message_queue` 里删掉（此前只有走离线补拉 REST 接口才会 DELETE，实时推送成功的消息会永远留在队列里）：
 
 ```json
 { "type": "delivery_ack", "id": "msg-uuid", "to": "peer-uuid" }
+{ "type": "read_ack", "id": "msg-uuid", "to": "peer-uuid" }
 ```
+
+两者都是**明文控制帧、尽力而为、仅实时转发**：如果原发送者当前不在线，ack 会被直接丢弃（不会补投），发送者本地会一直停留在 `sent`/`delivered`，直到对方下次上线时又交换到新的 ack 才会更新——这与消息本身的 `message_queue` 离线补投设计不同，是刻意的简化取舍（读/送达回执本身没有内容需要保证送达，只是状态提示）。
 
 ### 已实现的 `type` 取值
 
@@ -227,9 +263,10 @@
 |------|------|------|
 | `ping` / `pong` | 客户端→服务端 / 服务端→客户端 | 心跳，服务端收到 `ping` 立即回 `pong` |
 | `message` | 双向 | 聊天消息信封 |
-| `delivery_ack` | 客户端→服务端 | 送达确认（服务端当前忽略此类型） |
+| `delivery_ack` | 双向 | 收到并解密成功后回发给服务端；服务端转发给原发送者，并清理 `message_queue` |
+| `read_ack` | 双向 | 用户实际查看该消息时回发；服务端转发给原发送者 |
 
-> 早期草案中的 `read_ack`、`prekey_bundle_request`/`prekey_bundle_response` **未实现**，服务端也没有对应的 `/api/v1/keys/bundle/:userId` 接口。
+> 早期草案中的 `prekey_bundle_request`/`prekey_bundle_response` **未实现**，服务端也没有对应的 `/api/v1/keys/bundle/:userId` 接口。
 
 ## 5. 离线消息补拉
 

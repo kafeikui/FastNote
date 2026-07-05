@@ -17,6 +17,11 @@ interface SettingsModalProps {
   vaultLabel: string;
   syncStatus: string | null;
   dataDirectory: string;
+  /** Real on-disk path where encrypted data physically lives (Electron
+   * `userData`, containing Chromium's IndexedDB backing store) — distinct
+   * from `dataDirectory`, which is only a user-chosen label. Empty on web. */
+  realStoragePath?: string;
+  onOpenStorageFolder?: () => void;
   isElectron: boolean;
   chatNotify: ChatNotificationSettings;
   uiTheme: UiThemeId;
@@ -41,6 +46,8 @@ export function SettingsModal({
   vaultLabel,
   syncStatus,
   dataDirectory,
+  realStoragePath,
+  onOpenStorageFolder,
   isElectron,
   chatNotify,
   uiTheme,
@@ -251,6 +258,20 @@ export function SettingsModal({
               {t('settingsModal.saveDataDir')}
             </button>
           </div>
+        )}
+        {isElectron && realStoragePath && (
+          <label className="fn-field">
+            <span>{t('settingsModal.realStoragePathLabel')}</span>
+            <div className="fn-field__row">
+              <input value={realStoragePath} readOnly disabled />
+              {onOpenStorageFolder && (
+                <button type="button" onClick={onOpenStorageFolder}>
+                  {t('settingsModal.openFolder')}
+                </button>
+              )}
+            </div>
+            <p className="fn-unlock__hint">{t('settingsModal.realStoragePathHint')}</p>
+          </label>
         )}
         <hr />
         <p className="fn-field">

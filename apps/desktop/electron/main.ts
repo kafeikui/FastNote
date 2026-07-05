@@ -77,6 +77,8 @@ function registerSettingsIpc() {
   ipcMain.handle('fastnote:getDefaultDataDirectory', () => desktopSettings.getDefaultDataDirectory());
   ipcMain.handle('fastnote:setDataDirectory', (_e, dir: string) => desktopSettings.setDataDirectory(dir));
   ipcMain.handle('fastnote:pickStorageDirectory', () => desktopSettings.pickStorageDirectory());
+  ipcMain.handle('fastnote:getUserDataPath', () => desktopSettings.getUserDataPath());
+  ipcMain.handle('fastnote:openUserDataFolder', () => desktopSettings.openUserDataFolder());
 }
 
 registerSettingsIpc();

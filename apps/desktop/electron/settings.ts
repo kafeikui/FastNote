@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
-import { app, dialog, BrowserWindow } from 'electron';
+import { app, dialog, shell, BrowserWindow } from 'electron';
 
 const SETTINGS_FILE = 'settings.json';
 
@@ -55,5 +55,22 @@ export const desktopSettings = {
     });
     if (result.canceled || !result.filePaths[0]) return null;
     return desktopSettings.setDataDirectory(result.filePaths[0]);
+  },
+
+  /**
+   * The folder browsable/selectable above (`dataDirectory`) is only ever
+   * used as a *label* to derive the IndexedDB database name — nothing is
+   * ever written into it, which is exactly why users find it empty. The
+   * actual encrypted note/chat/attachment data physically lives inside
+   * Electron's per-profile storage under `userData` (Chromium's IndexedDB
+   * backing store), regardless of which label/vault is selected. Surfacing
+   * this real path lets users locate/back up the real data.
+   */
+  getUserDataPath(): string {
+    return app.getPath('userData');
+  },
+
+  openUserDataFolder(): void {
+    void shell.openPath(app.getPath('userData'));
   },
 };

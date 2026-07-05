@@ -178,6 +178,36 @@ app.get('/api/v1/sync/attachments', async (req, reply) => {
   };
 });
 
+app.put<{
+  Params: { messageId: string };
+  Body: { peer_id: string; direction: 'in' | 'out'; sent_at: string; ciphertext: string };
+}>('/api/v1/sync/chat/:messageId', async (req, reply) => {
+  const userId = authUser(req.headers.authorization);
+  if (!userId) return reply.code(401).send({ error: 'unauthorized' });
+  const { messageId } = req.params;
+  const { peer_id, direction, sent_at, ciphertext } = req.body ?? {};
+  if (!peer_id || !direction || !sent_at || !ciphertext) {
+    return reply.code(400).send({ error: 'missing fields' });
+  }
+  store.upsertChatMessage(userId, messageId, peer_id, direction, sent_at, ciphertext, new Date().toISOString());
+  return { ok: true };
+});
+
+app.get('/api/v1/sync/chat', async (req, reply) => {
+  const userId = authUser(req.headers.authorization);
+  if (!userId) return reply.code(401).send({ error: 'unauthorized' });
+  const rows = store.listChatMessages(userId);
+  return {
+    items: rows.map((r) => ({
+      message_id: r.message_id,
+      peer_id: r.peer_id,
+      direction: r.direction,
+      sent_at: r.sent_at,
+      ciphertext: r.ciphertext,
+    })),
+  };
+});
+
 app.get('/health', async () => ({ status: 'ok' }));
 
 app.put<{ Body: { identity_pubkey: string; exchange_pubkey: string } }>(
@@ -309,6 +339,31 @@ app.register(async (fastify) => {
             app.log.info({ from: userId, to: msg.to, id }, 'im message pushed');
           } else {
             app.log.info({ from: userId, to: msg.to, id }, 'im message queued (offline)');
+          }
+          return;
+        }
+        // `delivery_ack`/`read_ack`: `userId` here is the recipient of the
+        // original message (they're the one confirming receipt/read), and
+        // `msg.to` is the original sender who should be notified. Both are
+        // best-effort, live-forward-only control frames — if the original
+        // sender isn't connected right now the ack is simply dropped, same
+        // as the existing (already best-effort) `delivery_ack` design.
+        if (msg.type === 'delivery_ack' && msg.to && msg.id) {
+          // We now know for certain this message was actually received, so
+          // it no longer needs to sit in the recipient's offline mailbox —
+          // without this, delivered messages would linger in message_queue
+          // forever and get needlessly retried by the pending-poll cycle.
+          store.deleteMessage(msg.id, userId);
+          const peer = onlineSockets.get(msg.to);
+          if (peer && peer.readyState === 1) {
+            peer.send(JSON.stringify({ type: 'delivery_ack', id: msg.id, from: userId }));
+          }
+          return;
+        }
+        if (msg.type === 'read_ack' && msg.to && msg.id) {
+          const peer = onlineSockets.get(msg.to);
+          if (peer && peer.readyState === 1) {
+            peer.send(JSON.stringify({ type: 'read_ack', id: msg.id, from: userId }));
           }
         }
       } catch {

@@ -14,7 +14,8 @@
 - [协议规范](docs/PROTOCOL.md)
 - [数据库 Schema](docs/DATABASE.md)
 - [Phase 1 任务](docs/PHASE1.md)
-- [部署文档](docs/DEPLOYMENT.md)（HTTPS + nginx 共存 + certbot 自动续期）
+- [部署文档](docs/DEPLOYMENT.md)（自托管中继：HTTPS + nginx 共存 + certbot 自动续期）
+- [Vercel 部署](docs/VERCEL.md)（仅 Web 前端——中继服务器无法跑在 Vercel 上，原因见文档内说明）
 - [Memory Bank](memory-bank/)（项目背景、当前进度、技术约定的持久化记录，AI 协作/新贡献者上手请先读这里）
 
 ## 功能一览
@@ -115,6 +116,10 @@ docker compose up -d   # 只监听 127.0.0.1:8787，不直接暴露公网
 面向公网部署时，中继本身只监听本机端口，由 nginx 负责 443/80 的 TLS 终止与反向代理。完整的「和已有 nginx 站点共存 + certbot 申请/自动续期证书」步骤见 **[部署文档](docs/DEPLOYMENT.md)**，nginx 站点配置示例在 `server/deploy/nginx/fastnote.conf`（独立文件，不影响你已有的其它站点配置）。
 
 > ⚠️ **`JWT_SECRET` 没有默认值**，`docker-compose.yml` 会在缺失时直接拒绝启动，避免生产环境不小心用了占位符导致任何人都能伪造登录令牌。
+
+### Web 前端部署到 Vercel（可选，与上面的中继部署相互独立）
+
+`apps/web` 的静态构建产物也可以托管到 Vercel，而不是自己找静态托管——仓库根目录的 `vercel.json` 已经适配好了 pnpm monorepo 的构建方式（`pnpm --filter @fastnote/web build` → `apps/web/dist`）。完整步骤和"为什么中继服务器本身不能部署到 Vercel"（需要长连接 WebSocket + 真实本地磁盘持久化，都不符合 Vercel 无状态 serverless/edge 模型）见 **[docs/VERCEL.md](docs/VERCEL.md)**。
 
 ### 桌面客户端发布（CI）
 

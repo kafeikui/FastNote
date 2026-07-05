@@ -2,7 +2,7 @@
 
 ## 状态总览
 
-MVP（`docs/PHASE1.md` M1–M8）已全部完成并在 M8 之后继续做了大量体验/安全类增强。当前处于"功能基本成熟，准备首次提交到远程仓库"的阶段（仓库此前一直没有 git commit）。
+MVP（`docs/PHASE1.md` M1–M8）已全部完成并在 M8 之后继续做了大量体验/安全类增强。仓库已有首次提交（"first commit"），当前版本号 `0.2.0`（2026-07-05 从 `0.1.0` bump，覆盖本文件下方"体验增强"里列出的所有新功能）。Web 前端新增了 Vercel 部署方案（`vercel.json` + `docs/VERCEL.md`），与自托管中继服务器（`docs/DEPLOYMENT.md`）完全独立、互不影响。
 
 ## 已完成 — 核心功能（MVP）
 
@@ -36,6 +36,15 @@ MVP（`docs/PHASE1.md` M1–M8）已全部完成并在 M8 之后继续做了大�
 - **README 双语化 + 赞助（2026-07）**：`README.md` 改为英文主版本，原中文内容移至 `README.zh-CN.md`，两者互相链接；均新增"请作者喝杯咖啡"章节（EVM 兼容加密货币地址）
 - **侧边栏可收起（2026-07）**：`AppShell` 新增 `sidebarCollapsed`/`onToggleSidebar`，侧边栏与内容区之间加一个常驻的折叠/展开小按钮；折叠状态持久化到 `localStorage`（`fastnote_sidebar_collapsed`，`packages/api` 的 `loadSidebarCollapsed`/`saveSidebarCollapsed`），折叠后内容区自动占满剩余宽度
 - **表格公式与统计（2026-07）**：`packages/table/src/formula.ts` 新增轻量公式引擎（递归下降解析器），支持 `+ - * / ^`、括号、单元格引用（如 `B3`）、区域引用（如 `B2:B10`）、`SUM`/`AVERAGE`/`COUNT`/`MIN`/`MAX` 函数，公式以 `=` 开头存入单元格原始值，编辑态显示公式原文、失焦显示计算结果；列/行采用**稳定编号**（基于 `doc.columns`/`doc.rows` 数组下标，不随排序/筛选改变，避免公式引用错位）；`TableEditor` 新增行号列 + 列字母表头，支持拖拽/整行/整列三种方式选中区域，并在下方展示选区的计数/求和/平均值统计条
+- **解锁页焦点修复（2026-07）**：切换服务器地址/加密库标签目录后不再用 `window.alert()`（Electron 下会造成焦点陷阱），改为 `confirm()` + `location.reload()`
+- **笔记内附件拖拽修复（2026-07）**：`EmbeddedAttachmentChip` 的拖拽手柄 `stopPropagation` 改为只在表格传入 `onDragStart` 时才生效，不再误伤笔记编辑器里 ProseMirror 原生的整节点拖拽
+- **聊天送达/已读回执（2026-07）**：`packages/im` 新增 `delivery_ack`/`read_ack` 处理与 `sendReadAck()`；服务端 WebSocket 层实时转发两种 ack 给发送方在线连接，`delivery_ack` 顺带清理 `message_queue`；`ChatPanel` 气泡展示送达/已读状态图标
+- **批量导入 .txt + 新建/导入下拉菜单（2026-07）**：无扩展名文件与 `.txt` 均当笔记导入；新增可复用的 `packages/ui/src/DropdownMenu.tsx`，工具栏"新建"“导入”改为下拉菜单，并新增单文件导入（笔记/表格）入口
+- **聊天历史云同步（2026-07）**：新增服务端 `chat_blobs` 存储 + `PUT/GET /api/v1/sync/chat`；`packages/storage` 的 `StoredChatRow` 加 `synced` 标记；`SyncClient.syncChatMessages()` 用 push-once/pull-if-missing 简化模型（消息视为不可变，无版本冲突机制）同步聊天历史，登录云账号新设备后可看到历史聊天记录
+- **数据存储位置说明（2026-07）**：设置面板"数据目录"更名为"加密库标签目录"并明确其只是标签、不写文件；新增 Electron `getUserDataPath`/`openUserDataFolder` IPC，展示并可一键打开真正保存加密数据的 `userData` 目录（Chromium IndexedDB 存储位置）
+- **聊天勾选状态修正 + 新建/导入下拉修复 + 强制导入（2026-07）**：`ChatPanel` 送达/已读勾选逻辑修正为"已读才是双对勾"；`DropdownMenu` 关闭菜单的时机从 `onClickCapture` 改为 `onClick`（冒泡），修复点击菜单项没反应的问题；"导入笔记文件"/"导入文件夹"新增"强制导入（忽略扩展名）"选项
+- **Vercel Web 前端部署方案（2026-07）**：新增仓库根 `vercel.json`（pnpm monorepo 构建适配）+ `docs/VERCEL.md`；明确中继服务器不适合部署到 Vercel（需要长连接 WebSocket + 本地磁盘持久化），只有 `apps/web` 静态前端托管在 Vercel，两者通过用户自己配置的服务器地址 + 已开放的 CORS 互联
+- **版本号 bump（2026-07）**：全部 workspace 包 `0.1.0` → `0.2.0`
 
 ## 进行中 / 本次会话任务
 

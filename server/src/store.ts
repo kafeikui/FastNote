@@ -38,15 +38,28 @@ export interface MessageQueueRecord {
   created_at: string;
 }
 
+/** A durable per-account copy of one chat message, for cross-device history
+ * sync — distinct from `message_queue`, which is only a short-lived
+ * undelivered-mailbox and gets drained/deleted once a message is picked up. */
+export interface ChatBlobRecord {
+  message_id: string;
+  peer_id: string;
+  direction: 'in' | 'out';
+  ciphertext: string;
+  sent_at: string;
+  updated_at: string;
+}
+
 interface RelayData {
   users: UserRecord[];
   note_blobs: Array<NoteBlobRecord & { user_id: string }>;
   attachment_blobs: Array<AttachmentBlobRecord & { user_id: string }>;
   message_queue: MessageQueueRecord[];
+  chat_blobs: Array<ChatBlobRecord & { user_id: string }>;
 }
 
 function emptyData(): RelayData {
-  return { users: [], note_blobs: [], attachment_blobs: [], message_queue: [] };
+  return { users: [], note_blobs: [], attachment_blobs: [], message_queue: [], chat_blobs: [] };
 }
 
 export class JsonRelayStore {
@@ -69,6 +82,7 @@ export class JsonRelayStore {
         note_blobs: parsed.note_blobs ?? [],
         attachment_blobs: parsed.attachment_blobs ?? [],
         message_queue: parsed.message_queue ?? [],
+        chat_blobs: parsed.chat_blobs ?? [],
       };
     } catch {
       return emptyData();
@@ -102,7 +116,8 @@ export class JsonRelayStore {
       this.data.users.length === 0 &&
       this.data.note_blobs.length === 0 &&
       this.data.attachment_blobs.length === 0 &&
-      this.data.message_queue.length === 0
+      this.data.message_queue.length === 0 &&
+      this.data.chat_blobs.length === 0
     );
   }
 
@@ -251,5 +266,43 @@ export class JsonRelayStore {
       created_at: createdAt,
     });
     this.scheduleSave();
+  }
+
+  upsertChatMessage(
+    userId: string,
+    messageId: string,
+    peerId: string,
+    direction: 'in' | 'out',
+    sentAt: string,
+    ciphertext: string,
+    updatedAt: string,
+  ): void {
+    const existing = this.data.chat_blobs.find(
+      (c) => c.user_id === userId && c.message_id === messageId,
+    );
+    if (existing) {
+      existing.peer_id = peerId;
+      existing.direction = direction;
+      existing.ciphertext = ciphertext;
+      existing.sent_at = sentAt;
+      existing.updated_at = updatedAt;
+    } else {
+      this.data.chat_blobs.push({
+        user_id: userId,
+        message_id: messageId,
+        peer_id: peerId,
+        direction,
+        ciphertext,
+        sent_at: sentAt,
+        updated_at: updatedAt,
+      });
+    }
+    this.scheduleSave();
+  }
+
+  listChatMessages(userId: string): ChatBlobRecord[] {
+    return this.data.chat_blobs
+      .filter((c) => c.user_id === userId)
+      .map(({ user_id: _uid, ...rest }) => rest);
   }
 }
