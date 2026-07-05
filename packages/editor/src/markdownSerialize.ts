@@ -43,6 +43,9 @@ function serializeInline(nodes?: JSONContent[]): string {
       if (node.type === 'hardBreak') {
         return '  \n';
       }
+      if (node.type === 'inlineMath') {
+        return `$${(node.attrs?.latex as string) ?? ''}$`;
+      }
       if (node.content?.length) {
         return serializeInline(node.content);
       }
@@ -82,6 +85,8 @@ function serializeBlock(node: JSONContent, indent = ''): string {
     }
     case 'codeBlock':
       return `${indent}${serializeCodeBlock(node)}`;
+    case 'blockMath':
+      return `${indent}$$\n${(node.attrs?.latex as string) ?? ''}\n$$\n\n`;
     case 'blockquote': {
       const inner = (node.content ?? []).map((c) => serializeBlock(c, '')).join('').trimEnd();
       const quoted = inner

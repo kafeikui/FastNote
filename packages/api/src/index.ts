@@ -3,7 +3,11 @@ import type {
   ChatPeer,
   ChatMessage,
   IMSessionState,
+  TabGroupState,
+  ShortcutAction,
+  ShortcutBindings,
 } from "@fastnote/shared";
+import { DEFAULT_SHORTCUTS } from "@fastnote/shared";
 import { translate, type Locale } from "@fastnote/i18n";
 
 export interface RegisterResponse {
@@ -563,6 +567,158 @@ export function loadSidebarCollapsed(): boolean {
 
 export function saveSidebarCollapsed(collapsed: boolean): void {
   localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0");
+}
+
+const SHOW_LINE_NUMBERS_KEY = "fastnote_show_line_numbers";
+
+export function loadShowLineNumbers(): boolean {
+  const raw = localStorage.getItem(SHOW_LINE_NUMBERS_KEY);
+  return raw === null ? true : raw === "1";
+}
+
+export function saveShowLineNumbers(show: boolean): void {
+  localStorage.setItem(SHOW_LINE_NUMBERS_KEY, show ? "1" : "0");
+}
+
+export const SIDEBAR_WIDTH_MIN = 180;
+// Wide enough that long note/folder titles can be dragged fully into view instead of being
+// truncated with an ellipsis.
+export const SIDEBAR_WIDTH_MAX = 720;
+export const SIDEBAR_WIDTH_DEFAULT = 280;
+
+const SIDEBAR_WIDTH_KEY = "fastnote_sidebar_width";
+
+export function loadSidebarWidth(): number {
+  const raw = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
+  if (!Number.isFinite(raw) || raw <= 0) return SIDEBAR_WIDTH_DEFAULT;
+  return Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, raw));
+}
+
+export function saveSidebarWidth(width: number): void {
+  const clamped = Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, Math.round(width)));
+  localStorage.setItem(SIDEBAR_WIDTH_KEY, String(clamped));
+}
+
+export type TreeSortModeValue = "manual" | "name" | "modified";
+
+const TREE_SORT_MODE_KEY = "fastnote_tree_sort_mode";
+
+export function loadTreeSortMode(): TreeSortModeValue {
+  const raw = localStorage.getItem(TREE_SORT_MODE_KEY);
+  return raw === "name" || raw === "modified" ? raw : "manual";
+}
+
+export function saveTreeSortMode(mode: TreeSortModeValue): void {
+  localStorage.setItem(TREE_SORT_MODE_KEY, mode);
+}
+
+function collapsedFolderIdsKey(namespace?: string): string {
+  const ns = sanitizeStorageNamespace(namespace ?? loadStorageNamespace());
+  return ns === "default"
+    ? "fastnote_collapsed_folders"
+    : `fastnote_collapsed_folders_${ns}`;
+}
+
+export function loadCollapsedFolderIds(namespace?: string): Set<string> {
+  try {
+    const raw = localStorage.getItem(collapsedFolderIdsKey(namespace));
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw) as string[];
+    return new Set(Array.isArray(parsed) ? parsed.filter((id) => typeof id === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+export function saveCollapsedFolderIds(ids: Set<string>, namespace?: string): void {
+  const key = collapsedFolderIdsKey(namespace);
+  if (ids.size === 0) localStorage.removeItem(key);
+  else localStorage.setItem(key, JSON.stringify(Array.from(ids)));
+}
+
+export interface TabState {
+  groups: TabGroupState[];
+  activeGroupId: string;
+}
+
+export function defaultTabState(): TabState {
+  return { groups: [{ id: "g1", tabs: [], activeTabId: null }], activeGroupId: "g1" };
+}
+
+function tabStateKey(namespace?: string): string {
+  const ns = sanitizeStorageNamespace(namespace ?? loadStorageNamespace());
+  return ns === "default" ? "fastnote_tab_state" : `fastnote_tab_state_${ns}`;
+}
+
+function isValidTabState(value: unknown): value is TabState {
+  if (!value || typeof value !== "object") return false;
+  const v = value as Partial<TabState>;
+  if (!Array.isArray(v.groups) || typeof v.activeGroupId !== "string") return false;
+  return v.groups.every(
+    (g) =>
+      g &&
+      typeof g.id === "string" &&
+      Array.isArray(g.tabs) &&
+      g.tabs.every((t) => t && typeof t.id === "string" && typeof t.pinned === "boolean") &&
+      (g.activeTabId === null || typeof g.activeTabId === "string"),
+  );
+}
+
+export function loadTabState(namespace?: string): TabState {
+  try {
+    const raw = localStorage.getItem(tabStateKey(namespace));
+    if (!raw) return defaultTabState();
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isValidTabState(parsed) || parsed.groups.length === 0) return defaultTabState();
+    return parsed;
+  } catch {
+    return defaultTabState();
+  }
+}
+
+export function saveTabState(state: TabState, namespace?: string): void {
+  localStorage.setItem(tabStateKey(namespace), JSON.stringify(state));
+}
+
+export const GROUP_SPLIT_RATIO_MIN = 0.15;
+export const GROUP_SPLIT_RATIO_MAX = 0.85;
+export const GROUP_SPLIT_RATIO_DEFAULT = 0.5;
+
+const GROUP_SPLIT_RATIO_KEY = "fastnote_group_split_ratio";
+
+export function loadGroupSplitRatio(): number {
+  const raw = Number(localStorage.getItem(GROUP_SPLIT_RATIO_KEY));
+  if (!Number.isFinite(raw) || raw <= 0) return GROUP_SPLIT_RATIO_DEFAULT;
+  return Math.min(GROUP_SPLIT_RATIO_MAX, Math.max(GROUP_SPLIT_RATIO_MIN, raw));
+}
+
+export function saveGroupSplitRatio(ratio: number): void {
+  const clamped = Math.min(GROUP_SPLIT_RATIO_MAX, Math.max(GROUP_SPLIT_RATIO_MIN, ratio));
+  localStorage.setItem(GROUP_SPLIT_RATIO_KEY, String(clamped));
+}
+
+const SHORTCUTS_KEY = "fastnote_shortcuts";
+
+export function loadShortcuts(): ShortcutBindings {
+  const merged: ShortcutBindings = { ...DEFAULT_SHORTCUTS };
+  try {
+    const raw = localStorage.getItem(SHORTCUTS_KEY);
+    if (!raw) return merged;
+    const parsed = JSON.parse(raw) as Partial<Record<ShortcutAction, { key?: unknown; ctrl?: unknown; shift?: unknown; alt?: unknown }>>;
+    (Object.keys(DEFAULT_SHORTCUTS) as ShortcutAction[]).forEach((action) => {
+      const b = parsed[action];
+      if (b && typeof b.key === "string" && b.key) {
+        merged[action] = { key: b.key, ctrl: !!b.ctrl, shift: !!b.shift, alt: !!b.alt };
+      }
+    });
+    return merged;
+  } catch {
+    return merged;
+  }
+}
+
+export function saveShortcuts(bindings: ShortcutBindings): void {
+  localStorage.setItem(SHORTCUTS_KEY, JSON.stringify(bindings));
 }
 
 function chatUnreadKey(namespace?: string): string {

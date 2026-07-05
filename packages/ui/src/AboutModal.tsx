@@ -3,15 +3,16 @@ import { useT } from '@fastnote/i18n';
 
 interface AboutModalProps {
   onClose: () => void;
+  version: string;
 }
 
-export function AboutModal({ onClose }: AboutModalProps) {
+export function AboutModal({ onClose, version }: AboutModalProps) {
   const t = useT();
   return (
     <div className="fn-modal-backdrop" onClick={onClose}>
       <div className="fn-modal fn-about" onClick={(e) => e.stopPropagation()}>
         <h2>{APP_NAME}</h2>
-        <p>{t('aboutModal.version', { version: '0.1.0' })}</p>
+        <p>{t('aboutModal.version', { version })}</p>
         <p className="fn-unlock__hint">{t('aboutModal.tagline')}</p>
         <p className="fn-unlock__hint">{t('aboutModal.platforms')}</p>
         <div className="fn-modal__actions">

@@ -1,4 +1,4 @@
-import { useState, type DragEvent } from 'react';
+import { useEffect, useRef, useState, type DragEvent } from 'react';
 import type { NoteNode } from '@fastnote/shared';
 import { buildTree, type TreeDropPosition, type TreeItem } from '@fastnote/shared';
 import { useT, type TFunction } from '@fastnote/i18n';
@@ -8,7 +8,12 @@ const DRAG_MIME = 'application/x-fastnote-node';
 interface NoteTreeProps {
   notes: NoteNode[];
   activeId: string | null;
+  collapsedIds: Set<string>;
+  onToggleCollapse: (id: string) => void;
+  revealId?: string | null;
   onSelect: (id: string) => void;
+  /** Double-click on a note/table opens it as a permanent (pinned) tab. */
+  onOpenPinned?: (id: string) => void;
   onCreateFolder: (parentId: string | null) => void;
   onCreateNote: (parentId: string | null) => void;
   onCreateTable: (parentId: string | null) => void;
@@ -16,6 +21,9 @@ interface NoteTreeProps {
   onRename: (id: string, title: string) => void;
   onDelete: (id: string) => void;
   onMove: (dragId: string, targetId: string | null, position: TreeDropPosition) => void;
+  /** When set to a node id, that node enters rename mode (e.g. via the F2 shortcut). */
+  renameRequestId?: string | null;
+  onRenameRequestHandled?: () => void;
 }
 
 type DropHint = TreeDropPosition | null;
@@ -33,7 +41,11 @@ function TreeNode({
   item,
   depth,
   activeId,
+  collapsedIds,
+  onToggleCollapse,
+  revealId,
   onSelect,
+  onOpenPinned,
   onCreateFolder,
   onCreateNote,
   onCreateTable,
@@ -41,6 +53,8 @@ function TreeNode({
   onRename,
   onDelete,
   onMove,
+  renameRequestId,
+  onRenameRequestHandled,
   draggingId,
   onDragStartNode,
   onDragEndNode,
@@ -49,7 +63,11 @@ function TreeNode({
   item: TreeItem;
   depth: number;
   activeId: string | null;
+  collapsedIds: Set<string>;
+  onToggleCollapse: (id: string) => void;
+  revealId?: string | null;
   onSelect: (id: string) => void;
+  onOpenPinned?: (id: string) => void;
   onCreateFolder: (parentId: string | null) => void;
   onCreateNote: (parentId: string | null) => void;
   onCreateTable: (parentId: string | null) => void;
@@ -57,16 +75,20 @@ function TreeNode({
   onRename: (id: string, title: string) => void;
   onDelete: (id: string) => void;
   onMove: (dragId: string, targetId: string | null, position: TreeDropPosition) => void;
+  renameRequestId?: string | null;
+  onRenameRequestHandled?: () => void;
   draggingId: string | null;
   onDragStartNode: (id: string) => void;
   onDragEndNode: () => void;
   t: TFunction;
 }) {
   const { node, children } = item;
-  const [expanded, setExpanded] = useState(true);
+  const expanded = !collapsedIds.has(node.id);
   const [dropHint, setDropHint] = useState<DropHint>(null);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(node.title);
+  const [flash, setFlash] = useState(false);
+  const rowRef = useRef<HTMLDivElement | null>(null);
 
   const isFolder = node.nodeType === 'folder';
   const isTable = node.nodeType === 'table';
@@ -77,6 +99,21 @@ function TreeNode({
     : isTable
       ? t('noteTree.untitledTable')
       : t('noteTree.untitledNote');
+
+  useEffect(() => {
+    if (!revealId || revealId !== node.id) return;
+    rowRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    setFlash(true);
+    const timer = setTimeout(() => setFlash(false), 1400);
+    return () => clearTimeout(timer);
+  }, [revealId, node.id]);
+
+  useEffect(() => {
+    if (!renameRequestId || renameRequestId !== node.id) return;
+    setRenameValue(node.title || defaultTitle);
+    setRenaming(true);
+    onRenameRequestHandled?.();
+  }, [renameRequestId, node.id]);
 
   const startRename = () => {
     setRenameValue(node.title || defaultTitle);
@@ -122,6 +159,7 @@ function TreeNode({
     dropHint === 'inside' ? 'fn-tree-node__row--drop-inside' : '',
     dropHint === 'before' ? 'fn-tree-node__row--drop-before' : '',
     dropHint === 'after' ? 'fn-tree-node__row--drop-after' : '',
+    flash ? 'fn-tree-node__row--flash' : '',
   ]
     .filter(Boolean)
     .join(' ');
@@ -129,6 +167,7 @@ function TreeNode({
   return (
     <li className={`fn-tree-node ${isActive ? 'active' : ''}`}>
       <div
+        ref={rowRef}
         className={rowClass}
         style={{ paddingLeft: `${depth * 12 + 4}px` }}
         draggable
@@ -146,7 +185,7 @@ function TreeNode({
           <button
             type="button"
             className="fn-tree-node__toggle"
-            onClick={() => setExpanded((v) => !v)}
+            onClick={() => onToggleCollapse(node.id)}
             aria-label={expanded ? t('noteTree.collapse') : t('noteTree.expand')}
           >
             {expanded ? '▾' : '▸'}
@@ -173,7 +212,11 @@ function TreeNode({
             onClick={() => onSelect(node.id)}
             onDoubleClick={(ev) => {
               ev.preventDefault();
-              startRename();
+              if (isFolder || !onOpenPinned) {
+                startRename();
+              } else {
+                onOpenPinned(node.id);
+              }
             }}
           >
             <span className="fn-tree-node__icon">{icon}</span>
@@ -225,7 +268,11 @@ function TreeNode({
               item={child}
               depth={depth + 1}
               activeId={activeId}
+              collapsedIds={collapsedIds}
+              onToggleCollapse={onToggleCollapse}
+              revealId={revealId}
               onSelect={onSelect}
+              onOpenPinned={onOpenPinned}
               onCreateFolder={onCreateFolder}
               onCreateNote={onCreateNote}
               onCreateTable={onCreateTable}
@@ -233,6 +280,8 @@ function TreeNode({
               onRename={onRename}
               onDelete={onDelete}
               onMove={onMove}
+              renameRequestId={renameRequestId}
+              onRenameRequestHandled={onRenameRequestHandled}
               draggingId={draggingId}
               onDragStartNode={onDragStartNode}
               onDragEndNode={onDragEndNode}
@@ -248,7 +297,11 @@ function TreeNode({
 export function NoteTree({
   notes,
   activeId,
+  collapsedIds,
+  onToggleCollapse,
+  revealId,
   onSelect,
+  onOpenPinned,
   onCreateFolder,
   onCreateNote,
   onCreateTable,
@@ -256,6 +309,8 @@ export function NoteTree({
   onRename,
   onDelete,
   onMove,
+  renameRequestId,
+  onRenameRequestHandled,
 }: NoteTreeProps) {
   const t = useT();
   const [rootDrop, setRootDrop] = useState(false);
@@ -312,7 +367,11 @@ export function NoteTree({
             item={item}
             depth={0}
             activeId={activeId}
+            collapsedIds={collapsedIds}
+            onToggleCollapse={onToggleCollapse}
+            revealId={revealId}
             onSelect={onSelect}
+            onOpenPinned={onOpenPinned}
             onCreateFolder={onCreateFolder}
             onCreateNote={onCreateNote}
             onCreateTable={onCreateTable}
@@ -320,6 +379,8 @@ export function NoteTree({
             onRename={onRename}
             onDelete={onDelete}
             onMove={onMove}
+            renameRequestId={renameRequestId}
+            onRenameRequestHandled={onRenameRequestHandled}
             draggingId={draggingId}
             onDragStartNode={setDraggingId}
             onDragEndNode={() => setDraggingId(null)}

@@ -1,8 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { ChatNotificationSettings, ChatSoundId, UiThemeId } from '@fastnote/api';
 import { CHAT_SOUND_IDS, UI_THEMES } from '@fastnote/api';
+import type { ShortcutAction, ShortcutBindings } from '@fastnote/shared';
+import { DEFAULT_SHORTCUTS, formatShortcutBinding, shortcutBindingFromEvent } from '@fastnote/shared';
 import { LOCALES, LOCALE_LABELS, useT, type Locale } from '@fastnote/i18n';
 import { chatSoundLabel, playChatNotificationSound } from './chatNotification';
+
+const SHORTCUT_ACTIONS: ShortcutAction[] = ['renameNote', 'lockVault', 'tableRepeatAction'];
 
 const THEME_SWATCHES: Record<UiThemeId, string> = {
   warm: '#c97b5a',
@@ -26,6 +30,8 @@ interface SettingsModalProps {
   chatNotify: ChatNotificationSettings;
   uiTheme: UiThemeId;
   locale: Locale;
+  shortcuts: ShortcutBindings;
+  onShortcutsChange: (bindings: ShortcutBindings) => void;
   onClose: () => void;
   onSaveServer: (url: string) => void;
   onSaveVaultLabel: (label: string) => void;
@@ -52,6 +58,8 @@ export function SettingsModal({
   chatNotify,
   uiTheme,
   locale,
+  shortcuts,
+  onShortcutsChange,
   onClose,
   onSaveServer,
   onSaveVaultLabel,
@@ -68,6 +76,25 @@ export function SettingsModal({
   const t = useT();
   const [pathDraft, setPathDraft] = useState(dataDirectory);
   const [vaultLabelDraft, setVaultLabelDraft] = useState(vaultLabel);
+  const [recordingAction, setRecordingAction] = useState<ShortcutAction | null>(null);
+
+  const SHORTCUT_LABELS: Record<ShortcutAction, string> = {
+    renameNote: t('settingsModal.shortcuts.renameNote'),
+    lockVault: t('settingsModal.shortcuts.lockVault'),
+    tableRepeatAction: t('settingsModal.shortcuts.tableRepeatAction'),
+  };
+
+  const handleShortcutKeyDown = (action: ShortcutAction, e: ReactKeyboardEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    if (e.key === 'Escape') {
+      setRecordingAction(null);
+      return;
+    }
+    const binding = shortcutBindingFromEvent(e);
+    if (!binding) return;
+    onShortcutsChange({ ...shortcuts, [action]: binding });
+    setRecordingAction(null);
+  };
 
   const THEME_LABELS: Record<UiThemeId, string> = {
     warm: t('settingsModal.theme.warm'),
@@ -217,6 +244,35 @@ export function SettingsModal({
                 <span>{LOCALE_LABELS[loc]}</span>
               </button>
             ))}
+          </div>
+        </fieldset>
+        <hr />
+        <fieldset className="fn-field fn-field--checkboxes">
+          <legend>{t('settingsModal.shortcuts.legend')}</legend>
+          <div className="fn-shortcuts-list">
+            {SHORTCUT_ACTIONS.map((action) => (
+              <div key={action} className="fn-shortcuts-list__row">
+                <span className="fn-shortcuts-list__label">{SHORTCUT_LABELS[action]}</span>
+                <button
+                  type="button"
+                  className={`fn-shortcuts-list__key${recordingAction === action ? ' recording' : ''}`}
+                  onClick={() => setRecordingAction(action)}
+                  onBlur={() => setRecordingAction((cur) => (cur === action ? null : cur))}
+                  onKeyDown={(e) => {
+                    if (recordingAction === action) handleShortcutKeyDown(action, e);
+                  }}
+                >
+                  {recordingAction === action
+                    ? t('settingsModal.shortcuts.recording')
+                    : formatShortcutBinding(shortcuts[action])}
+                </button>
+              </div>
+            ))}
+          </div>
+          <div className="fn-modal__actions">
+            <button type="button" onClick={() => onShortcutsChange({ ...DEFAULT_SHORTCUTS })}>
+              {t('settingsModal.shortcuts.reset')}
+            </button>
           </div>
         </fieldset>
         <hr />

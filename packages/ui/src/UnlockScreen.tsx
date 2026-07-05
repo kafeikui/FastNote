@@ -29,6 +29,7 @@ interface UnlockScreenProps {
   onCreateVault: (password: string) => Promise<void>;
   onUnlockLocal: (password: string) => Promise<void>;
   onCloudSync: (params: CloudSyncParams) => Promise<void>;
+  progress?: { current: number; total: number } | null;
 }
 
 export function UnlockScreen({
@@ -42,6 +43,7 @@ export function UnlockScreen({
   onCreateVault,
   onUnlockLocal,
   onCloudSync,
+  progress = null,
 }: UnlockScreenProps) {
   const t = useT();
   const activeVault = vaults.find((v) => v.id === activeVaultId);
@@ -144,6 +146,20 @@ export function UnlockScreen({
     <div className="fn-unlock">
       <div className="fn-unlock__card fn-unlock__card--wide">
         <h1>{APP_NAME}</h1>
+
+        {progress && progress.total > 0 && (
+          <div className="fn-unlock__progress">
+            <div className="fn-unlock__progress-bar">
+              <div
+                className="fn-unlock__progress-fill"
+                style={{ width: `${Math.min(100, Math.round((progress.current / progress.total) * 100))}%` }}
+              />
+            </div>
+            <span className="fn-unlock__progress-text">
+              {t('unlockScreen.decryptingProgress', { current: progress.current, total: progress.total })}
+            </span>
+          </div>
+        )}
 
         <div className="fn-unlock__vaults">
           <p className="fn-unlock__hint">{t('unlockScreen.selectOrCreateVault')}</p>

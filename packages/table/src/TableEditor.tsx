@@ -1,8 +1,10 @@
 import { useMemo, useState, useEffect, useCallback, useRef, type KeyboardEvent } from 'react';
-import type { NoteAttachment, TableDocument } from '@fastnote/shared';
+import type { NoteAttachment, ShortcutBinding, TableDocument } from '@fastnote/shared';
 import {
   attachmentDisplayLabel,
   buildAttachmentMarkdownRef,
+  formatShortcutBinding,
+  matchesShortcut,
   segmentsToMarkdown,
   splitTextWithAttachmentRefs,
 } from '@fastnote/shared';
@@ -33,6 +35,8 @@ export interface TableEditorProps {
   onRegisterInsert?: (insert: (text: string) => void) => void;
   onAttachmentDownload?: (id: string) => void;
   onAttachmentEdit?: (id: string, description: string) => void | Promise<void>;
+  /** Keybinding that repeats the last structural action (add/remove row/column), Excel-F4 style. */
+  repeatActionShortcut?: ShortcutBinding;
 }
 
 type SortDir = 'asc' | 'desc' | null;
@@ -42,6 +46,12 @@ interface CellPos {
   colIdx: number;
 }
 
+type LastAction =
+  | { type: 'addRow' }
+  | { type: 'addColumn' }
+  | { type: 'removeRow'; rowIdx: number }
+  | { type: 'removeColumn'; colIdx: number };
+
 export function TableEditor({
   document: doc,
   onChange,
@@ -49,6 +59,7 @@ export function TableEditor({
   onRegisterInsert,
   onAttachmentDownload,
   onAttachmentEdit,
+  repeatActionShortcut,
 }: TableEditorProps) {
   const t = useT();
   const locale = useLocale();
@@ -60,6 +71,11 @@ export function TableEditor({
   const [selFocus, setSelFocus] = useState<CellPos | null>(null);
   const [isSelecting, setIsSelecting] = useState(false);
   const tableWrapRef = useRef<HTMLDivElement>(null);
+  const lastActionRef = useRef<LastAction | null>(null);
+  const docRef = useRef(doc);
+  docRef.current = doc;
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
 
   const displayRows = useMemo(() => {
     const filtered = filterRows(doc, doc.rows, filters);
@@ -237,16 +253,65 @@ export function TableEditor({
     onRegisterInsert?.(insertAttachmentText);
   }, [onRegisterInsert, insertAttachmentText]);
 
+  const handleAddColumn = useCallback(() => {
+    lastActionRef.current = { type: 'addColumn' };
+    onChangeRef.current(addColumn(docRef.current, locale));
+  }, [locale]);
+
+  const handleAddRow = useCallback(() => {
+    lastActionRef.current = { type: 'addRow' };
+    onChangeRef.current(addRow(docRef.current));
+  }, []);
+
+  const handleRemoveColumn = useCallback((colIdx: number, colId: string) => {
+    lastActionRef.current = { type: 'removeColumn', colIdx };
+    onChangeRef.current(removeColumn(docRef.current, colId));
+  }, []);
+
+  const handleRemoveRow = useCallback((rowIdx: number, rowId: string) => {
+    lastActionRef.current = { type: 'removeRow', rowIdx };
+    onChangeRef.current(removeRow(docRef.current, rowId));
+  }, []);
+
+  const repeatLastAction = useCallback(() => {
+    const action = lastActionRef.current;
+    if (!action) return;
+    const current = docRef.current;
+    if (action.type === 'addRow') {
+      handleAddRow();
+    } else if (action.type === 'addColumn') {
+      handleAddColumn();
+    } else if (action.type === 'removeRow') {
+      const row = current.rows[action.rowIdx];
+      if (row) handleRemoveRow(action.rowIdx, row.id);
+    } else if (action.type === 'removeColumn') {
+      const col = current.columns[action.colIdx];
+      if (col) handleRemoveColumn(action.colIdx, col.id);
+    }
+  }, [handleAddRow, handleAddColumn, handleRemoveRow, handleRemoveColumn]);
+
+  const handleContainerKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (repeatActionShortcut && matchesShortcut(e, repeatActionShortcut)) {
+      e.preventDefault();
+      repeatLastAction();
+    }
+  };
+
   return (
-    <div className="fn-table-editor">
+    <div className="fn-table-editor" onKeyDown={handleContainerKeyDown}>
       <div className="fn-table-editor__tools">
-        <button type="button" onClick={() => onChange(addColumn(doc, locale))}>
+        <button type="button" onClick={handleAddColumn}>
           {t('tableEditor.addColumn')}
         </button>
-        <button type="button" onClick={() => onChange(addRow(doc))}>
+        <button type="button" onClick={handleAddRow}>
           {t('tableEditor.addRow')}
         </button>
         <span className="fn-table-editor__formula-hint">{t('tableEditor.formulaHint')}</span>
+        {repeatActionShortcut && (
+          <span className="fn-table-editor__formula-hint">
+            {t('tableEditor.repeatActionHint', { key: formatShortcutBinding(repeatActionShortcut) })}
+          </span>
+        )}
         {attachments.length > 0 && (
           <select
             className="fn-table-editor__attach-select"
@@ -294,7 +359,7 @@ export function TableEditor({
                       type="button"
                       className="fn-table__col-del"
                       title={t('tableEditor.deleteColumn')}
-                      onClick={() => onChange(removeColumn(doc, col.id))}
+                      onClick={() => handleRemoveColumn(colIdx, col.id)}
                     >
                       ×
                     </button>
@@ -350,7 +415,10 @@ export function TableEditor({
                   );
                 })}
                 <td>
-                  <button type="button" onClick={() => onChange(removeRow(doc, row.id))}>
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveRow(doc.rows.findIndex((r) => r.id === row.id), row.id)}
+                  >
                     ×
                   </button>
                 </td>

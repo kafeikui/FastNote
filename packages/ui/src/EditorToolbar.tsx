@@ -40,6 +40,15 @@ export function EditorToolbar({ editor, mode }: EditorToolbarProps) {
         const url = prompt(t('editorToolbar.linkPrompt'));
         if (url) editor.chain().focus().setLink({ href: url }).run();
       }, editor.isActive('link'))}
+      <span className="fn-editor-toolbar__sep" />
+      {btn('∑', () => {
+        const latex = prompt(t('editorToolbar.formulaInlinePrompt'));
+        if (latex) editor.chain().focus().insertInlineMath({ latex }).run();
+      }, editor.isActive('inlineMath'))}
+      {btn('∑∑', () => {
+        const latex = prompt(t('editorToolbar.formulaBlockPrompt'));
+        if (latex) editor.chain().focus().insertBlockMath({ latex }).run();
+      }, editor.isActive('blockMath'))}
     </div>
   );
 }
