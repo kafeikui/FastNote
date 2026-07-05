@@ -66,7 +66,7 @@ FastNote/
 │   ├── crypto/           # 密钥派生 / AES-GCM / X25519 等原语封装（@noble/*）
 │   ├── storage/          # IndexedDB 适配层（idb），Web/Electron 共用
 │   ├── search/           # MiniSearch 封装的本地全文索引
-│   ├── sync/             # 笔记/附件云同步客户端（push/pull + 冲突标记）
+│   ├── sync/             # 笔记/附件云同步客户端（push/pull + 冲突标记）；聊天历史走同一客户端里更简单的 push-once/pull-if-missing
 │   ├── im/               # 1:1 聊天协议客户端（WebSocket 封装、消息编解码、重连）
 │   ├── editor/           # Tiptap（WYSIWYG）+ CodeMirror（源码模式）封装
 │   ├── table/            # 表格文档模型、CSV/.fnxt 导入导出
@@ -165,9 +165,11 @@ sequenceDiagram
 - 注册/更新公钥：`PUT /api/v1/keys` 上传 `identity_pubkey` + `exchange_pubkey`（公钥明文，符合零知识模型——服务器只做"公钥黄页"）
 - 发消息：X25519 ECDH + HKDF 计数器密钥加密 → WebSocket 推送；对方离线则服务器暂存密文队列
 - 收消息：在线走 WebSocket 实时推送；离线消息通过 `GET /api/v1/messages/pending` 补拉，ack 后 `DELETE`
-- 消息与附件本地永久保存（IndexedDB），与是否登录无关；聊天记录不参与笔记同步管线
+- 消息与附件本地永久保存（IndexedDB），与是否登录无关
 - 未读计数、气泡/音效通知设置可在设置中配置
-- 不含：群聊、消息编辑/撤回、已读回执（Phase 2 预留）
+- 送达/已读回执（`delivery_ack`/`read_ack`，尽力而为、仅实时转发，不落库补投，见 `docs/PROTOCOL.md` §4）已实现
+- 聊天历史云同步：登录云账号后，`SyncClient.syncChatMessages` 会把本地未同步消息以密文原样推送到 `PUT /api/v1/sync/chat/:messageId`，并从 `GET /api/v1/sync/chat` 拉取该账号下尚未在本机出现过的消息（按 `message_id` 去重，不覆盖本地）——用于登录云账号的新设备补齐历史聊天记录。这与上面的 `message_queue` 离线投递是两套独立机制：一个是"账号维度的永久历史副本"，一个是"设备在线前的临时收件箱"（见 `docs/DATABASE.md` §2.5）
+- 不含：群聊、消息编辑/撤回（Phase 2 预留）
 
 ## 8. 安全清单
 

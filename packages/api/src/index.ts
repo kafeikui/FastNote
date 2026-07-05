@@ -31,6 +31,14 @@ export interface SyncAttachmentItem {
   updated_at: string;
 }
 
+export interface SyncChatMessageItem {
+  message_id: string;
+  peer_id: string;
+  direction: 'in' | 'out';
+  sent_at: string;
+  ciphertext: string;
+}
+
 export class ApiClient {
   constructor(private baseUrl: string, private locale: Locale = "zh") {}
 
@@ -254,6 +262,31 @@ export class ApiClient {
     });
     if (!res.ok) throw new Error(this.t("apiClient.attachmentPullFailed"));
     const data = (await res.json()) as { items: SyncAttachmentItem[] };
+    return data.items;
+  }
+
+  async pushChatMessage(
+    token: string,
+    messageId: string,
+    body: { peer_id: string; direction: "in" | "out"; sent_at: string; ciphertext: string },
+  ): Promise<void> {
+    const res = await fetch(this.url(`/api/v1/sync/chat/${messageId}`), {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(this.t("apiClient.syncPushFailed"));
+  }
+
+  async pullChatMessages(token: string): Promise<SyncChatMessageItem[]> {
+    const res = await fetch(this.url("/api/v1/sync/chat"), {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) throw new Error(this.t("apiClient.syncPullFailed"));
+    const data = (await res.json()) as { items: SyncChatMessageItem[] };
     return data.items;
   }
 

@@ -61,6 +61,8 @@ export interface SyncResult {
   conflicts: number;
   attachmentsPushed: number;
   attachmentsPulled: number;
+  chatPushed: number;
+  chatPulled: number;
 }
 
 export class SyncClient {
@@ -80,6 +82,8 @@ export class SyncClient {
     let conflicts = 0;
     let attachmentsPushed = 0;
     let attachmentsPulled = 0;
+    let chatPushed = 0;
+    let chatPulled = 0;
     const localMap = new Map(notes.map((n) => [n.id, n]));
 
     for (const note of notes) {
@@ -153,11 +157,14 @@ export class SyncClient {
       const att = await this.syncAttachments(storage);
       attachmentsPushed = att.pushed;
       attachmentsPulled = att.pulled;
+      const chat = await this.syncChatMessages(storage);
+      chatPushed = chat.pushed;
+      chatPulled = chat.pulled;
     }
 
     return {
       notes: Array.from(localMap.values()),
-      result: { pushed, pulled, conflicts, attachmentsPushed, attachmentsPulled },
+      result: { pushed, pulled, conflicts, attachmentsPushed, attachmentsPulled, chatPushed, chatPulled },
     };
   }
 
@@ -200,6 +207,47 @@ export class SyncClient {
         await storage.saveAttachmentFromRemote(item);
         pulled++;
       }
+    }
+
+    return { pushed, pulled };
+  }
+
+  /**
+   * Chat message history sync. Unlike notes/attachments, chat messages are
+   * effectively immutable once created (no meaningful concurrent-edit
+   * conflicts to resolve), so this uses a much simpler push-once /
+   * pull-if-missing model instead of the notes' version+conflict-copy
+   * machinery: push any locally-unsynced message as an opaque ciphertext
+   * blob (it's already encrypted with `notesKey` locally, so no
+   * decrypt/re-encrypt round-trip is needed here), and pull down any remote
+   * message this device doesn't have yet. A message already present locally
+   * is never overwritten by a pull, so local-only state (e.g. read/delivered
+   * status refinements) is never clobbered — the trade-off is that status
+   * changes made after the first sync don't themselves get re-synced.
+   */
+  async syncChatMessages(storage: StorageAdapter): Promise<{ pushed: number; pulled: number }> {
+    let pushed = 0;
+    let pulled = 0;
+
+    const pending = await storage.listPendingChatMessages();
+    for (const { id } of pending) {
+      const wire = await storage.getChatMessageWire(id);
+      if (!wire) continue;
+      await this.api.pushChatMessage(this.session.token, id, {
+        peer_id: wire.peerId,
+        direction: wire.direction,
+        sent_at: wire.sentAt,
+        ciphertext: wire.ciphertext,
+      });
+      await storage.markChatMessageSynced(id);
+      pushed++;
+    }
+
+    const remoteItems = await this.api.pullChatMessages(this.session.token);
+    for (const item of remoteItems) {
+      if (await storage.hasChatMessage(item.message_id)) continue;
+      await storage.saveChatMessageFromRemote(item);
+      pulled++;
     }
 
     return { pushed, pulled };

@@ -54,7 +54,7 @@
 
 ### 1.4 `chat_messages_local`（keyPath: `id`，索引 `by_peer` → `peerId`）
 
-聊天消息（本地永久保存，**不参与笔记同步管线**，与账号登录状态无关）：
+聊天消息（本地永久保存，与账号登录状态无关；登录云账号后会额外做一次简化版历史同步，见 §2.5）：
 
 | 字段 | 说明 |
 |------|------|
@@ -63,6 +63,7 @@
 | direction | `'in' \| 'out'` |
 | payloadEnc/payloadNonce | 加密后的 `ChatStoredPayload`（`{ v, body, peerUsername?, attachments?, status? }`），密钥来自本地 `notes_key`（与传输层的 IM 会话密钥是两套不同的密钥） |
 | sentAt | ISO8601 |
+| synced | boolean（可选，旧数据视为 `false`）——是否已推送到服务端 `chat_blobs`；只用于「推一次」的去重，不代表本地是否已从服务端拉取过 |
 
 ### 1.5 `chat_attachments_local`（keyPath: `id`，索引 `by_message` → `messageId`）
 
@@ -114,6 +115,7 @@ interface RelayData {
   note_blobs: Array<NoteBlobRecord & { user_id: string }>;
   attachment_blobs: Array<AttachmentBlobRecord & { user_id: string }>;
   message_queue: MessageQueueRecord[];
+  chat_blobs: Array<ChatBlobRecord & { user_id: string }>;
 }
 ```
 
@@ -163,7 +165,20 @@ interface RelayData {
 | payload | string | JSON 字符串化的 IM 密文信封（`{ counter, nonce, ciphertext }`） |
 | created_at | string | ISO8601 |
 
-对方 ack（送达）后立即 `DELETE /api/v1/messages/:id` 从队列移除，**没有 `delivered` 标记字段**——未 ack 前一直留在队列里，`GET /api/v1/messages/pending` 每次返回全部未删除项。
+对方通过离线补拉（`GET /api/v1/messages/pending` 之后）ack 时会调用 `DELETE /api/v1/messages/:id` 从队列移除；对方**在线、走 WebSocket 实时收到**该消息时，也会在回发 `delivery_ack` 的同时由服务端顺带调用同一个 `deleteMessage` 清理队列（`server/src/index.ts` 的 `delivery_ack` 分支），避免实时送达成功的消息永远滞留在队列里被反复重试。这张表本身**没有 `delivered`/`read` 标记字段**——它只是一个"未确认收件箱"，送达/已读状态是通过 WebSocket 上单独的 `delivery_ack`/`read_ack` 控制帧尽力而为地实时转发给发送者、再由发送者客户端在自己本地的 `chat_messages_local` 里更新 `status` 字段完成的（见 §2.3 与 `docs/PROTOCOL.md` §4），并不经过这张表持久化。
+
+### 2.5 `chat_blobs`（含 `user_id`，逻辑主键 `(user_id, message_id)`，聊天历史云同步）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| message_id | string | 消息 ID，与本地 `chat_messages_local.id` 一致 |
+| peer_id | string | 对方 user_id |
+| direction | `'in' \| 'out'` | |
+| ciphertext | string | 本地已加密的 `chat_messages_local.payloadEnc`+`payloadNonce` 直接打包成 wire 格式后原样上传（服务端不解密、不重新加密） |
+| sent_at | string | ISO8601 |
+| updated_at | string | ISO8601，服务端写入时间 |
+
+与 `note_blobs`/`attachment_blobs` 不同，聊天消息视为不可变（没有版本号/冲突副本机制）：`PUT /api/v1/sync/chat/:messageId` 只在本地消息尚未标记 `synced` 时推送一次；`GET /api/v1/sync/chat` 拉取该账号下的全部消息，客户端对本地已存在的 `id` 直接跳过（不会用远端内容覆盖本地，因此本地对 `status` 字段的后续更新——送达/已读——不会被拉取覆盖，但也不会再被重新推送同步到其他设备）。这张表与 `message_queue`（§2.4）是两套完全独立的机制：`message_queue` 是離線期间的临时收件箱，送达后即删除；`chat_blobs` 是账号维度的永久历史副本，用于新设备登录云账号后补齐历史聊天记录。
 
 > 说明：**没有 `prekeys` 表和 `devices` 表**——当前 IM 只用注册时/设置里上传的单一静态 `exchange_pubkey` 做 ECDH，没有 Signal 风格的一次性/签名预密钥体系，也不做多设备管理。
 

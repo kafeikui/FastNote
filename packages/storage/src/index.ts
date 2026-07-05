@@ -3,7 +3,7 @@ import type { NoteAttachment, NoteNode, ChatMessage, ChatAttachmentRef, ChatWire
 import { META_KEYS } from '@fastnote/shared';
 import type { ChatStoredPayload } from '@fastnote/shared';
 import { storedToChatMessage } from '@fastnote/shared';
-import type { SyncAttachmentItem } from '@fastnote/api';
+import type { SyncAttachmentItem, SyncChatMessageItem } from '@fastnote/api';
 import { storageDbName } from '@fastnote/api';
 import {
   decodeWireCiphertext,
@@ -35,6 +35,10 @@ interface StoredChatRow {
   payloadEnc: string;
   payloadNonce: string;
   sentAt: string;
+  /** Already pushed to the cloud-sync chat blob store — undefined/false on
+   * rows created before this field existed, which is exactly the "not yet
+   * synced" default we want (they'll get pushed once on the next sync). */
+  synced?: boolean;
 }
 
 interface StoredChatAttachment {
@@ -114,6 +118,13 @@ export interface AttachmentWirePayload {
   deleted: boolean;
 }
 
+export interface ChatMessageWirePayload {
+  peerId: string;
+  direction: 'in' | 'out';
+  sentAt: string;
+  ciphertext: string;
+}
+
 export interface StorageAdapter {
   getMeta(key: string): Promise<string | undefined>;
   setMeta(key: string, value: string): Promise<void>;
@@ -146,6 +157,11 @@ export interface StorageAdapter {
   listChatMessagesDecrypted(notesKey: Uint8Array): Promise<ChatMessage[]>;
   saveChatMessage(message: ChatMessage, notesKey: Uint8Array): Promise<void>;
   deleteChatMessage(id: string, notesKey: Uint8Array): Promise<void>;
+  hasChatMessage(id: string): Promise<boolean>;
+  listPendingChatMessages(): Promise<Array<{ id: string }>>;
+  getChatMessageWire(id: string): Promise<ChatMessageWirePayload | null>;
+  markChatMessageSynced(id: string): Promise<void>;
+  saveChatMessageFromRemote(item: SyncChatMessageItem): Promise<void>;
   saveChatAttachmentFromWire(
     messageId: string,
     peerId: string,
@@ -556,6 +572,10 @@ export class WebStorageAdapter implements StorageAdapter {
     };
     const enc = pack(encryptString(notesKey, JSON.stringify(stored)));
     const db = await this.getDb();
+    // Preserve the existing `synced` flag (e.g. a status-only update like a
+    // delivery/read ack shouldn't re-mark an already cloud-synced message as
+    // pending — that would just get re-pushed as unchanged content forever).
+    const existing = await db.get('chat_messages_local', message.id);
     await db.put('chat_messages_local', {
       id: message.id,
       peerId: message.peerId,
@@ -563,6 +583,7 @@ export class WebStorageAdapter implements StorageAdapter {
       payloadEnc: enc.enc,
       payloadNonce: enc.nonce,
       sentAt: message.sentAt,
+      synced: existing?.synced ?? false,
     });
   }
 
@@ -572,6 +593,50 @@ export class WebStorageAdapter implements StorageAdapter {
     await Promise.all(attRows.map((row) => db.delete('chat_attachments_local', row.id)));
     await db.delete('chat_messages_local', id);
     void notesKey;
+  }
+
+  async hasChatMessage(id: string): Promise<boolean> {
+    const db = await this.getDb();
+    return !!(await db.get('chat_messages_local', id));
+  }
+
+  async listPendingChatMessages(): Promise<Array<{ id: string }>> {
+    const db = await this.getDb();
+    const rows = await db.getAll('chat_messages_local');
+    return rows.filter((r) => !r.synced).map((r) => ({ id: r.id }));
+  }
+
+  async getChatMessageWire(id: string): Promise<ChatMessageWirePayload | null> {
+    const db = await this.getDb();
+    const row = await db.get('chat_messages_local', id);
+    if (!row) return null;
+    return {
+      peerId: row.peerId,
+      direction: row.direction,
+      sentAt: row.sentAt,
+      ciphertext: encodeWireCiphertext(unpack(row.payloadEnc, row.payloadNonce)),
+    };
+  }
+
+  async markChatMessageSynced(id: string): Promise<void> {
+    const db = await this.getDb();
+    const row = await db.get('chat_messages_local', id);
+    if (!row) return;
+    await db.put('chat_messages_local', { ...row, synced: true });
+  }
+
+  async saveChatMessageFromRemote(item: SyncChatMessageItem): Promise<void> {
+    const db = await this.getDb();
+    const { enc, nonce } = pack(decodeWireCiphertext(item.ciphertext));
+    await db.put('chat_messages_local', {
+      id: item.message_id,
+      peerId: item.peer_id,
+      direction: item.direction,
+      payloadEnc: enc,
+      payloadNonce: nonce,
+      sentAt: item.sent_at,
+      synced: true,
+    });
   }
 
   async saveChatAttachmentFromWire(
@@ -676,6 +741,8 @@ declare global {
       getDefaultDataDirectory?: () => Promise<string>;
       setDataDirectory?: (dir: string) => Promise<string>;
       pickStorageDirectory?: () => Promise<string | null>;
+      getUserDataPath?: () => Promise<string>;
+      openUserDataFolder?: () => Promise<void>;
     };
   }
 }

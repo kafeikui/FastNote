@@ -102,13 +102,19 @@ export function decryptMessage(
 }
 
 export interface WSMessage {
-  type: 'message' | 'delivery_ack' | 'ping' | 'pong';
+  type: 'message' | 'delivery_ack' | 'read_ack' | 'ping' | 'pong';
   id?: string;
   from?: string;
   to?: string;
   sent_at?: string;
   payload?: IMEnvelope;
 }
+
+/** Invoked when the peer confirms they received (`delivery_ack`) or actually
+ * viewed (`read_ack`) one of OUR outgoing messages. `peerId` is who sent the
+ * ack (i.e. the recipient of the original message), `msgId` is the id of our
+ * original outgoing message. */
+export type IMAckHandler = (peerId: string, msgId: string) => void;
 
 export type IMMessageHandler = (
   peerId: string,
@@ -121,6 +127,8 @@ export class IMClient {
   private ws: WebSocket | null = null;
   private sessions = new Map<string, IMSessionState>();
   private onMessage?: IMMessageHandler;
+  private onDeliveryAck?: IMAckHandler;
+  private onReadAck?: IMAckHandler;
   private ensurePeerSession?: (peerId: string) => Promise<boolean>;
   private openPromise: Promise<void> | null = null;
   private openResolve: (() => void) | null = null;
@@ -136,6 +144,14 @@ export class IMClient {
 
   setOnMessage(handler: IMMessageHandler): void {
     this.onMessage = handler;
+  }
+
+  setOnDeliveryAck(handler: IMAckHandler): void {
+    this.onDeliveryAck = handler;
+  }
+
+  setOnReadAck(handler: IMAckHandler): void {
+    this.onReadAck = handler;
   }
 
   setEnsurePeerSession(handler: (peerId: string) => Promise<boolean>): void {
@@ -269,6 +285,15 @@ export class IMClient {
     return state;
   }
 
+  /** Tell `peerId` that we've actually displayed their message `messageId` to
+   * the user (as opposed to `delivery_ack`, which just means our client
+   * received and decrypted it). Best-effort only — like `delivery_ack`, it's
+   * a plaintext WS control frame that's simply dropped if we're offline. */
+  sendReadAck(peerId: string, messageId: string): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify({ type: 'read_ack', id: messageId, to: peerId } satisfies WSMessage));
+  }
+
   async processEnvelope(
     from: string,
     msgId: string,
@@ -308,6 +333,15 @@ export class IMClient {
         if (ok) {
           this.ws?.send(JSON.stringify({ type: 'delivery_ack', id: msg.id, to: msg.from }));
         }
+        return;
+      }
+      if (msg.type === 'delivery_ack' && msg.from && msg.id) {
+        this.onDeliveryAck?.(msg.from, msg.id);
+        return;
+      }
+      if (msg.type === 'read_ack' && msg.from && msg.id) {
+        this.onReadAck?.(msg.from, msg.id);
+        return;
       }
     } catch (err) {
       console.warn('[IM] handleRaw failed', err);

@@ -83,6 +83,7 @@ import {
   playChatNotificationSound,
   AboutModal,
   NoteAttachments,
+  DropdownMenu,
   type VaultListItem,
 } from '@fastnote/ui';
 
@@ -90,6 +91,10 @@ type VaultKeys = Awaited<ReturnType<typeof deriveKeysFromPassword>>;
 type AppView = 'notes' | 'chat';
 
 const SAVE_DEBOUNCE_MS = 500;
+
+function chatStatusRank(status: ChatMessage['status']): number {
+  return status === 'read' ? 2 : status === 'delivered' ? 1 : 0;
+}
 
 function newNode(nodeType: NodeType, parentId: string | null, sortOrder: number, locale: Locale): NoteNode {
   const now = new Date().toISOString();
@@ -142,6 +147,7 @@ export function VaultApp() {
     [storageEpoch],
   );
   const [dataDirectory, setDataDirectory] = useState('');
+  const [realStoragePath, setRealStoragePath] = useState('');
   const [isFirstRun, setIsFirstRun] = useState<boolean | null>(null);
   const [keys, setKeys] = useState<VaultKeys | null>(null);
   const [notes, setNotes] = useState<NoteNode[]>([]);
@@ -219,13 +225,21 @@ export function VaultApp() {
   const insertDocRef = useRef<(text: string) => void>(() => {});
   const insertTableRef = useRef<(text: string) => void>(() => {});
   const importFolderInputRef = useRef<HTMLInputElement>(null);
+  const importNoteFileInputRef = useRef<HTMLInputElement>(null);
+  const importTableFileInputRef = useRef<HTMLInputElement>(null);
   const importTargetParentRef = useRef<string | null>(null);
+  const importNoteForceRef = useRef(false);
+  const importFolderForceRef = useRef(false);
   const noteWidthRef = useRef(noteWidth);
   noteWidthRef.current = noteWidth;
   keysRef.current = keys;
   appViewRef.current = appView;
   activePeerRef.current = activePeerId;
   chatNotifyRef.current = chatNotify;
+
+  useEffect(() => {
+    void window.fastnote?.getUserDataPath?.().then((p) => p && setRealStoragePath(p));
+  }, []);
 
   useEffect(() => {
     void (async () => {
@@ -371,6 +385,30 @@ export function VaultApp() {
     [storage],
   );
 
+  // Delivery/read receipts only ever move a message's status forward
+  // (sent -> delivered -> read); an ack arriving out of order (or twice)
+  // should never regress a message that's already further along.
+  const updateChatMessageStatus = useCallback(
+    (msgId: string, status: ChatMessage['status']) => {
+      const k = keysRef.current;
+      if (!k) return;
+      setChatMessages((prev) => {
+        let changed = false;
+        const next = prev.map((m) => {
+          if (m.id !== msgId || m.direction !== 'out' || chatStatusRank(status) <= chatStatusRank(m.status)) {
+            return m;
+          }
+          changed = true;
+          const updated = { ...m, status };
+          void storage.saveChatMessage(updated, k.notesKey);
+          return updated;
+        });
+        return changed ? next : prev;
+      });
+    },
+    [storage],
+  );
+
   const clearPeerUnread = useCallback((peerId: string) => {
     setUnreadByPeer((prev) => {
       if (!prev[peerId]) return prev;
@@ -469,6 +507,32 @@ export function VaultApp() {
     const id = setInterval(tick, 2000);
     return () => clearInterval(id);
   }, [appView, session]);
+
+  // While a thread is actively open, tell the peer we've read whatever's
+  // still marked unread on our side and flip it to 'read' locally. Re-runs
+  // whenever chatMessages changes (e.g. a new message just arrived while the
+  // thread is open) but converges immediately since the next pass finds
+  // nothing left with status !== 'read'.
+  useEffect(() => {
+    if (appView !== 'chat' || !activePeerId || !keys) return;
+    const unread = chatMessages.filter(
+      (m) => m.peerId === activePeerId && m.direction === 'in' && m.status !== 'read',
+    );
+    if (unread.length === 0) return;
+    const client = imRef.current;
+    for (const m of unread) {
+      client?.sendReadAck(activePeerId, m.id);
+    }
+    const notesKey = keys.notesKey;
+    setChatMessages((prev) =>
+      prev.map((m) =>
+        m.peerId === activePeerId && m.direction === 'in' && m.status !== 'read'
+          ? { ...m, status: 'read' }
+          : m,
+      ),
+    );
+    void Promise.all(unread.map((m) => storage.saveChatMessage({ ...m, status: 'read' }, notesKey)));
+  }, [appView, activePeerId, chatMessages, keys, storage]);
 
   const chatSessions = useMemo(
     () =>
@@ -629,6 +693,8 @@ export function VaultApp() {
       };
 
       client.setOnMessage(handleDecrypted);
+      client.setOnDeliveryAck((_peerId, msgId) => updateChatMessageStatus(msgId, 'delivered'));
+      client.setOnReadAck((_peerId, msgId) => updateChatMessageStatus(msgId, 'read'));
 
       const pullPending = async () => {
         await client.pullPendingMessages(serverUrl, userSession.token);
@@ -639,7 +705,7 @@ export function VaultApp() {
       client.connect();
       void pullPending().catch((err) => console.error('fetchPending failed', err));
     },
-    [serverUrl, processIncomingChat, storage, t],
+    [serverUrl, processIncomingChat, storage, t, updateChatMessageStatus],
   );
 
   const ensureImReady = useCallback(async (): Promise<IMClient> => {
@@ -815,7 +881,7 @@ export function VaultApp() {
     }
   };
 
-  const handleImportFolder = async (fileList: FileList, targetParentId: string | null) => {
+  const handleImportFolder = async (fileList: FileList, targetParentId: string | null, force = false) => {
     if (!keys || fileList.length === 0) return;
 
     const folderIdByPath = new Map<string, string>();
@@ -860,7 +926,23 @@ export function VaultApp() {
       const ext = hasExt ? fileName.slice(lastDot + 1).toLowerCase() : '';
       const baseName = hasExt ? fileName.slice(0, lastDot) : fileName;
 
-      if (!hasExt) {
+      // Force mode: ignore the extension entirely and import every file's
+      // raw text content as a note (e.g. useful for source files, configs,
+      // logs, or misnamed/extension-less text files that would otherwise be
+      // skipped or misdetected as a table below).
+      if (force) {
+        try {
+          const text = await file.text();
+          const node = newNode('note', parentId, nextSortOrder(parentId), locale);
+          node.title = baseName;
+          node.contentMd = text;
+          node.contentHash = hashContent(text);
+          newNotes.push(node);
+          importedCount++;
+        } catch {
+          skippedCount++;
+        }
+      } else if (!hasExt || ext === 'txt') {
         try {
           const text = await file.text();
           const node = newNode('note', parentId, nextSortOrder(parentId), locale);
@@ -908,9 +990,83 @@ export function VaultApp() {
     );
   };
 
-  const openImportFolder = (parentId: string | null) => {
+  const openImportFolder = (parentId: string | null, force = false) => {
     importTargetParentRef.current = parentId;
+    importFolderForceRef.current = force;
     importFolderInputRef.current?.click();
+  };
+
+  const openImportNoteFile = (parentId: string | null, force = false) => {
+    importTargetParentRef.current = parentId;
+    importNoteForceRef.current = force;
+    // The `accept` filter is only a UI hint for the native file picker (it
+    // never restricts what `handleImportFiles` will actually read/import —
+    // that already accepts any file's text content for notes); force mode
+    // just lifts the filter so non-.txt files are selectable in the dialog
+    // in the first place.
+    const input = importNoteFileInputRef.current;
+    if (input) input.accept = force ? '' : '.txt,text/plain';
+    input?.click();
+  };
+
+  const openImportTableFile = (parentId: string | null) => {
+    importTargetParentRef.current = parentId;
+    importTableFileInputRef.current?.click();
+  };
+
+  const handleImportFiles = async (
+    fileList: FileList,
+    targetParentId: string | null,
+    kind: 'note' | 'table',
+  ) => {
+    if (!keys || fileList.length === 0) return;
+
+    let order = notes.filter((n) => n.parentId === targetParentId && !n.deleted).length;
+    const newNotes: NoteNode[] = [];
+    let importedCount = 0;
+    let skippedCount = 0;
+
+    for (const file of Array.from(fileList)) {
+      const lastDot = file.name.lastIndexOf('.');
+      const baseName = lastDot > 0 ? file.name.slice(0, lastDot) : file.name;
+      try {
+        const text = await file.text();
+        if (kind === 'table') {
+          const doc = importTableCsv(text, locale);
+          const md = serializeTable(doc);
+          const node = newNode('table', targetParentId, order++, locale);
+          node.title = baseName;
+          node.contentMd = md;
+          node.contentHash = hashContent(md);
+          newNotes.push(node);
+        } else {
+          const node = newNode('note', targetParentId, order++, locale);
+          node.title = baseName;
+          node.contentMd = text;
+          node.contentHash = hashContent(text);
+          newNotes.push(node);
+        }
+        importedCount++;
+      } catch {
+        skippedCount++;
+      }
+    }
+
+    if (newNotes.length === 0) {
+      alert(t('vaultApp.importNothingFound'));
+      return;
+    }
+
+    setNotes((prev) => [...prev, ...newNotes]);
+    for (const node of newNotes) {
+      await persistNote(node);
+    }
+    alert(
+      t('vaultApp.importDone', {
+        imported: importedCount,
+        skipped: skippedCount ? t('vaultApp.importSkipped', { count: skippedCount }) : '',
+      }),
+    );
   };
 
   const handleNoteResizeStart = (e: ReactMouseEvent) => {
@@ -1127,6 +1283,7 @@ export function VaultApp() {
     setNotes(result.notes);
     rebuildSearchIndex(result.notes);
     await saveSearchSnapshot(derived.indexKey);
+    await loadChatHistory(derived);
     const { pushed, pulled, conflicts, attachmentsPushed, attachmentsPulled } = result.result;
     setSyncStatus(
       t('vaultApp.syncResult', {
@@ -1274,6 +1431,7 @@ export function VaultApp() {
       setNotes(result.notes);
       rebuildSearchIndex(result.notes);
       await saveSearchSnapshot(keys.indexKey);
+      await loadChatHistory(keys);
       const { pushed, pulled, conflicts, attachmentsPushed, attachmentsPulled } = result.result;
       setSyncStatus(
         t('vaultApp.syncResult', {
@@ -1418,6 +1576,16 @@ export function VaultApp() {
 
   const handleSaveDataDirectory = async (dir: string) => {
     if (!dir) return;
+    // Switching vaults/namespaces requires unlocking again, which means
+    // tearing down the current React tree (UnlockScreen replaces it). Doing
+    // that reset via setState + a blocking window.alert() used to leave the
+    // renderer's keyboard focus in limbo in Electron (the native alert steals
+    // OS-level focus and doesn't reliably hand it back to the freshly-mounted
+    // password input) — the app looked fine but you could not type. A full
+    // page reload sidesteps this entirely: on load the browser/renderer
+    // always starts with a clean focus state, and UnlockScreen's autoFocus
+    // reliably applies.
+    if (!window.confirm(t('vaultApp.dataDirChangeConfirm'))) return;
     let saved = dir;
     if (window.fastnote?.setDataDirectory) {
       saved = await window.fastnote.setDataDirectory(dir);
@@ -1425,25 +1593,14 @@ export function VaultApp() {
     const namespace = namespaceFromPath(saved);
     saveStorageNamespace(namespace);
     saveStoragePathLabel(saved);
-    setDataDirectory(saved);
     let reg = loadVaultRegistry();
     if (!reg.some((v) => v.namespace === namespace)) {
       const entry = createVaultRegistryEntry(saved.split(/[/\\]/).pop() || t('vaultApp.defaultDesktopVaultLabel'));
       entry.namespace = namespace;
       reg = [...reg, entry];
       saveVaultRegistry(reg);
-      setVaultRegistry(reg);
-      setActiveVaultId(entry.id);
-    } else {
-      setActiveVaultId(reg.find((v) => v.namespace === namespace)!.id);
     }
-    setStorageEpoch((n) => n + 1);
-    setKeys(null);
-    setNotes([]);
-    setActiveId(null);
-    setAttachments([]);
-    setSession(loadSession(namespace));
-    alert(t('vaultApp.dataDirUpdated'));
+    window.location.reload();
   };
 
   const handlePickDataDirectory = async (): Promise<string | null> => {
@@ -1485,7 +1642,35 @@ export function VaultApp() {
         onChange={(e) => {
           const files = e.target.files;
           if (files && files.length > 0) {
-            void handleImportFolder(files, importTargetParentRef.current);
+            void handleImportFolder(files, importTargetParentRef.current, importFolderForceRef.current);
+          }
+          e.target.value = '';
+        }}
+      />
+      <input
+        ref={importNoteFileInputRef}
+        type="file"
+        multiple
+        hidden
+        accept=".txt,text/plain"
+        onChange={(e) => {
+          const files = e.target.files;
+          if (files && files.length > 0) {
+            void handleImportFiles(files, importTargetParentRef.current, 'note');
+          }
+          e.target.value = '';
+        }}
+      />
+      <input
+        ref={importTableFileInputRef}
+        type="file"
+        multiple
+        hidden
+        accept=".csv,text/csv"
+        onChange={(e) => {
+          const files = e.target.files;
+          if (files && files.length > 0) {
+            void handleImportFiles(files, importTargetParentRef.current, 'table');
           }
           e.target.value = '';
         }}
@@ -1510,10 +1695,18 @@ export function VaultApp() {
             </button>
             {appView === 'notes' && (
               <>
-                <button type="button" onClick={() => handleCreate('note', null)}>{t('vaultApp.newNote')}</button>
-                <button type="button" onClick={() => handleCreate('table', null)}>{t('vaultApp.newTable')}</button>
-                <button type="button" onClick={() => handleCreate('folder', null)}>{t('vaultApp.newFolder')}</button>
-                <button type="button" title={t('vaultApp.importFolderTitle')} onClick={() => openImportFolder(null)}>{t('vaultApp.importFolder')}</button>
+                <DropdownMenu label={`+ ${t('vaultApp.newMenu')}`}>
+                  <button type="button" onClick={() => handleCreate('note', null)}>{t('vaultApp.newNote')}</button>
+                  <button type="button" onClick={() => handleCreate('table', null)}>{t('vaultApp.newTable')}</button>
+                  <button type="button" onClick={() => handleCreate('folder', null)}>{t('vaultApp.newFolder')}</button>
+                </DropdownMenu>
+                <DropdownMenu label={`⇪ ${t('vaultApp.importMenu')}`}>
+                  <button type="button" title={t('vaultApp.importNoteFileTitle')} onClick={() => openImportNoteFile(null)}>{t('vaultApp.importNoteFile')}</button>
+                  <button type="button" title={t('vaultApp.importNoteFileForceTitle')} onClick={() => openImportNoteFile(null, true)}>{t('vaultApp.importNoteFileForce')}</button>
+                  <button type="button" title={t('vaultApp.importTableFileTitle')} onClick={() => openImportTableFile(null)}>{t('vaultApp.importTableFile')}</button>
+                  <button type="button" title={t('vaultApp.importFolderTitle')} onClick={() => openImportFolder(null)}>{t('vaultApp.importFolder')}</button>
+                  <button type="button" title={t('vaultApp.importFolderForceTitle')} onClick={() => openImportFolder(null, true)}>{t('vaultApp.importFolderForce')}</button>
+                </DropdownMenu>
                 {activeContent?.nodeType === 'note' && (
                   <>
                     <button type="button" className={editorMode === 'wysiwyg' ? 'active' : ''} onClick={() => handleEditorMode('wysiwyg')}>{t('vaultApp.modeWysiwyg')}</button>
@@ -1658,6 +1851,12 @@ export function VaultApp() {
           vaultLabel={activeVaultLabel}
           syncStatus={syncStatus}
           dataDirectory={dataDirectory}
+          realStoragePath={realStoragePath}
+          onOpenStorageFolder={
+            window.fastnote?.openUserDataFolder
+              ? () => void window.fastnote?.openUserDataFolder?.()
+              : undefined
+          }
           isElectron={!!window.fastnote?.isElectron}
           chatNotify={chatNotify}
           uiTheme={uiTheme}

@@ -95,9 +95,18 @@ export function EmbeddedAttachmentChip({
         <span
           className="fn-embed-attach__drag"
           title={t('embeddedAttachmentChip.dragToMove')}
-          data-drag-handle
-          draggable
-          onMouseDown={(e) => e.stopPropagation()}
+          // Only used by consumers that wire up their own onDragStart (table
+          // cells doing custom cross-cell reordering) — there we need to stop
+          // the mousedown from bubbling up to the cell's own selection/drag
+          // handling. In the note editor this chip is a ProseMirror/Tiptap
+          // node view instead, and its whole-node drag-to-reorder relies on
+          // the native mousedown reaching the editor view's own DOM listener;
+          // stopping propagation there would silently break dragging the
+          // attachment around the note (no onDragStart is passed in that
+          // case, so this condition naturally no-ops for the editor).
+          data-drag-handle={onDragStart ? true : undefined}
+          draggable={!!onDragStart}
+          onMouseDown={onDragStart ? (e) => e.stopPropagation() : undefined}
           onDragStart={onDragStart}
           onDragEnd={onDragEnd}
         >

@@ -14,7 +14,8 @@ Encrypted notes + 1:1 end-to-end encrypted instant messaging. Built for personal
 - [Protocol spec](docs/PROTOCOL.md)
 - [Database schema](docs/DATABASE.md)
 - [Phase 1 plan](docs/PHASE1.md)
-- [Deployment guide](docs/DEPLOYMENT.md) (HTTPS + coexisting with nginx + certbot auto-renewal)
+- [Deployment guide](docs/DEPLOYMENT.md) (self-hosted relay: HTTPS + coexisting with nginx + certbot auto-renewal)
+- [Vercel deployment](docs/VERCEL.md) (Web frontend only — the relay server can't run on Vercel, see why inside)
 - [Memory Bank](memory-bank/) (persistent record of project background, current progress, and technical conventions — read this first if you're an AI assistant or a new contributor)
 
 ## Features
@@ -115,6 +116,10 @@ docker compose up -d   # binds to 127.0.0.1:8787 only, never exposed directly to
 For public deployment, the relay only listens on localhost; nginx handles TLS termination and reverse proxying on 443/80. The full walkthrough for "coexisting with your existing nginx sites + requesting/auto-renewing certificates with certbot" lives in the **[deployment guide](docs/DEPLOYMENT.md)**; a sample nginx site config is at `server/deploy/nginx/fastnote.conf` (a standalone file that doesn't touch your other site configs).
 
 > ⚠️ **`JWT_SECRET` has no default value** — `docker-compose.yml` refuses to start if it's missing, to prevent a production deployment from accidentally using a placeholder that would let anyone forge login tokens.
+
+### Web frontend on Vercel (optional, separate from the relay above)
+
+The static `apps/web` build can also be hosted on Vercel instead of your own static host — a root-level `vercel.json` already wires up the pnpm monorepo build (`pnpm --filter @fastnote/web build` → `apps/web/dist`). See **[docs/VERCEL.md](docs/VERCEL.md)** for the full walkthrough and why the relay server itself can't run on Vercel (it needs long-lived WebSocket connections + real local-disk persistence, neither of which fits Vercel's stateless serverless/edge model).
 
 ### Desktop client releases (CI)
 

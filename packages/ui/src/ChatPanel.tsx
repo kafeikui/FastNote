@@ -182,7 +182,23 @@ export function ChatPanel({
                     onLoadPreview={onLoadAttachmentPreview}
                   />
                 ) : null}
-                <time>{new Date(m.sentAt).toLocaleString()}</time>
+                <div className="fn-chat__bubble-foot">
+                  <time>{new Date(m.sentAt).toLocaleString()}</time>
+                  {m.direction === 'out' && (
+                    <span
+                      className={`fn-chat__status fn-chat__status--${m.status}`}
+                      title={
+                        m.status === 'read'
+                          ? t('chatPanel.statusRead')
+                          : m.status === 'delivered'
+                            ? t('chatPanel.statusDelivered')
+                            : t('chatPanel.statusSent')
+                      }
+                    >
+                      {m.status === 'read' ? '✓✓' : '✓'}
+                    </span>
+                  )}
+                </div>
               </div>
             ))
           )}

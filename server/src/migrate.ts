@@ -4,6 +4,7 @@ import initSqlJs from 'sql.js';
 import type { JsonRelayStore } from './store.js';
 import type {
   AttachmentBlobRecord,
+  ChatBlobRecord,
   MessageQueueRecord,
   NoteBlobRecord,
   UserRecord,
@@ -40,6 +41,7 @@ function readSqliteRelay(dbPath: string): Promise<{
   note_blobs: Array<NoteBlobRecord & { user_id: string }>;
   attachment_blobs: Array<AttachmentBlobRecord & { user_id: string }>;
   message_queue: MessageQueueRecord[];
+  chat_blobs: Array<ChatBlobRecord & { user_id: string }>;
 }> {
   return initSqlJs().then((sql) => {
     const db = new sql.Database(readFileSync(dbPath));
@@ -109,7 +111,10 @@ function readSqliteRelay(dbPath: string): Promise<{
         };
       });
 
-      return { users, note_blobs, attachment_blobs, message_queue };
+      // The legacy sqlite store predates chat-history sync entirely, so
+      // there's nothing to carry over here — new chat blobs accumulate from
+      // this point on in the JSON store.
+      return { users, note_blobs, attachment_blobs, message_queue, chat_blobs: [] };
     } finally {
       db.close();
     }

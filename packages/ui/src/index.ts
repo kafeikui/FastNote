@@ -13,3 +13,5 @@ export { AboutModal } from './AboutModal';
 export { NoteAttachments } from './NoteAttachments';
 export { EmbeddedAttachmentChip } from './EmbeddedAttachmentChip';
 export type { EmbeddedAttachmentChipProps } from './EmbeddedAttachmentChip';
+export { DropdownMenu } from './DropdownMenu';
+export type { DropdownMenuProps } from './DropdownMenu';

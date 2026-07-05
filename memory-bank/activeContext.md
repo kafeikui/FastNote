@@ -1,6 +1,43 @@
 # Active Context — FastNote
 
-## 当前工作焦点（最新会话，2026-07-04）
+## 当前工作焦点（最新会话，2026-07-05 第三轮：版本 bump + Vercel 部署方案）
+
+用户要求 bump 版本、准备 git 提交、并给出 Web 前端的 Vercel 部署方案：
+
+- **版本号**：所有 workspace 的 `package.json`（根 + `packages/*` 十二个包 + `apps/web` + `apps/desktop` + `server`）从 `0.1.0` 统一 bump 到 `0.2.0`——上一个 `0.1.0`/"first commit" 之后这一批加的功能（i18n、CSP 修复、表格公式与统计、侧边栏收起、四套主题、聊天送达/已读回执、聊天历史云同步、新建/导入下拉菜单+强制导入、加密库标签/真实存储路径说明等）体量上明显是 minor 版本，不是 patch。`pnpm-lock.yaml` 不需要跟着变（workspace 内部包之间是 `workspace:*`/`link:` 引用，lockfile 里不固化这些内部包的版本号），`pnpm install --frozen-lockfile` 验证过通过。
+- **Vercel 部署方案**：新增仓库根目录 `vercel.json`（`installCommand: pnpm install --frozen-lockfile` + `buildCommand: pnpm --filter @fastnote/web build` + `outputDirectory: apps/web/dist`），已经用完全相同的命令在本地跑通验证过。新增 `docs/VERCEL.md` 详细说明：
+  - **只部署 Web 前端**，中继服务器（`server/`，长连接 WebSocket + 本地 JSON 文件持久化）架构上就不适合 Vercel 的无状态 serverless/edge 模型，必须继续按 `docs/DEPLOYMENT.md` 部署到自己的 VPS。
+  - 两者是完全独立的部署单元：前端连哪个中继服务器，是用户在设置里自己填、存在浏览器 `localStorage` 里的（`fastnote_server_url`），不是构建期注入的，所以 Vercel 项目**不需要配置任何环境变量**。
+  - 服务器端 CORS 已经是 `{ origin: true }`（`server/src/index.ts`），Vercel 域名和中继服务器域名不同源也能直接跨域访问，不需要额外改服务器配置。
+  - Vercel 项目的 "Root Directory" 必须保持仓库根目录（不要设成 `apps/web`），否则 Vercel 找不到 `pnpm-workspace.yaml`，workspace 包解析会失败——这是本文档里特别强调的一个坑。
+  - 没有引入新的对外网络访问，CSP 逻辑不受影响（CSP 是运行时从 `localStorage` 生成并写入 `<meta>` 的，不是 HTTP 响应头，Vercel 侧不需要配置 header）。
+- README（英文主版本 + `README.zh-CN.md`）都新增了指向 `docs/VERCEL.md` 的链接和一小段说明；`docs/DEPLOYMENT.md` 顶部加了一句话澄清"本文档只讲中继服务器，前端部署见 VERCEL.md"。
+- 以上改动已通过 `pnpm build`（全仓）+ 单独模拟 `vercel.json` 里那条 `buildCommand` 验证产物能正确生成在 `apps/web/dist`。
+
+## 更早会话焦点（2026-07-05 第二轮）
+
+用户反馈上一轮改动里 3 个新问题：
+
+1. **勾选状态语义不对**：`ChatPanel.tsx` 之前是 `m.status === 'sent' ? '✓' : '✓✓'`，导致"已送达"和"已读"都显示双对勾，无法区分。改为 `m.status === 'read' ? '✓✓' : '✓'`（`sent`/`delivered` 都是单对勾，只有 `read` 才是双对勾），并新增 `.fn-chat__status--delivered` 样式（用 `--text` 而非 `--muted`，让"已送达"比"已发送"视觉上更实一点，"已读"保持 `--accent` 强调色）。
+2. **新建/导入下拉点击没反应**：根因是 `DropdownMenu.tsx` 用 `onClickCapture={() => setOpen(false)}` 挂在菜单容器上"点击菜单里任何东西就关闭菜单"——capture 阶段是从外到内先于目标元素的 bubble 阶段执行的，这种"祖先 capture 先于目标 bubble"的顺序不是很多人假设的那样安全（尤其是配合子元素在同一次点击事件里可能有副作用，如触发隐藏 `<input type=file>` 的 `.click()`）。改成 `onClick`（bubble，非 capture）：DOM 规范保证 bubble 阶段永远是"目标元素自己的 onClick 先执行，父级 onClick 后执行"，从而保证菜单项自身的业务逻辑（`handleCreate`/`openImportNoteFile` 等）一定先跑完，菜单才关闭。
+3. **导入笔记文件/导入文件夹增加"强制导入"选项**：之前"导入笔记文件"文件选择框写死 `accept=".txt,text/plain"`，导致原生文件选择对话框会把非 .txt 文件过滤掉/不好选；"导入文件夹"批量导入时无扩展名/`.txt` 当笔记、`.csv` 当表格、其它一律跳过。新增 `importNoteForceRef`/`importFolderForceRef` 两个 ref 追踪"强制模式"，`openImportNoteFile(parentId, force)` 在强制模式下把 `<input>` 的 `accept` 属性直接清空（允许选择任意文件），`openImportFolder(parentId, force)` 把 `force` 一路传到 `handleImportFolder`，强制模式下无视扩展名、统一把每个文件的文本内容当笔记导入（不再按 `.csv` 特殊处理成表格）。工具栏"导入"下拉菜单里新增了两个对应的强制导入菜单项。
+
+以上 3 项已通过 `pnpm build`（全仓）验证，无新增 lint 错误。
+
+## 更早会话焦点（2026-07-05 第一轮）
+
+用户一次性反馈了 6 个问题，逐条修复：
+
+1. **解锁页焦点丢失**：切换服务器地址/数据目录标签后原先调用 `window.alert()`，在 Electron 里会造成 OS 级焦点陷阱，导致 `UnlockScreen` 的 `autoFocus` 失效且不可恢复。改为 `window.confirm()` + `window.location.reload()`，靠整页刷新拿到干净的焦点状态。
+2. **笔记内附件拖拽失效**：上一版为了支持"表格单元格内拖拽排序"给 `EmbeddedAttachmentChip` 的内部拖拽手柄加了 `onMouseDown={(e) => e.stopPropagation()}`，这个 stopPropagation 无条件生效，误伤了笔记编辑器（ProseMirror node view）的原生拖拽——因为编辑器的整节点拖拽依赖 mousedown 冒泡到 ProseMirror 自己的 view 监听器。修复：`data-drag-handle`/`draggable`/该 `onMouseDown` 全部改为只在传入了 `onDragStart`（只有表格会传）时才生效，笔记编辑器场景天然不受影响。
+3. **聊天送达/已读状态**：`packages/im` 新增 `read_ack` 类型、`onDeliveryAck`/`onReadAck` 回调、`sendReadAck()`；服务端 `server/src/index.ts` 新增转发 `delivery_ack`/`read_ack` 给发送方在线连接，并在收到 `delivery_ack` 时顺带清理 `message_queue`；`ChatPanel` 气泡新增送达/已读勾选图标。
+4. **批量导入支持 `.txt` + 新建/导入下拉菜单**：导入逻辑里 `.txt`（以及无扩展名文件）当笔记读取正文导入；新增通用 `packages/ui/src/DropdownMenu.tsx`，把工具栏里原本平铺的"新建笔记/表格/文件夹"和"导入笔记/表格/文件夹"收进两个下拉菜单，并新增单文件导入入口（此前只能整个文件夹批量导入）。
+5. **云账号同步看不到历史聊天记录**：这是缺失功能，不是 bug——聊天记录此前从未参与任何云同步管线。新增服务端 `chat_blobs` 存储（`server/src/store.ts` 的 `upsertChatMessage`/`listChatMessages`）+ `PUT/GET /api/v1/sync/chat`(`:messageId`) 两个端点；`packages/storage` 给 `StoredChatRow` 加 `synced?: boolean` 字段 + `listPendingChatMessages`/`getChatMessageWire`/`markChatMessageSynced`/`hasChatMessage`/`saveChatMessageFromRemote`；`packages/sync` 新增 `SyncClient.syncChatMessages()`（push-once + pull-if-missing 的简化模型，聊天消息视为不可变，没有笔记那套 version/冲突副本机制）；`VaultApp.tsx` 的 `runCloudSync`/`handleSync` 都会在同步笔记+附件之后调用 `loadChatHistory()` 刷新 `chatMessages` state。
+6. **"本地数据到底存哪"**：设置面板里原来的"数据目录"其实只是一个**标签**，用来派生 IndexedDB 的 namespace，应用从不写文件进去（所以用户打开发现是空目录，属于设计如此但极易误导）。修复：改名为"加密库标签目录"并在 hint 里明确说明"不会写入任何文件"；新增 Electron `getUserDataPath`/`openUserDataFolder` IPC（`apps/desktop/electron/settings.ts` 用 `app.getPath('userData')` + `shell.openPath`），设置面板新增只读的"真实存储位置"字段 + "在文件管理器中打开"按钮，指向 Electron/Chromium 实际写入 IndexedDB 数据库文件的目录。Web 版没有类似 API 可读，hint 改为说明数据在浏览器自己的 IndexedDB 里、路径由浏览器管理、无法从页面内获取。
+
+以上 6 项均已通过 `pnpm build`（全仓）验证，`packages/storage`/`packages/api` 的 `pnpm typecheck` 单独跑也通过（`packages/sync` 缺 `tsconfig.json` 是既有已知问题，见 `progress.md` 已知问题 §1，不受本次改动影响）。
+
+## 更早会话焦点（2026-07-04）
 
 修复用户反馈的两类 bug：
 
@@ -69,3 +106,5 @@
 - `docs/DEPLOYMENT.md` 尚未逐字核对是否有过时内容（本次未涉及，用户只点名了 ARCHITECTURE/PHASE1/DATABASE/PROTOCOL 四份）。
 - i18n 目前只有中/英文，且只覆盖了主要交互路径；如果之后要加第三种语言，参考 `systemPatterns.md` §10 末尾的"新增语言"步骤。
 - Apple Developer 证书签名/公证、GitHub 私有仓库可见性等历史遗留问题（见更早的会话）仍待用户自行推进，未在本次会话内处理。
+- 聊天历史云同步（`chat_blobs`）目前是 push-once/pull-if-missing 的简化模型：本地消息的后续 `status` 更新（送达/已读）不会重新推送到服务端，也就不会同步到其它已登录设备；如果之后需要跨设备同步已读状态，需要重新设计成类似笔记那样的带版本号/更新时间的模型。
+- 数据目录相关的 UI 已经加了"真实存储位置"只读展示，但没有做"迁移工具"（比如把旧的、误以为是数据目录的那个空文件夹里可能存在的用户自己手动放进去的文件搬过去）——目前认为没有必要，因为那个目录本来就没有任何 FastNote 数据。
