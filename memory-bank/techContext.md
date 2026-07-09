@@ -15,7 +15,7 @@
 | 桌面壳 | Electron 36 + electron-builder 25（`contextIsolation: true`, `nodeIntegration: false`） |
 | 富文本编辑 | Tiptap 3（WYSIWYG，底层 Markdown）+ `@tiptap/markdown` |
 | 源码模式编辑 | CodeMirror 6（`@codemirror/lang-markdown`） |
-| 加密原语 | `@noble/ciphers` / `@noble/curves` / `@noble/hashes`（paulmillr 维护，纯 JS、经审计） |
+| 加密原语 | `@noble/ciphers` / `@noble/curves` / `@noble/hashes`（paulmillr 维护，纯 JS、经审计）；2026-07-09 起笔记/快照的批量加解密热路径改用 **WebCrypto 原生 AES-GCM**（`encryptNative`/`decryptNative`，与 noble 线格式完全兼容），noble 保留用于同步链路与非热路径 |
 | 本地存储 | `idb`（IndexedDB 封装），Web 和 Electron 共用 |
 | 全文搜索 | `minisearch`（内存索引 + 加密快照持久化） |
 | 国际化 | 自研 `packages/i18n`（无第三方 i18n 库），当前支持中文/英文 |
@@ -44,7 +44,7 @@ pnpm build          # 全仓构建（pnpm -r build）
 pnpm build:web
 pnpm build:desktop
 pnpm dist:mac / dist:win / dist:linux   # electron-builder 打包安装包
-pnpm typecheck      # 全仓 tsc --noEmit（注意：packages/im、packages/sync、packages/table 目前缺 tsconfig.json，`pnpm -r typecheck` 会报错，属已知问题，见 progress.md）
+pnpm typecheck      # 全仓 tsc --noEmit（im/sync/table 的 tsconfig 已于 2026-07-09 补齐；唯一剩余失败项是 apps/desktop 的 @web/App 别名，见下方已知限制）
 ```
 
 ## 新增包时的依赖接入方式（以 `packages/i18n` 为例）
@@ -58,7 +58,7 @@ pnpm typecheck      # 全仓 tsc --noEmit（注意：packages/im、packages/sync
 
 ## 已知的技术约束/限制
 
-- **`packages/im`、`packages/sync`、`packages/table` 缺少独立的 `tsconfig.json`**：这三个包没有自己的 `tsconfig.json`，导致 `pnpm -r typecheck` 在这几个包上失败（`tsc --noEmit` 找不到配置直接打印帮助信息）。不影响 `vite build`（用的是各 app 自己的 tsconfig + esbuild/rollup 转译），但会让"全仓 typecheck"这个质量门禁失真。**建议后续修复**：为这三个包补上与其它 `packages/*` 一致的 `tsconfig.json`。
+- ~~`packages/im`、`packages/sync`、`packages/table` 缺少独立的 `tsconfig.json`~~ **已修复（2026-07-09）**：三个包均已补上与其它 `packages/*` 一致的标准 `tsconfig.json`（extends `../../tsconfig.base.json` + `outDir`/`rootDir`/`include: ["src"]`），typecheck 全部通过。
 - **`apps/desktop` 的 `pnpm typecheck` 单独报 `@web/App` 模块找不到**：`apps/desktop/src/main.tsx` 里用了路径别名 `@web/App`，但独立跑 `tsc --noEmit` 时该别名未被解析（`vite build` 走 Vite 自己的别名配置，不受影响，实际构建产物正常）。同样是遗留的 typecheck 配置问题，不影响运行时。
 - **`server` 默认 `JWT_SECRET = 'dev-secret-change-me'`**：本地开发方便，但**生产自托管部署必须显式设置 `JWT_SECRET` 环境变量**，否则任何人都能伪造 token。README/部署文档需要反复强调这一点。
 - **单文件体积告警**：`apps/web`/`apps/desktop` 构建后主 JS chunk ~1.46MB（gzip ~480KB），Vite 会给出"chunk 超过 500KB"的警告。目前未做代码分割，纯前端应用可接受，但如果后续加更多功能建议引入 `manualChunks` 或路由级动态 import。

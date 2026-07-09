@@ -95,6 +95,16 @@ export const en: Dictionary = {
     platforms: 'Available on macOS / Windows / Ubuntu (AppImage · deb)',
     close: 'Close',
   },
+  logsModal: {
+    title: 'Logs',
+    hint: 'Console output captured while the app is running (kept in memory only, never written to disk automatically). Copy or export it when reporting an issue.',
+    empty: 'No logs yet.',
+    copy: 'Copy all',
+    copied: 'Copied',
+    download: 'Export to file',
+    clear: 'Clear',
+    close: 'Close',
+  },
   chatSound: {
     chime: 'Chime',
     bell: 'Bell',

@@ -93,6 +93,16 @@ export const zh = {
     platforms: '支持 macOS / Windows / Ubuntu（AppImage · deb）',
     close: '关闭',
   },
+  logsModal: {
+    title: '运行日志',
+    hint: '应用运行期间的控制台输出（仅保存在内存中，不会自动写入任何文件）。反馈问题时可复制或导出给开发者。',
+    empty: '暂无日志。',
+    copy: '复制全部',
+    copied: '已复制',
+    download: '导出为文件',
+    clear: '清空',
+    close: '关闭',
+  },
   chatSound: {
     chime: '叮咚',
     bell: '铃声',

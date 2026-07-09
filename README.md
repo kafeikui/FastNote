@@ -26,6 +26,10 @@ Encrypted notes + 1:1 end-to-end encrypted instant messaging. Built for personal
 - Table documents: column sort/filter, add/remove rows & columns; a selection stats bar (count/sum/average) for any dragged range, whole row, or whole column; spreadsheet-style formulas (`=SUM(A1:A3)`, `AVERAGE`, `COUNT`, `MIN`, `MAX`, `+ - * / ^`); export to CSV (plaintext) / `.fnxt` (encrypted), with matching import
 - Bulk folder import: preserves directory structure, extension-less files import as notes, `.csv` files import as tables
 - Local full-text search (encrypted index snapshot, never uploaded)
+- Two-group tab system with split view: drag-to-reorder tabs, preview (italic) vs. pinned tabs, persisted across restarts and lock/unlock
+- Optional LaTeX math rendering (KaTeX, off by default), line numbers, JSON formatting, line-level shortcuts (Ctrl+D delete line, Alt+↑/↓ move line)
+- Customizable keyboard shortcuts (rename, lock, table repeat/undo/redo, delete) in Settings
+- Fast unlock on large vaults (1000+ notes): hardware-accelerated WebCrypto AES-GCM, batched IndexedDB reads, background search-index loading
 - Resizable note content width; collapsible sidebar for a wider content area
 - Multiple local vaults, switchable from the unlock screen
 
@@ -39,6 +43,7 @@ Encrypted notes + 1:1 end-to-end encrypted instant messaging. Built for personal
 - Four built-in UI themes (warm/elegant/business/fresh), with a consistent selected(dark)/unselected(light) visual language across the main UI and unlock screen
 - i18n: Chinese and English, switchable anytime in Settings, persisted locally
 - Settings modal scrolls when content overflows
+- Built-in log viewer (📋 button next to Settings): captures console output in memory so you can inspect/copy/export it even in the packaged desktop app where DevTools aren't available — nothing is written to disk unless you export it yourself
 
 **Security**
 - The master password is only ever used to derive keys locally — it never leaves your device

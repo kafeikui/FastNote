@@ -7,7 +7,9 @@ process.on('uncaughtException', (err) => {
 });
 
 // FastNote never needs camera/mic/geolocation/notifications access; deny
-// every permission request outright instead of prompting the user.
+// every permission request outright instead of prompting the user. This includes the async
+// Clipboard API — anything that needs to copy text must use the permissionless
+// document.execCommand('copy') path (see LogsModal.handleCopy).
 app.whenReady().then(() => {
   session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
   session.defaultSession.setPermissionCheckHandler(() => false);

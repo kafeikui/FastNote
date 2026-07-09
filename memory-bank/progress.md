@@ -2,7 +2,7 @@
 
 ## 状态总览
 
-MVP（`docs/PHASE1.md` M1–M8）已全部完成并在 M8 之后继续做了大量体验/安全类增强。仓库已有首次提交（"first commit"），当前版本号 `0.2.0`（2026-07-05 从 `0.1.0` bump，覆盖本文件下方"体验增强"里列出的所有新功能）。Web 前端新增了 Vercel 部署方案（`vercel.json` + `docs/VERCEL.md`），与自托管中继服务器（`docs/DEPLOYMENT.md`）完全独立、互不影响。
+MVP（`docs/PHASE1.md` M1–M8）已全部完成并在 M8 之后继续做了大量体验/安全类增强。当前版本号 `0.5.0`（2026-07-09 bump，覆盖解锁/上锁性能优化全套、内置日志查看器、im/sync tsconfig 修复；此前 2026-07-06 ~ 07-09 陆续 0.2.0 → 0.3.0 → 0.4.0，覆盖标签页系统、侧边栏增强、KaTeX、表格大改造、硬删除、快捷键系统等，详见下方清单与 `activeContext.md`）。Web 前端有 Vercel 部署方案（`vercel.json` + `docs/VERCEL.md`），与自托管中继服务器（`docs/DEPLOYMENT.md`）完全独立、互不影响。
 
 ## 已完成 — 核心功能（MVP）
 
@@ -45,6 +45,14 @@ MVP（`docs/PHASE1.md` M1–M8）已全部完成并在 M8 之后继续做了大�
 - **聊天勾选状态修正 + 新建/导入下拉修复 + 强制导入（2026-07）**：`ChatPanel` 送达/已读勾选逻辑修正为"已读才是双对勾"；`DropdownMenu` 关闭菜单的时机从 `onClickCapture` 改为 `onClick`（冒泡），修复点击菜单项没反应的问题；"导入笔记文件"/"导入文件夹"新增"强制导入（忽略扩展名）"选项
 - **Vercel Web 前端部署方案（2026-07）**：新增仓库根 `vercel.json`（pnpm monorepo 构建适配）+ `docs/VERCEL.md`；明确中继服务器不适合部署到 Vercel（需要长连接 WebSocket + 本地磁盘持久化），只有 `apps/web` 静态前端托管在 Vercel，两者通过用户自己配置的服务器地址 + 已开放的 CORS 互联
 - **版本号 bump（2026-07）**：全部 workspace 包 `0.1.0` → `0.2.0`
+- **标签页系统（2026-07，0.3.0）**：固定两分组分栏视图；标签拖拽排序/关闭/预览(斜体)与固定(双击)两种模式；按 vault 持久化；分组分隔条可拖拽；锁定后固定标签保留
+- **侧边栏增强（2026-07，0.3.0/0.4.0）**：展开/折叠全部、按名称/修改时间排序（破坏性重写 sortOrder）、宽度实时拖拽、定位文件（搜索/选标签自动展开+滚动+高亮）、Ctrl/Shift 多选 + Del 删除、拖拽自动滚动、新建/导入按焦点层级创建、工具栏 sticky、图标严格对齐
+- **编辑器增强（2026-07，0.3.0/0.4.0）**：KaTeX 数学公式（默认关闭、设置可开，`latexDelimiters.ts` 兼容裸括号与 `%` 转义）、行号、Ctrl+D 删行、Alt+Up/Down 换行、JSON 格式化（选中/全文）、选中字符计数、空行保留（`blankLines.ts`）、单笔记导出明文 markdown、标题/工具栏/标签栏 sticky
+- **表格大改造（2026-07，0.4.0）**：Excel 式下拉填充与智能粘贴（`fill.ts`）、撤销/恢复（快捷键可自定义）、行高列宽拖拽、固定表头/首列、单元格加粗/字号/字色/填充色（`TableCellStyle`）、行删除按钮左置+确认对话框（F4 重复免确认）、第一行提升为表头、选区非空计数、常驻横向滚动条
+- **快捷键系统（2026-07，0.4.0）**：`ShortcutBindings`（重命名 F2、上锁 Ctrl+L、表格重复 F4、表格撤销/恢复、删除选中 Del），设置面板可自定义
+- **硬删除架构（2026-07，0.4.0）**：本地库直接硬删；云库轻量墓碑（清空明文）→ 推送 `deleted: true` → 本地 purge；解锁跳过墓碑行
+- **解锁/上锁性能优化（2026-07-09）**：WebCrypto 原生 AES-GCM（与 noble 线格式兼容，已验证互解）、IndexedDB `getAll()` 批量读取 + 24 篇并行解密、~16ms 时间片 yield + 进度条、搜索快照新鲜度指纹（命中跳过 MiniSearch 全量重建）、索引 dirty 标记（上锁无变化跳过快照保存）；第二轮把网络请求（盐值回填/IM 握手）、聊天历史解密、搜索索引准备（`loadJSONAsync`/`addAllAsync` 分块后台构建 + 编辑重放队列）全部移出解锁关键路径，DB v5 加 `by_deleted` 索引让 `purgeDeleted` 只取键；1000+ 篇笔记实现秒开（用户确认）
+- **内置日志查看器（2026-07-09）**：`packages/shared/logBuffer.ts` 内存环形缓冲捕获 console 输出（上限 2000 条，不落盘）+ `LogsModal` 弹窗（复制/导出 .txt/清空），右上角 📋 按钮打开——桌面打包版无 DevTools 也能查看解锁耗时日志和报错
 
 ## 进行中 / 本次会话任务
 
@@ -62,8 +70,8 @@ MVP（`docs/PHASE1.md` M1–M8）已全部完成并在 M8 之后继续做了大�
 
 ## 已知问题 / 技术债
 
-1. **`packages/im`、`packages/sync`、`packages/table` 缺少 `tsconfig.json`**，导致 `pnpm -r typecheck` 失败在这几个包上（不影响实际构建，只影响 typecheck 质量门禁）。
-2. **`apps/desktop` 独立 `pnpm typecheck` 报 `@web/App` 找不到**（路径别名只在 Vite 构建时生效，`tsc --noEmit` 单独跑时未配置该别名）。
+1. ~~`packages/im`、`packages/sync`、`packages/table` 缺少 `tsconfig.json`~~ **已修复（2026-07-09）**：三个包都已补上标准 `tsconfig.json`，typecheck 通过。
+2. **`apps/desktop` 独立 `pnpm typecheck` 报 `@web/App` 找不到**（路径别名只在 Vite 构建时生效，`tsc --noEmit` 单独跑时未配置该别名）——现在是 `pnpm -r typecheck` 唯一剩余的失败项。
 3. **`server` 默认 `JWT_SECRET` 是明文占位符**，生产部署必须显式覆盖，目前只在文档里提示，没有启动时的强校验/警告。
 4. **主 JS bundle 体积较大**（~1.46MB，gzip ~480KB），Vite 已给出分包建议，尚未实施代码分割。
 5. **群聊、加密文件传输（聊天里更大的文件）、多设备 Ratchet 同步优化**——按 `docs/PHASE1.md` Phase 2 预留，明确不在当前范围。

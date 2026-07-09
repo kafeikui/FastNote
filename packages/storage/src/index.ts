@@ -9,15 +9,17 @@ import {
   decodeWireCiphertext,
   decrypt,
   decryptString,
+  decryptStringNative,
   encodeWireCiphertext,
   encrypt,
   encryptString,
+  encryptStringNative,
   fromBase64,
   toBase64,
   type EncryptedPayload,
 } from '@fastnote/crypto';
 
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 
 export interface StorageOptions {
   /** Logical vault namespace — maps to IndexedDB database name. */
@@ -54,11 +56,15 @@ interface StoredChatAttachment {
 
 interface FastNoteDB extends DBSchema {
   vault_meta: { key: string; value: string };
-  notes_local: { key: string; value: StoredNote };
+  notes_local: {
+    key: string;
+    value: StoredNote;
+    indexes: { by_deleted: number };
+  };
   attachments_local: {
     key: string;
     value: StoredAttachment;
-    indexes: { by_note: string };
+    indexes: { by_note: string; by_deleted: number };
   };
   chat_messages_local: {
     key: string;
@@ -130,6 +136,10 @@ export interface StorageAdapter {
   setMeta(key: string, value: string): Promise<void>;
   listNotes(): Promise<NoteNode[]>;
   loadNoteDecrypted(id: string, notesKey: Uint8Array): Promise<NoteNode | null>;
+  loadAllNotesDecrypted(
+    notesKey: Uint8Array,
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<NoteNode[]>;
   saveNote(note: NoteNode, notesKey: Uint8Array): Promise<void>;
   deleteNote(id: string): Promise<void>;
   listDeletedNoteStubs(): Promise<NoteNode[]>;
@@ -249,9 +259,9 @@ function toNodeStub(r: StoredNote): NoteNode {
   };
 }
 
-function toStoredRow(note: NoteNode, notesKey: Uint8Array): StoredNote {
-  const title = encryptString(notesKey, note.title);
-  const content = encryptString(notesKey, note.contentMd);
+async function toStoredRow(note: NoteNode, notesKey: Uint8Array): Promise<StoredNote> {
+  const title = await encryptStringNative(notesKey, note.title);
+  const content = await encryptStringNative(notesKey, note.contentMd);
   const t = pack(title);
   const c = pack(content);
   return {
@@ -307,7 +317,7 @@ export class WebStorageAdapter implements StorageAdapter {
   private async getDb(): Promise<IDBPDatabase<FastNoteDB>> {
     if (!this.db) {
       this.db = await openDB<FastNoteDB>(this.dbName, DB_VERSION, {
-        upgrade(db, oldVersion) {
+        upgrade(db, oldVersion, _newVersion, tx) {
           if (oldVersion < 1) {
             db.createObjectStore('vault_meta');
             db.createObjectStore('notes_local', { keyPath: 'id' });
@@ -321,6 +331,13 @@ export class WebStorageAdapter implements StorageAdapter {
             chatMsgs.createIndex('by_peer', 'peerId');
             const chatAtt = db.createObjectStore('chat_attachments_local', { keyPath: 'id' });
             chatAtt.createIndex('by_message', 'messageId');
+          }
+          if (oldVersion < 5) {
+            // Lets purgeDeleted() find tombstones by key without materializing whole rows —
+            // getAll() on attachments_local deserializes every encrypted blob into memory, which
+            // is what used to make unlock stutter on vaults with large attachments.
+            tx.objectStore('notes_local').createIndex('by_deleted', 'deleted');
+            tx.objectStore('attachments_local').createIndex('by_deleted', 'deleted');
           }
         },
       });
@@ -349,14 +366,50 @@ export class WebStorageAdapter implements StorageAdapter {
     const r = await db.get('notes_local', id);
     if (!r) return null;
     const node = toNodeStub(r);
-    node.title = decryptString(notesKey, unpack(r.titleEnc, r.titleNonce));
-    node.contentMd = decryptString(notesKey, unpack(r.contentEnc, r.contentNonce));
+    node.title = await decryptStringNative(notesKey, unpack(r.titleEnc, r.titleNonce));
+    node.contentMd = await decryptStringNative(notesKey, unpack(r.contentEnc, r.contentNonce));
     return node;
+  }
+
+  /**
+   * Bulk-loads every non-deleted note with a single IndexedDB `getAll()` (one round-trip instead
+   * of one per note) and hardware-accelerated WebCrypto decryption. Decrypts in small parallel
+   * chunks and yields to the event loop on a ~16ms budget so the unlock progress bar can repaint.
+   */
+  async loadAllNotesDecrypted(
+    notesKey: Uint8Array,
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<NoteNode[]> {
+    const db = await this.getDb();
+    const rows = (await db.getAll('notes_local')).filter((r) => r.deleted !== 1);
+    const total = rows.length;
+    const result: NoteNode[] = [];
+    const CHUNK = 24;
+    let lastYield = performance.now();
+    for (let i = 0; i < rows.length; i += CHUNK) {
+      const chunk = rows.slice(i, i + CHUNK);
+      const decrypted = await Promise.all(
+        chunk.map(async (r) => {
+          const node = toNodeStub(r);
+          node.title = await decryptStringNative(notesKey, unpack(r.titleEnc, r.titleNonce));
+          node.contentMd = await decryptStringNative(notesKey, unpack(r.contentEnc, r.contentNonce));
+          return node;
+        }),
+      );
+      result.push(...decrypted);
+      const done = Math.min(i + CHUNK, total);
+      if (performance.now() - lastYield > 16 || done === total) {
+        onProgress?.(done, total);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        lastYield = performance.now();
+      }
+    }
+    return result;
   }
 
   async saveNote(note: NoteNode, notesKey: Uint8Array): Promise<void> {
     const db = await this.getDb();
-    await db.put('notes_local', toStoredRow(note, notesKey));
+    await db.put('notes_local', await toStoredRow(note, notesKey));
   }
 
   async deleteNote(id: string): Promise<void> {
@@ -367,25 +420,24 @@ export class WebStorageAdapter implements StorageAdapter {
   /** Tombstoned note rows (no decryption), for pushing deletions to the server. */
   async listDeletedNoteStubs(): Promise<NoteNode[]> {
     const db = await this.getDb();
-    const rows = await db.getAll('notes_local');
-    return rows.filter((r) => r.deleted === 1).map((r) => toNodeStub(r));
+    const rows = await db.getAllFromIndex('notes_local', 'by_deleted', 1);
+    return rows.map((r) => toNodeStub(r));
   }
 
   /**
    * Hard-deletes tombstoned note and attachment rows. Used for local-only vaults (no server to
    * propagate deletions to) and as cleanup after a sync has pushed the tombstones — leftover
    * tombstones otherwise accumulate forever and slow down unlock.
+   *
+   * Key-only lookups via the by_deleted index: a full getAll() would deserialize every row —
+   * including all encrypted attachment blobs — just to read a flag.
    */
   async purgeDeleted(): Promise<void> {
     const db = await this.getDb();
-    const noteRows = await db.getAll('notes_local');
-    for (const r of noteRows) {
-      if (r.deleted === 1) await db.delete('notes_local', r.id);
-    }
-    const attRows = await db.getAll('attachments_local');
-    for (const r of attRows) {
-      if (normalizeAttachmentRow(r).deleted === 1) await db.delete('attachments_local', r.id);
-    }
+    const noteKeys = await db.getAllKeysFromIndex('notes_local', 'by_deleted', 1);
+    for (const key of noteKeys) await db.delete('notes_local', key);
+    const attKeys = await db.getAllKeysFromIndex('attachments_local', 'by_deleted', 1);
+    for (const key of attKeys) await db.delete('attachments_local', key);
   }
 
   async listAttachments(noteId: string, notesKey: Uint8Array): Promise<NoteAttachment[]> {
@@ -561,24 +613,26 @@ export class WebStorageAdapter implements StorageAdapter {
     const messages = await Promise.all(
       rows.map(async (row) => {
         const stored = JSON.parse(
-          decryptString(notesKey, unpack(row.payloadEnc, row.payloadNonce)),
+          await decryptStringNative(notesKey, unpack(row.payloadEnc, row.payloadNonce)),
         ) as ChatStoredPayload;
         let msg = storedToChatMessage(row.id, row.peerId, row.direction, row.sentAt, stored);
         if (!msg.attachments?.length) {
           const attRows = await db.getAllFromIndex('chat_attachments_local', 'by_message', row.id);
           if (attRows.length) {
-            const attachments = attRows.map((attRow) => {
-              const plain = JSON.parse(
-                decryptString(notesKey, unpack(attRow.metaEnc, attRow.metaNonce)),
-              ) as AttachmentMetaPlain;
-              return {
-                id: attRow.id,
-                fileName: plain.fileName,
-                description: plain.description,
-                mimeType: plain.mimeType,
-                size: plain.size,
-              };
-            });
+            const attachments = await Promise.all(
+              attRows.map(async (attRow) => {
+                const plain = JSON.parse(
+                  await decryptStringNative(notesKey, unpack(attRow.metaEnc, attRow.metaNonce)),
+                ) as AttachmentMetaPlain;
+                return {
+                  id: attRow.id,
+                  fileName: plain.fileName,
+                  description: plain.description,
+                  mimeType: plain.mimeType,
+                  size: plain.size,
+                };
+              }),
+            );
             msg = { ...msg, attachments };
           }
         }

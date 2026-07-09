@@ -124,6 +124,7 @@ export const META_KEYS = {
   identityPubkey: 'identity_pubkey',
   exchangePubkey: 'exchange_pubkey',
   searchIndexSnapshot: 'search_index_snapshot',
+  searchIndexFingerprint: 'search_index_fingerprint',
   chatSessions: 'chat_sessions',
   chatStorageMigrated: 'chat_storage_migrated',
   boundUsername: 'bound_username',
@@ -210,6 +211,13 @@ export {
 } from './chatPayload';
 
 export { buildContentSecurityPolicy, serverUrlNeedsReload } from './csp';
+export {
+  installConsoleCapture,
+  getCapturedLogs,
+  clearCapturedLogs,
+  formatCapturedLogs,
+} from './logBuffer';
+export type { LogEntry, LogLevel } from './logBuffer';
 
 export function buildTree(notes: NoteNode[], parentId: string | null = null): TreeItem[] {
   return notes

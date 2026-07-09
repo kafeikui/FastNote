@@ -101,6 +101,60 @@ export function decrypt(key: Uint8Array, payload: EncryptedPayload): Uint8Array 
   return cipher.decrypt(payload.ciphertext);
 }
 
+// ---- Native (WebCrypto) AES-GCM -----------------------------------------------------------
+//
+// Wire-compatible with the pure-JS `encrypt`/`decrypt` above (same key, 12-byte nonce, GCM with
+// the 16-byte tag appended to the ciphertext), but hardware-accelerated and off the JS engine's
+// hot path — 10-100x faster on bulk workloads like unlocking a large vault. Imported CryptoKeys
+// are cached per raw-key object, so decrypting thousands of notes imports the key once.
+
+const nativeKeyCache = new WeakMap<Uint8Array, Promise<CryptoKey>>();
+
+function asArrayBuffer(view: Uint8Array): ArrayBuffer {
+  return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength) as ArrayBuffer;
+}
+
+function importAesKey(raw: Uint8Array): Promise<CryptoKey> {
+  let cached = nativeKeyCache.get(raw);
+  if (!cached) {
+    cached = crypto.subtle.importKey('raw', asArrayBuffer(raw), 'AES-GCM', false, [
+      'encrypt',
+      'decrypt',
+    ]);
+    nativeKeyCache.set(raw, cached);
+  }
+  return cached;
+}
+
+export async function encryptNative(key: Uint8Array, plaintext: Uint8Array): Promise<EncryptedPayload> {
+  const cryptoKey = await importAesKey(key);
+  const nonce = randomBytes(12);
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: asArrayBuffer(nonce) },
+    cryptoKey,
+    asArrayBuffer(plaintext),
+  );
+  return { ciphertext: new Uint8Array(ciphertext), nonce };
+}
+
+export async function decryptNative(key: Uint8Array, payload: EncryptedPayload): Promise<Uint8Array> {
+  const cryptoKey = await importAesKey(key);
+  const plain = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: asArrayBuffer(payload.nonce) },
+    cryptoKey,
+    asArrayBuffer(payload.ciphertext),
+  );
+  return new Uint8Array(plain);
+}
+
+export async function encryptStringNative(key: Uint8Array, text: string): Promise<EncryptedPayload> {
+  return encryptNative(key, utf8ToBytes(text));
+}
+
+export async function decryptStringNative(key: Uint8Array, payload: EncryptedPayload): Promise<string> {
+  return bytesToUtf8(await decryptNative(key, payload));
+}
+
 export function encryptString(key: Uint8Array, text: string): EncryptedPayload {
   return encrypt(key, utf8ToBytes(text));
 }

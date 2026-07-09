@@ -105,6 +105,21 @@ FastNote/
 - **选区统计条与公式引擎共享同一套解析逻辑**：`TableEditor` 的拖拽/整行/整列选择只是收集 `{rowId, colId}` 列表交给 `computeRangeStats`，内部同样调用 `resolveCellOrNull`（包括递归求值公式单元格），因此选中一段包含公式的区域时统计条里的计数/求和/平均值也是"计算后的值"而不是原始字符串。
 - **加公式函数**：只需要在 `formula.ts` 里给 `SUPPORTED_FUNCTIONS` 加名字 + 在 `applyFunction` 里加一个 `case`，`Parser.parseFunctionCall` 会自动识别（函数名后紧跟 `(` 就走函数调用分支，否则按单元格引用 `[A-Z]+[0-9]+` 解析）。
 
+### 13. 解锁/上锁性能模式：原生加解密 + 批量读取 + 快照指纹（2026-07-09 新增）
+
+1000+ 篇笔记的库解锁曾出现秒级卡顿，根因和对策（都已落地）：
+
+- **加解密热路径必须走 WebCrypto 原生 AES-GCM**（`packages/crypto` 的 `encryptNative`/`decryptNative`/`*StringNative`），与 noble 纯 JS 实现线格式完全一致（12B nonce + 密文尾部 16B tag），新旧数据互解无需迁移。`CryptoKey` 用 `WeakMap` 按原始密钥 `Uint8Array` 对象缓存，避免每篇笔记重复 `importKey`。**约定**：新增批量加解密场景一律用 native 版本；一次性/低频场景（如密钥包装）可继续用 noble 同步版本。
+- **IndexedDB 禁止在循环里逐条 `get()`**：`StorageAdapter.loadAllNotesDecrypted()` 用一次 `getAll()` 拉全表再内存过滤墓碑行，按 24 篇一批 `Promise.all` 并行解密，配 ~16ms 时间片 yield（`performance.now()` 预算 + `setTimeout(0)`）让解锁进度条能重绘。
+- **搜索快照指纹**：快照（`vault_meta.search_index_snapshot`，`indexKey` 加密）旁边存一份 `search_index_fingerprint` = SHA-256(所有非删除笔记 `id:version` 排序 join)。解锁时指纹一致 → 直接反序列化快照、**跳过 MiniSearch 全量重建**；不一致（异常退出等）→ 全量重建兜底。指纹只含随机 UUID 和版本号（本就明文存在 IndexedDB 行内），**不泄露任何明文内容**——这个项目里任何落盘的新数据都必须过这道"是否泄露明文"的审查。
+- **索引 dirty 标记**：`VaultApp.searchDirtyRef`，所有索引变更点置 true，`saveSearchSnapshot` 在非 dirty 时整体跳过（序列化+加密+写入）；同步后只在 `pulled > 0 || conflicts > 0` 时才 rebuild。
+- **解锁关键路径上禁止网络 `await`**：`fetch` 没有配超时，服务器不可达时一个被 `await` 的请求就能把解锁挂几十秒。盐值回填、聊天历史解密、IM 握手都放在 `loadNotes` 返回后的后台 async IIFE 里跑（保持原顺序，`keysRef.current !== derived` 时中止防止上锁后污染状态）。**约定**：解锁必需的只有"笔记 + 标签页恢复"，其它一律后台化。
+- **搜索索引准备也不在关键路径上**：快照因 `storeFields` 存了全部正文，几十 MB 的 `MiniSearch.loadJSON()` 同步反序列化和全量重建一样是数秒级。`prepareSearchIndexInBackground` 用 `loadJSONAsync`/`addAllAsync` 分块后台构建；期间的 upsert/remove 进 `pendingSearchOpsRef` 队列、就绪后重放；`searchGenRef` 代际守卫防交错；`saveSearchSnapshot` 在索引未就绪时拒绝写盘（宁可让下次解锁走重建兜底，也不能把空索引+新指纹持久化）。
+- **IndexedDB 大 value 的表禁止用 `getAll` 查标记位**：`attachments_local` 的 value 内联了整个加密二进制（base64），`getAll` 会全部反序列化进内存。要按标记位（如 `deleted`）批量操作时建索引 + `getAllKeysFromIndex` 只取主键（DB v5 的 `by_deleted` 索引，`purgeDeleted`/`listDeletedNoteStubs`）。
+- **解锁链路有常驻耗时日志**（`[FastNote] unlock: ...`）：笔记解密、首帧渲染、后台索引就绪三个阶段各打一条 console.info，性能回归时先看控制台。
+- **内置日志查看器**（桌面打包版没有 DevTools）：`packages/shared/logBuffer.ts` 的 `installConsoleCapture()` 在 `VaultApp` 模块顶层调用，包装 console 四个方法写入内存环形缓冲（2000 条上限，绝不自动落盘）；右上角 📋 按钮打开 `LogsModal`（复制/导出/清空）。用户报问题时让他从这里导出日志。
+- **Electron 权限硬化是无例外的全拒**（用户明确决策，2026-07-09）：`apps/desktop/electron/main.ts` 拒绝一切权限请求，**包括剪贴板写入**——不开任何白名单。因此渲染层任何"复制到剪贴板"功能都**不能用 `navigator.clipboard`**（桌面版必抛 `NotAllowedError`），必须用无需权限的 `document.execCommand('copy')`（隐藏 textarea + select，见 `LogsModal.handleCopy`）。
+
 ## 组件关系速览（`packages/ui`）
 
 - `UnlockScreen` — 多保险库选择 + 密码解锁 / 云账户同步 tab

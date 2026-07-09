@@ -1673,6 +1673,62 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   font-size: 0.9rem;
 }
 
+/* Log viewer: wider than regular modals, monospace scrollable body. */
+.fn-modal.fn-logs {
+  width: min(720px, 94vw);
+  display: flex;
+  flex-direction: column;
+}
+
+.fn-logs__body {
+  flex: 1;
+  min-height: 200px;
+  max-height: 55vh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem;
+  background: var(--bg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.fn-logs__empty {
+  margin: 0.5rem;
+  color: var(--muted);
+}
+
+.fn-logs__entry {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  padding: 1px 2px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.fn-logs__ts {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.fn-logs__level {
+  flex-shrink: 0;
+  width: 3.2em;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.fn-logs__entry--warn .fn-logs__level {
+  color: #b58900;
+}
+
+.fn-logs__entry--error .fn-logs__level,
+.fn-logs__entry--error .fn-logs__text {
+  color: #d33;
+}
+
 .fn-tree--search {
   list-style: none;
   margin: 0;

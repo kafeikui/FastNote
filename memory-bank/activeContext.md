@@ -1,6 +1,45 @@
 # Active Context — FastNote
 
-## 当前工作焦点（最新会话，2026-07-05 第三轮：版本 bump + Vercel 部署方案）
+## 当前工作焦点（最新会话，2026-07-09：解锁/上锁性能优化 + typecheck 修复）
+
+用户报告 1000+ 篇笔记的密码库解锁、上锁明显卡顿。诊断出四个瓶颈并按用户选定的"1–4 + 6 方案"全部实施：
+
+1. **WebCrypto 原生 AES-GCM**（`packages/crypto`）：新增 `encryptNative`/`decryptNative`/`encryptStringNative`/`decryptStringNative`，与原 `@noble/ciphers` 纯 JS 实现**线格式完全一致**（12 字节 nonce + 密文尾部 16 字节 tag），已用独立脚本验证双向互解，现有库无需迁移。`CryptoKey` 用 `WeakMap` 按原始密钥对象缓存，批量解密只 `importKey` 一次。笔记读写（`loadNoteDecrypted`/`saveNote`/`toStoredRow`）和搜索快照加解密已切换；**同步链路（`encryptNoteForSync` 等）仍用 noble 实现**——不在热路径上且格式兼容，未来可再切。
+2. **IndexedDB 批量读取**（`packages/storage`）：新增 `StorageAdapter.loadAllNotesDecrypted(notesKey, onProgress?)`，一次 `getAll('notes_local')` 代替逐条 `get()`，内部过滤墓碑行、按每批 24 篇 `Promise.all` 并行解密。
+3. **时间片 yield**：批量解密循环按 `performance.now()` 计算的 ~16ms 预算 yield（`setTimeout(0)`）并回调进度，替代原来"每 6 篇必 yield"的固定节奏；进度回调驱动解锁页进度条。
+4. **搜索快照新鲜度指纹**（跳过全量重建）：`META_KEYS` 新增 `searchIndexFingerprint`；保存快照时同时存一份指纹 = `hashContent(所有非删除笔记的 "id:version" 排序后 join('|'))`（SHA-256）。解锁时用刚解密的笔记算同样指纹比对，一致 → 直接 `NoteSearchIndex.fromSerialized` 恢复、跳过 MiniSearch 全量 rebuild；不一致（如异常退出未走上锁流程）→ 回退全量重建。**安全性**：指纹只是 note id（`crypto.randomUUID()` 随机生成）+ version 的哈希，两者本来就以明文存在 IndexedDB 行里，不泄露任何标题/正文信息；快照本体依旧是 `indexKey` AES-GCM 加密后才落盘（`vault_meta`），本次只是把加密实现换成原生。
+6. **索引 dirty 标记**：`VaultApp` 新增 `searchDirtyRef`，索引的所有变更点（`upsertSearch`、删除时的 `remove`、`rebuildSearchIndex`）置 true；`saveSearchSnapshot(indexKey, items)`（签名改了，多了 items 用于算指纹）在 dirty 为 false 时直接跳过序列化+加密+写入——这是"没改任何东西上锁也卡一下"的根源。快照加载成功或保存完成后复位 false。另外同步后只在 `pulled > 0 || conflicts > 0` 时才 rebuild 索引（push 不改本地内容）。
+
+**追加优化（同日）**：用户反馈进度条虽然很快走完，但解锁按钮仍长时间停在"处理中…"。原因是进度条只覆盖笔记解密，`loadNotes` 返回前还串行 `await` 了三类慢操作：① 云账号下的 `uploadVaultSalt` + `initIM` 的 `updateKeys` 两次网络往返（`fetch` 无超时，服务器不可达时挂到 TCP 超时可达几十秒）；② `listChatMessagesDecrypted` 仍在用 noble 纯 JS 逐条解密聊天记录；③ 升级后首次解锁必然指纹未命中、走一次全量索引重建（一次性，正常上锁存下指纹后消失）。修复：把盐值回填、聊天历史解密、IM 握手全部移出解锁关键路径——笔记+搜索+标签页就绪后 `loadNotes` 立即返回、界面直接打开，这三步在后台按原顺序执行（async IIFE，`keysRef.current !== derived` 时中止，防止后台任务在上锁后污染状态）；聊天消息及附件元数据解密切换到 `decryptStringNative`。顺带删除了 `loadNotes` 里无用的 `loadExchangePrivate` 死代码。
+
+**追加优化（第二轮，同日）**：网络后台化之后用户反馈每次解锁进度条走完后仍卡"处理中…"一段时间。真凶是**搜索快照的反序列化本身**：MiniSearch 配置了 `storeFields: ['title','content']`（快照里存全部笔记正文），1000+ 篇笔记的快照是几十 MB JSON，`MiniSearch.loadJSON()` 同步 parse + 重建索引要数秒——指纹命中只是把"重建"换成了同样昂贵的"反序列化"，且每次解锁都在关键路径上被 `await`。修复：
+- `packages/search` 新增 `fromSerializedAsync`（`MiniSearch.loadJSONAsync`）和 `buildAsync`（`addAllAsync`），分块处理不阻塞主线程。
+- `VaultApp` 新增 `prepareSearchIndexInBackground`：索引准备完全移出解锁关键路径，界面立即打开；加载期间搜索看到空索引，编辑操作进 `pendingSearchOpsRef` 队列、完成后重放；`searchGenRef` 代际计数防止 re-unlock/同步 rebuild/上锁与后台构建交错（`rebuildSearchIndex` 会 bump gen 抢占）；`saveSearchSnapshot` 在 `!searchReadyRef` 时拒绝保存（防止把空/半成品索引连同新指纹写盘毒化下次解锁——旧快照留着，指纹不匹配自然走全量重建兜底）。
+- **DB v5**：`notes_local`/`attachments_local` 新增 `by_deleted` 索引；`purgeDeleted()` 改为 `getAllKeysFromIndex` 只取键——原来 `getAll('attachments_local')` 会把全部加密附件二进制读进内存只为检查删除标记，附件多时每次解锁/删除都卡主线程。`listDeletedNoteStubs` 同样走索引。
+- **耗时日志**：解锁各阶段输出 `[FastNote] unlock: ...` console.info（笔记解密耗时、首帧渲染耗时、后台索引就绪耗时），以后用户再报卡顿可直接看控制台定位。
+
+**追加（同日，第三轮）**：性能问题确认解决（用户反馈"能秒进了"）。但 mac 桌面打包版没有 DevTools，看不到 `[FastNote] unlock: ...` 等控制台输出，新增**内置日志查看器**：
+- `packages/shared/src/logBuffer.ts`：`installConsoleCapture()` 包装 console.log/info/warn/error（保留原行为）+ 捕获 `error`/`unhandledrejection` 事件，写入内存环形缓冲（上限 2000 条，带 ISO 时间戳和级别）；`getCapturedLogs`/`clearCapturedLogs`/`formatCapturedLogs`。**严格本地**：只存内存，除非用户主动复制/导出，不写盘。
+- `packages/ui/src/LogsModal.tsx`：日志弹窗（等宽字体滚动列表、warn/error 着色），支持复制全部、导出 `.txt`（Blob 下载，Web/Electron 通用）、清空。
+- `VaultApp`：模块顶层调用 `installConsoleCapture()`（尽早捕获）；右上角设置按钮旁新增 📋 按钮打开弹窗。i18n 新增 `logsModal.*`（中英）；样式 `.fn-logs*`。
+- README（英文 + 中文）功能一览同步刷新：补上标签页系统、KaTeX、快捷键自定义、大库快速解锁、日志查看器等 0.3.0/0.4.0 功能点。
+
+**追加（同日，第四轮）**：用户从日志查看器贴回真实数据——解锁本体已达标（1237 篇解密 428ms、首帧 51ms、后台索引 6.5s 不阻塞使用），但暴露一个 bug：桌面版"复制日志"报 `NotAllowedError`。根因是 Electron 硬化（`setPermissionRequestHandler` 拒绝一切权限）连 `clipboard-sanitized-write` 也拒了。最初的修复曾给主进程加剪贴板写入白名单，但**用户明确要求不放行任何剪贴板权限**，最终方案：主进程保持全拒（deny-all 不动），`LogsModal.handleCopy` 直接用无需权限的 `document.execCommand('copy')`（隐藏 textarea + select）作为唯一复制路径，不再调用 `navigator.clipboard`；只在复制成功时显示"已复制"。
+
+**顺手修复**：`packages/sync`、`packages/im` 一直缺 `tsconfig.json`（`tsc --noEmit` 无配置直接打印帮助并失败），已按标准模板（extends `../../tsconfig.base.json`）补上，两包 typecheck 通过；`packages/table` 此前已被补过。全仓 `pnpm -r typecheck` 现在只剩 `apps/desktop` 的 `@web/App` 别名问题（既有已知问题）。全仓 `pnpm build` 通过。
+
+## 同一长会话中更早的几轮（2026-07-06 ~ 07-09，版本 0.2.0 → 0.4.0）
+
+这轮超长会话前面还完成了大量功能（详见 `progress.md` 的 0.3.0/0.4.0 清单），要点：
+
+- **标签页系统**：固定两个分组的分栏视图，标签可拖拽排序、关闭、预览/固定（单击斜体预览、双击固定），按 vault 持久化到 `localStorage`，分组间分隔条可拖拽调宽，锁定/解锁后固定标签保留（`tabStateReadyRef` 防止中间渲染写坏持久化状态）。
+- **侧边栏**：全部展开/折叠、排序（破坏性重写 sortOrder）、宽度拖拽（实时）、定位文件（搜索/选标签页时自动展开祖先+滚动+高亮）、Ctrl/Shift 多选 + Del 删除、拖拽自动滚动、新建/导入按焦点层级、工具栏 sticky、图标对齐（CSS specificity 坑）。
+- **编辑器**：KaTeX 数学公式（默认关闭，设置里开启；`latexDelimiters.ts` 处理裸括号/`\[...\]`/`%` 转义）、行号、Ctrl+D 删行、Alt+Up/Down 换行（CodeMirror keymap + 自定义 Tiptap `LineEditing` 扩展）、JSON 格式化按钮、选中字符计数、空行保留（`blankLines.ts` NBSP 段落 + 序列化 `\u0000` 哨兵）、单条笔记导出明文 markdown。
+- **表格**：Excel 式下拉填充（`fill.ts`，数列/公式相对引用/尾数字递增）、智能粘贴（tab/逗号/空白分隔）、撤销/恢复（可自定义快捷键）、行高列宽拖拽、固定表头/首列、单元格加粗/字号/颜色/填充色（`TableCellStyle`）、行删除按钮移到左侧+确认对话框（F4 重复跳过确认）、第一行提升为表头、非空计数。
+- **硬删除架构**：本地库直接硬删；云同步库先写轻量墓碑（清空明文），推送 `deleted: true` 到服务端后本地 purge（`listDeletedNoteStubs`/`purgeDeleted`）；解锁时跳过墓碑行解密。
+- **快捷键系统**：`ShortcutBindings`（F2 重命名、Ctrl+L 上锁、F4 表格重复、表格撤销/恢复、Del 删除选中），设置里可自定义。
+
+## 更早会话焦点（2026-07-05 第三轮：版本 bump + Vercel 部署方案）
 
 用户要求 bump 版本、准备 git 提交、并给出 Web 前端的 Vercel 部署方案：
 

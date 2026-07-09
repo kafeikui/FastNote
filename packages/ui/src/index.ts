@@ -12,6 +12,7 @@ export { ChatSidebar, buildChatSessions } from './ChatSidebar';
 export type { ChatSessionItem } from './ChatSidebar';
 export { playChatNotificationSound, chatSoundLabel } from './chatNotification';
 export { AboutModal } from './AboutModal';
+export { LogsModal } from './LogsModal';
 export { NoteAttachments } from './NoteAttachments';
 export { EmbeddedAttachmentChip } from './EmbeddedAttachmentChip';
 export type { EmbeddedAttachmentChipProps } from './EmbeddedAttachmentChip';

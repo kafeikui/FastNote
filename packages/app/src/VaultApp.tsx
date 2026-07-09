@@ -59,6 +59,8 @@ import {
   deriveKeysFromPassword,
   encryptString,
   decryptString,
+  encryptStringNative,
+  decryptStringNative,
   generateIdentityKeypair,
   generateSalt,
   hashContent,
@@ -73,7 +75,7 @@ import { NoteEditor, flushEditorMarkdown } from '@fastnote/editor';
 import { IMClient, verifyExchangeKeypair } from '@fastnote/im';
 import { NoteSearchIndex } from '@fastnote/search';
 import type { ChatMessage, EditorMode, NodeType, NoteAttachment, NoteNode, UserSession, TreeDropPosition, ChatAttachmentRef, ChatWireAttachment, TabGroupState, ShortcutBindings } from '@fastnote/shared';
-import { META_KEYS, downloadBlob, isEditableContentNode, computeTreeMove, applySortMode, buildAttachmentMarkdownRef, buildTree, decodeChatWire, toStoredPayload, storedToChatMessage, serverUrlNeedsReload, matchesShortcut, expandAttachmentRefsForExport } from '@fastnote/shared';
+import { META_KEYS, downloadBlob, isEditableContentNode, computeTreeMove, applySortMode, buildAttachmentMarkdownRef, buildTree, decodeChatWire, toStoredPayload, storedToChatMessage, serverUrlNeedsReload, matchesShortcut, expandAttachmentRefsForExport, installConsoleCapture, getCapturedLogs, clearCapturedLogs, formatCapturedLogs } from '@fastnote/shared';
 import type { TreeItem } from '@fastnote/shared';
 import type { TreeSortMode } from '@fastnote/shared';
 import { createStorage } from '@fastnote/storage';
@@ -108,6 +110,7 @@ import {
   buildChatSessions,
   playChatNotificationSound,
   AboutModal,
+  LogsModal,
   NoteAttachments,
   DropdownMenu,
   type VaultListItem,
@@ -166,6 +169,10 @@ function noteSearchBody(note: NoteNode): string {
   return note.contentMd;
 }
 
+// Start capturing console output as early as possible (module load), so the log viewer in the
+// toolbar has the full history — the packaged desktop app has no DevTools to fall back to.
+installConsoleCapture();
+
 export function VaultApp() {
   const [storageEpoch, setStorageEpoch] = useState(0);
   const storage = useMemo(
@@ -206,6 +213,9 @@ export function VaultApp() {
   const [showSettings, setShowSettings] = useState(false);
   const [showAuth, setShowAuth] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
+  const [showLogs, setShowLogs] = useState(false);
+  // Re-renders the logs modal after clearing (the buffer itself lives outside React).
+  const [, setLogsTick] = useState(0);
   const [session, setSession] = useState<UserSession | null>(() => loadSession(loadStorageNamespace()));
   const [serverUrl, setServerUrl] = useState(() => loadServerUrl());
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
@@ -669,30 +679,78 @@ export function VaultApp() {
     };
   }, []);
 
-  const loadSearchSnapshot = useCallback(
-    async (indexKey: Uint8Array) => {
+  /** True when the in-memory search index has changes not yet persisted to the snapshot. */
+  const searchDirtyRef = useRef(false);
+
+  /**
+   * Cheap fingerprint of the vault's note set (ids + versions). Stored alongside the search
+   * snapshot so unlock can tell whether the snapshot still matches the database — if it does, the
+   * expensive full index rebuild is skipped entirely.
+   */
+  const searchFingerprint = (items: NoteNode[]): string =>
+    hashContent(
+      items
+        .filter((n) => !n.deleted)
+        .map((n) => `${n.id}:${n.version}`)
+        .sort()
+        .join('|'),
+    );
+
+  /**
+   * False while the index is being prepared in the background after unlock (snapshot
+   * deserialization or full rebuild). Mutations arriving in that window are queued in
+   * `pendingSearchOpsRef` and replayed once the index is ready.
+   */
+  const searchReadyRef = useRef(true);
+  /** Invalidates an in-flight background index build (re-unlock, sync rebuild, lock). */
+  const searchGenRef = useRef(0);
+  const pendingSearchOpsRef = useRef<
+    Array<{ type: 'upsert'; note: NoteNode } | { type: 'remove'; id: string }>
+  >([]);
+
+  /** Reads the persisted snapshot and deserializes it off the main thread (chunked). */
+  const loadSearchSnapshotAsync = useCallback(
+    async (indexKey: Uint8Array, expectedFingerprint: string): Promise<NoteSearchIndex | null> => {
       const raw = await storage.getMeta(META_KEYS.searchIndexSnapshot);
-      if (!raw) return;
+      if (!raw) return null;
+      const storedFingerprint = await storage.getMeta(META_KEYS.searchIndexFingerprint);
+      // No/stale fingerprint means the snapshot may not reflect the current notes (e.g. the app
+      // was killed before locking); the caller falls back to a full rebuild.
+      if (storedFingerprint !== expectedFingerprint) return null;
       try {
-        const plain = decryptString(indexKey, unpackEncrypted(raw));
-        searchIndexRef.current = NoteSearchIndex.fromSerialized(plain);
+        const plain = await decryptStringNative(indexKey, unpackEncrypted(raw));
+        return await NoteSearchIndex.fromSerializedAsync(plain);
       } catch {
-        /* rebuild */
+        return null;
       }
     },
     [storage],
   );
 
   const saveSearchSnapshot = useCallback(
-    async (indexKey: Uint8Array) => {
+    async (indexKey: Uint8Array, items: NoteNode[]) => {
+      // While the background build is still running the in-memory index is empty/partial —
+      // persisting it would poison the next unlock. Keeping the previous snapshot is safe: its
+      // fingerprint won't match anymore, so the next unlock falls back to a full rebuild.
+      if (!searchReadyRef.current) return;
+      // Nothing changed since the last save/load — skip the serialize+encrypt+write entirely
+      // (this is what used to make locking an untouched large vault stall).
+      if (!searchDirtyRef.current) return;
       const json = searchIndexRef.current.serialize();
-      const enc = encryptString(indexKey, json);
+      const enc = await encryptStringNative(indexKey, json);
       await storage.setMeta(META_KEYS.searchIndexSnapshot, packEncrypted(enc));
+      await storage.setMeta(META_KEYS.searchIndexFingerprint, searchFingerprint(items));
+      searchDirtyRef.current = false;
     },
     [storage],
   );
 
   const upsertSearch = (note: NoteNode) => {
+    searchDirtyRef.current = true;
+    if (!searchReadyRef.current) {
+      pendingSearchOpsRef.current.push({ type: 'upsert', note });
+      return;
+    }
     searchIndexRef.current.upsert({
       ...note,
       contentMd: noteSearchBody(note),
@@ -700,12 +758,81 @@ export function VaultApp() {
     setSearchTick((n) => n + 1);
   };
 
+  const removeFromSearch = (id: string) => {
+    searchDirtyRef.current = true;
+    if (!searchReadyRef.current) {
+      pendingSearchOpsRef.current.push({ type: 'remove', id });
+      return;
+    }
+    searchIndexRef.current.remove(id);
+  };
+
   const rebuildSearchIndex = useCallback((items: NoteNode[]) => {
+    // A synchronous full rebuild supersedes any in-flight background build.
+    searchGenRef.current += 1;
+    searchReadyRef.current = true;
+    pendingSearchOpsRef.current = [];
     searchIndexRef.current.rebuild(
       items.map((n) => ({ ...n, contentMd: noteSearchBody(n) })),
     );
+    searchDirtyRef.current = true;
     setSearchTick((n) => n + 1);
   }, []);
+
+  /**
+   * Prepares the search index in the background after unlock. Deserializing the snapshot of a
+   * large vault (or rebuilding from scratch) takes seconds of CPU; doing it here — with MiniSearch's
+   * chunked async APIs — instead of on the unlock critical path lets the main UI open immediately.
+   * Searches in the first moments simply see an empty index until this finishes.
+   */
+  const prepareSearchIndexInBackground = useCallback(
+    (derived: VaultKeys, decrypted: NoteNode[]) => {
+      const gen = ++searchGenRef.current;
+      searchReadyRef.current = false;
+      pendingSearchOpsRef.current = [];
+      searchIndexRef.current = new NoteSearchIndex();
+      const fingerprint = searchFingerprint(decrypted);
+      void (async () => {
+        const t0 = performance.now();
+        let built: NoteSearchIndex | null = null;
+        try {
+          built = await loadSearchSnapshotAsync(derived.indexKey, fingerprint);
+          const fromSnapshot = built !== null;
+          if (!built) {
+            built = await NoteSearchIndex.buildAsync(
+              decrypted.map((n) => ({ ...n, contentMd: noteSearchBody(n) })),
+            );
+          }
+          if (searchGenRef.current !== gen || keysRef.current !== derived) return;
+          for (const op of pendingSearchOpsRef.current) {
+            if (op.type === 'upsert') {
+              built.upsert({ ...op.note, contentMd: noteSearchBody(op.note) });
+            } else {
+              built.remove(op.id);
+            }
+          }
+          const hadPendingOps = pendingSearchOpsRef.current.length > 0;
+          pendingSearchOpsRef.current = [];
+          searchIndexRef.current = built;
+          searchReadyRef.current = true;
+          // A freshly restored snapshot with no interim edits needs no re-save at lock.
+          searchDirtyRef.current = !fromSnapshot || hadPendingOps;
+          setSearchTick((n) => n + 1);
+          console.info(
+            `[FastNote] search index ready in ${Math.round(performance.now() - t0)}ms (${
+              fromSnapshot ? 'snapshot' : 'rebuild'
+            }, ${decrypted.length} notes)`,
+          );
+        } catch (err) {
+          if (searchGenRef.current !== gen || keysRef.current !== derived) return;
+          console.error('background search index build failed', err);
+          searchReadyRef.current = true;
+          rebuildSearchIndex(decrypted);
+        }
+      })();
+    },
+    [loadSearchSnapshotAsync, rebuildSearchIndex],
+  );
 
   const loadExchangePrivate = async (masterKey: Uint8Array) => {
     const wrapped = await storage.getMeta(META_KEYS.wrappedExchangeKey);
@@ -862,53 +989,54 @@ export function VaultApp() {
 
   const loadNotes = useCallback(
     async (derived: VaultKeys) => {
-      await loadSearchSnapshot(derived.indexKey);
-      // Tombstoned rows are skipped entirely — decrypting them on every unlock is pure waste
-      // (they only exist so a pending deletion can still be pushed to the server).
-      const stubs = (await storage.listNotes()).filter((s) => !s.deleted);
-      const total = stubs.length;
-      const decrypted: NoteNode[] = [];
-      // Decrypting is CPU-bound (pure-JS AES-GCM) and can take a while for large vaults, so we
-      // periodically yield back to the browser between batches. This keeps the tab responsive and
-      // lets the unlock-screen's progress bar actually repaint instead of the UI looking frozen.
-      if (total > 0) setUnlockProgress({ current: 0, total });
-      for (let i = 0; i < stubs.length; i += 1) {
-        const full = await storage.loadNoteDecrypted(stubs[i].id, derived.notesKey);
-        if (full) decrypted.push(full);
-        if (total > 0 && (i % 6 === 5 || i === stubs.length - 1)) {
-          setUnlockProgress({ current: i + 1, total });
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
-      }
+      const t0 = performance.now();
+      // One IndexedDB getAll() + WebCrypto AES-GCM decryption in parallel chunks (tombstoned rows
+      // are skipped inside the loader). The progress callback drives the unlock screen's bar.
+      const decrypted = await storage.loadAllNotesDecrypted(derived.notesKey, (current, total) => {
+        if (total > 0) setUnlockProgress({ current, total });
+      });
       setUnlockProgress(null);
+      console.info(
+        `[FastNote] unlock: ${decrypted.length} notes decrypted in ${Math.round(performance.now() - t0)}ms`,
+      );
       // Local-only vaults have no server to propagate deletions to, so any tombstones left over
       // from older versions can be cleared out here (off the critical path, fire-and-forget).
       if (!session) void storage.purgeDeleted();
       setNotes(decrypted);
-      rebuildSearchIndex(decrypted);
+      // Snapshot deserialization / index rebuild both take seconds of CPU on large vaults, so the
+      // whole thing happens in the background — it isn't needed to render the main UI.
+      prepareSearchIndexInBackground(derived, decrypted);
       restoreTabState(decrypted);
-      const priv = await loadExchangePrivate(derived.masterKey);
-      if (priv) void priv;
-      if (session) {
-        const saltB64 = await storage.getMeta(META_KEYS.salt);
-        if (saltB64) {
-          try {
-            await new ApiClient(serverUrl, locale).uploadVaultSalt(session.token, saltB64);
-          } catch {
-            /* backfill vault_salt for older accounts */
-          }
-        }
-        await loadChatHistory(derived);
+      // Everything below is off the unlock critical path. The salt backfill and IM handshake are
+      // network round-trips with no fetch timeout (an unreachable server used to keep the unlock
+      // screen on "processing" for tens of seconds), and chat-history decryption scales with the
+      // number of messages. None of it is needed to start working with notes, so it runs in the
+      // background after the main UI has opened. Same relative order as before; aborts if the
+      // vault got locked (keysRef reset/replaced) in the meantime.
+      const sessionAtUnlock = session;
+      void (async () => {
         try {
-          await initIM(derived, session);
+          if (sessionAtUnlock) {
+            const saltB64 = await storage.getMeta(META_KEYS.salt);
+            if (saltB64) {
+              try {
+                await new ApiClient(serverUrl, locale).uploadVaultSalt(sessionAtUnlock.token, saltB64);
+              } catch {
+                /* backfill vault_salt for older accounts */
+              }
+            }
+          }
+          if (keysRef.current !== derived) return;
+          await loadChatHistory(derived);
+          if (sessionAtUnlock && keysRef.current === derived) {
+            await initIM(derived, sessionAtUnlock);
+          }
         } catch (err) {
-          console.error('IM init failed', err);
+          console.error('post-unlock background init failed', err);
         }
-      } else {
-        await loadChatHistory(derived);
-      }
+      })();
     },
-    [storage, loadSearchSnapshot, session, initIM, rebuildSearchIndex, serverUrl, loadChatHistory, restoreTabState],
+    [storage, prepareSearchIndexInBackground, session, initIM, serverUrl, loadChatHistory, restoreTabState],
   );
 
   const handleCreateVault = async (password: string) => {
@@ -942,7 +1070,13 @@ export function VaultApp() {
     await setupIdentityKeys(derived);
     keysRef.current = derived;
     await loadNotes(derived);
+    const tPaint = performance.now();
     setKeys(derived);
+    // Measures how long the first render of the main app takes (note tree + restored tab editors)
+    // — the last remaining chunk of "processing…" time not covered by the phases logged above.
+    requestAnimationFrame(() =>
+      console.info(`[FastNote] unlock: first paint ${Math.round(performance.now() - tPaint)}ms after keys`),
+    );
   };
 
   const handleLock = async () => {
@@ -952,7 +1086,7 @@ export function VaultApp() {
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     try {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-      if (keys) await saveSearchSnapshot(keys.indexKey);
+      if (keys) await saveSearchSnapshot(keys.indexKey, notes);
       imRef.current?.disconnect();
       imRef.current = null;
       tabStateReadyRef.current = false;
@@ -1618,7 +1752,7 @@ export function VaultApp() {
         // tombstones only slow down unlock.
         await storage.deleteNote(id);
       }
-      searchIndexRef.current.remove(id);
+      removeFromSearch(id);
     }
     if (!session) await storage.purgeDeleted();
     setSearchTick((n) => n + 1);
@@ -1783,8 +1917,12 @@ export function VaultApp() {
     const client = new SyncClient(new ApiClient(baseUrl, locale), userSession);
     const result = await client.syncAll(initialNotes, derived.notesKey, saveNoteNow, storage);
     setNotes(result.notes);
-    rebuildSearchIndex(result.notes);
-    await saveSearchSnapshot(derived.indexKey);
+    // Pushes don't change local content, so the index only needs a rebuild when something was
+    // actually pulled or merged.
+    if (result.result.pulled > 0 || result.result.conflicts > 0) {
+      rebuildSearchIndex(result.notes);
+    }
+    await saveSearchSnapshot(derived.indexKey, result.notes);
     await loadChatHistory(derived);
     const { pushed, pulled, conflicts, attachmentsPushed, attachmentsPulled } = result.result;
     setSyncStatus(
@@ -1934,8 +2072,10 @@ export function VaultApp() {
       const client = new SyncClient(new ApiClient(serverUrl, locale), session);
       const result = await client.syncAll(notes, keys.notesKey, saveNoteNow, storage);
       setNotes(result.notes);
-      rebuildSearchIndex(result.notes);
-      await saveSearchSnapshot(keys.indexKey);
+      if (result.result.pulled > 0 || result.result.conflicts > 0) {
+        rebuildSearchIndex(result.notes);
+      }
+      await saveSearchSnapshot(keys.indexKey, result.notes);
       await loadChatHistory(keys);
       const { pushed, pulled, conflicts, attachmentsPushed, attachmentsPulled } = result.result;
       setSyncStatus(
@@ -2464,6 +2604,7 @@ export function VaultApp() {
                 <input className="fn-search" placeholder={t('vaultApp.searchPlaceholder')} value={searchQuery} onChange={(e) => { setSearchQuery(e.target.value); setExpandedSearch(!!e.target.value); }} />
               </>
             )}
+            <button type="button" onClick={() => setShowLogs(true)} title={t('logsModal.title')}>📋</button>
             <button type="button" onClick={() => setShowSettings(true)} title={t('vaultApp.settingsTitle')}>⚙</button>
             <button type="button" onClick={handleLock} title={t('vaultApp.lockTitle')}>🔒</button>
           </div>
@@ -2615,6 +2756,17 @@ export function VaultApp() {
       )}
       {showAuth && <AuthModal onClose={() => setShowAuth(false)} onRegister={handleRegister} onLogin={handleLogin} />}
       {showAbout && <AboutModal onClose={() => setShowAbout(false)} version={__APP_VERSION__} />}
+      {showLogs && (
+        <LogsModal
+          entries={getCapturedLogs()}
+          formatted={formatCapturedLogs()}
+          onClose={() => setShowLogs(false)}
+          onClear={() => {
+            clearCapturedLogs();
+            setLogsTick((n) => n + 1);
+          }}
+        />
+      )}
     </I18nProvider>
   );
 }

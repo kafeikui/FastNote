@@ -134,4 +134,23 @@ export class NoteSearchIndex {
     inst.index = MiniSearch.loadJSON(json, MINI_SEARCH_OPTIONS);
     return inst;
   }
+
+  /**
+   * Chunked, non-blocking variant of `fromSerialized`. The snapshot of a large vault is tens of
+   * MB (storeFields keeps the full note bodies), and the synchronous loader freezes the main
+   * thread for the whole parse+rebuild.
+   */
+  static async fromSerializedAsync(json: string): Promise<NoteSearchIndex> {
+    const inst = new NoteSearchIndex();
+    inst.index = await MiniSearch.loadJSONAsync(json, MINI_SEARCH_OPTIONS);
+    return inst;
+  }
+
+  /** Chunked, non-blocking full build (async counterpart of `rebuild` on a fresh instance). */
+  static async buildAsync(notes: NoteNode[]): Promise<NoteSearchIndex> {
+    const inst = new NoteSearchIndex();
+    const docs = notes.filter(isSearchableNode).map((n) => inst.toDoc(n));
+    if (docs.length) await inst.index.addAllAsync(docs);
+    return inst;
+  }
 }
