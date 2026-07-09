@@ -203,7 +203,7 @@ export class ApiClient {
   async pushNote(
     token: string,
     noteId: string,
-    body: { ciphertext: string; version: number; content_hash: string },
+    body: { ciphertext: string; version: number; content_hash: string; deleted?: boolean },
   ): Promise<{ conflict?: boolean; serverVersion?: number }> {
     const res = await fetch(this.url(`/api/v1/sync/notes/${noteId}`), {
       method: "PUT",
@@ -578,6 +578,17 @@ export function loadShowLineNumbers(): boolean {
 
 export function saveShowLineNumbers(show: boolean): void {
   localStorage.setItem(SHOW_LINE_NUMBERS_KEY, show ? "1" : "0");
+}
+
+const ENABLE_MATH_KEY = "fastnote_enable_math";
+
+// Default off: KaTeX parsing/rendering can make very long notes noticeably slow to open.
+export function loadEnableMath(): boolean {
+  return localStorage.getItem(ENABLE_MATH_KEY) === "1";
+}
+
+export function saveEnableMath(enable: boolean): void {
+  localStorage.setItem(ENABLE_MATH_KEY, enable ? "1" : "0");
 }
 
 export const SIDEBAR_WIDTH_MIN = 180;

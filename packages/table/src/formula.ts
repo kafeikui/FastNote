@@ -362,15 +362,23 @@ export interface RangeStats {
   average: number | null;
 }
 
-/** Aggregates numeric values (formula results included) across an arbitrary set of cells for the selection stats bar. */
+/**
+ * Aggregates cells for the selection stats bar. `count` counts every non-empty cell (text or
+ * number alike, Excel COUNTA-style); `sum`/`average` only consider numeric values (formula
+ * results included).
+ */
 export function computeRangeStats(
   doc: TableDocument,
   cells: Array<{ rowId: string; colId: string }>,
 ): RangeStats {
   const refs = buildRefMaps(doc);
+  const rowById = new Map(doc.rows.map((r) => [r.id, r]));
   let sum = 0;
   let count = 0;
+  let numericCount = 0;
   for (const { rowId, colId } of cells) {
+    const raw = rowById.get(rowId)?.cells[colId] ?? '';
+    if (raw.trim()) count++;
     const rowIdx = refs.rowIdByIndex.indexOf(rowId);
     const colIdx = refs.colIdByIndex.indexOf(colId);
     if (rowIdx < 0 || colIdx < 0) continue;
@@ -383,8 +391,8 @@ export function computeRangeStats(
     }
     if (value !== null) {
       sum += value;
-      count++;
+      numericCount++;
     }
   }
-  return { count, sum, average: count > 0 ? sum / count : null };
+  return { count, sum, average: numericCount > 0 ? sum / numericCount : null };
 }

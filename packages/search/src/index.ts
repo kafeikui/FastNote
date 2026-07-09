@@ -107,6 +107,10 @@ export class NoteSearchIndex {
     }
   }
 
+  remove(id: string): void {
+    if (this.index.has(id)) this.index.discard(id);
+  }
+
   search(query: string, limit = 20): SearchResult[] {
     const q = query.trim();
     if (!q) return [];

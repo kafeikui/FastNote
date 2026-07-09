@@ -132,6 +132,8 @@ export interface StorageAdapter {
   loadNoteDecrypted(id: string, notesKey: Uint8Array): Promise<NoteNode | null>;
   saveNote(note: NoteNode, notesKey: Uint8Array): Promise<void>;
   deleteNote(id: string): Promise<void>;
+  listDeletedNoteStubs(): Promise<NoteNode[]>;
+  purgeDeleted(): Promise<void>;
   listAttachments(noteId: string, notesKey: Uint8Array): Promise<NoteAttachment[]>;
   loadAttachmentDecrypted(
     id: string,
@@ -360,6 +362,30 @@ export class WebStorageAdapter implements StorageAdapter {
   async deleteNote(id: string): Promise<void> {
     const db = await this.getDb();
     await db.delete('notes_local', id);
+  }
+
+  /** Tombstoned note rows (no decryption), for pushing deletions to the server. */
+  async listDeletedNoteStubs(): Promise<NoteNode[]> {
+    const db = await this.getDb();
+    const rows = await db.getAll('notes_local');
+    return rows.filter((r) => r.deleted === 1).map((r) => toNodeStub(r));
+  }
+
+  /**
+   * Hard-deletes tombstoned note and attachment rows. Used for local-only vaults (no server to
+   * propagate deletions to) and as cleanup after a sync has pushed the tombstones — leftover
+   * tombstones otherwise accumulate forever and slow down unlock.
+   */
+  async purgeDeleted(): Promise<void> {
+    const db = await this.getDb();
+    const noteRows = await db.getAll('notes_local');
+    for (const r of noteRows) {
+      if (r.deleted === 1) await db.delete('notes_local', r.id);
+    }
+    const attRows = await db.getAll('attachments_local');
+    for (const r of attRows) {
+      if (normalizeAttachmentRow(r).deleted === 1) await db.delete('attachments_local', r.id);
+    }
   }
 
   async listAttachments(noteId: string, notesKey: Uint8Array): Promise<NoteAttachment[]> {

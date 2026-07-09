@@ -5,13 +5,20 @@ import { useT, type TFunction } from '@fastnote/i18n';
 
 const DRAG_MIME = 'application/x-fastnote-node';
 
+export interface TreeSelectModifiers {
+  ctrl: boolean;
+  shift: boolean;
+}
+
 interface NoteTreeProps {
   notes: NoteNode[];
   activeId: string | null;
+  /** Multi-selection (Ctrl/Shift+click); rows in this set are highlighted. */
+  selectedIds?: Set<string>;
   collapsedIds: Set<string>;
   onToggleCollapse: (id: string) => void;
   revealId?: string | null;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, mods: TreeSelectModifiers) => void;
   /** Double-click on a note/table opens it as a permanent (pinned) tab. */
   onOpenPinned?: (id: string) => void;
   onCreateFolder: (parentId: string | null) => void;
@@ -41,6 +48,7 @@ function TreeNode({
   item,
   depth,
   activeId,
+  selectedIds,
   collapsedIds,
   onToggleCollapse,
   revealId,
@@ -63,10 +71,11 @@ function TreeNode({
   item: TreeItem;
   depth: number;
   activeId: string | null;
+  selectedIds?: Set<string>;
   collapsedIds: Set<string>;
   onToggleCollapse: (id: string) => void;
   revealId?: string | null;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, mods: TreeSelectModifiers) => void;
   onOpenPinned?: (id: string) => void;
   onCreateFolder: (parentId: string | null) => void;
   onCreateNote: (parentId: string | null) => void;
@@ -93,6 +102,7 @@ function TreeNode({
   const isFolder = node.nodeType === 'folder';
   const isTable = node.nodeType === 'table';
   const isActive = node.id === activeId;
+  const isSelected = selectedIds?.has(node.id) ?? false;
   const icon = isFolder ? '📁' : isTable ? '📊' : '📝';
   const defaultTitle = isFolder
     ? t('noteTree.untitledFolder')
@@ -156,6 +166,7 @@ function TreeNode({
 
   const rowClass = [
     'fn-tree-node__row',
+    isSelected ? 'fn-tree-node__row--selected' : '',
     dropHint === 'inside' ? 'fn-tree-node__row--drop-inside' : '',
     dropHint === 'before' ? 'fn-tree-node__row--drop-before' : '',
     dropHint === 'after' ? 'fn-tree-node__row--drop-after' : '',
@@ -209,7 +220,7 @@ function TreeNode({
           <button
             type="button"
             className="fn-tree-node__label"
-            onClick={() => onSelect(node.id)}
+            onClick={(ev) => onSelect(node.id, { ctrl: ev.ctrlKey || ev.metaKey, shift: ev.shiftKey })}
             onDoubleClick={(ev) => {
               ev.preventDefault();
               if (isFolder || !onOpenPinned) {
@@ -268,6 +279,7 @@ function TreeNode({
               item={child}
               depth={depth + 1}
               activeId={activeId}
+              selectedIds={selectedIds}
               collapsedIds={collapsedIds}
               onToggleCollapse={onToggleCollapse}
               revealId={revealId}
@@ -297,6 +309,7 @@ function TreeNode({
 export function NoteTree({
   notes,
   activeId,
+  selectedIds,
   collapsedIds,
   onToggleCollapse,
   revealId,
@@ -317,6 +330,24 @@ export function NoteTree({
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const tree = buildTree(notes);
 
+  // Auto-scroll the sidebar while dragging a node near its top/bottom edge, so nodes can be
+  // dropped onto targets that are currently scrolled out of view. Capture phase: the per-node
+  // dragover handlers stop propagation, so a bubble-phase handler here would never fire.
+  const handleDragAutoScroll = (e: DragEvent) => {
+    const scroller = (e.currentTarget as HTMLElement).closest('.fn-sidebar');
+    if (!scroller) return;
+    const rect = scroller.getBoundingClientRect();
+    const zone = 48;
+    const maxStep = 24;
+    const fromTop = e.clientY - rect.top;
+    const fromBottom = rect.bottom - e.clientY;
+    if (fromTop < zone) {
+      scroller.scrollTop -= Math.ceil(((zone - fromTop) / zone) * maxStep);
+    } else if (fromBottom < zone) {
+      scroller.scrollTop += Math.ceil(((zone - fromBottom) / zone) * maxStep);
+    }
+  };
+
   const handleRootDragOver = (e: DragEvent) => {
     if (!draggingId) return;
     e.preventDefault();
@@ -336,6 +367,7 @@ export function NoteTree({
       <div
         className={`fn-tree-root-zone ${rootDrop ? 'fn-tree-root-zone--active' : ''}`}
         onDragOver={handleRootDragOver}
+        onDragOverCapture={handleDragAutoScroll}
         onDragLeave={() => setRootDrop(false)}
         onDrop={handleRootDrop}
       >
@@ -356,6 +388,7 @@ export function NoteTree({
     <div
       className={`fn-tree-root-zone ${rootDrop ? 'fn-tree-root-zone--active' : ''}`}
       onDragOver={handleRootDragOver}
+      onDragOverCapture={handleDragAutoScroll}
       onDragLeave={() => setRootDrop(false)}
       onDrop={handleRootDrop}
     >
@@ -367,6 +400,7 @@ export function NoteTree({
             item={item}
             depth={0}
             activeId={activeId}
+            selectedIds={selectedIds}
             collapsedIds={collapsedIds}
             onToggleCollapse={onToggleCollapse}
             revealId={revealId}

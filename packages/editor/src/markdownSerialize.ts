@@ -77,8 +77,14 @@ function serializeListItem(node: JSONContent, marker: string): string {
 
 function serializeBlock(node: JSONContent, indent = ''): string {
   switch (node.type) {
-    case 'paragraph':
-      return `${indent}${serializeInline(node.content)}\n\n`;
+    case 'paragraph': {
+      const inline = serializeInline(node.content);
+      // Empty and NBSP-only paragraphs stand for deliberate blank lines (see blankLines.ts).
+      // They serialize to a bare newline guarded by a \u0000 sentinel so the final \n{3,}
+      // collapse can't swallow it; the sentinel is stripped at the end.
+      if (!inline.replace(/\u00A0/g, '').trim()) return `${indent}\u0000\n`;
+      return `${indent}${inline}\n\n`;
+    }
     case 'heading': {
       const level = Math.min(6, Math.max(1, Number(node.attrs?.level ?? 1)));
       return `${indent}${'#'.repeat(level)} ${serializeInline(node.content)}\n\n`;
@@ -120,5 +126,6 @@ export function serializeDocJsonToMarkdown(doc: JSONContent): string {
     .map((node) => serializeBlock(node))
     .join('')
     .replace(/\n{3,}/g, '\n\n')
+    .replace(/\u0000/g, '')
     .trimEnd();
 }

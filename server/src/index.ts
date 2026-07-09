@@ -97,18 +97,21 @@ app.put<{ Body: { vault_salt?: string } }>('/api/v1/vault-salt', async (req, rep
   return { ok: true };
 });
 
-app.put<{ Params: { noteId: string }; Body: { ciphertext: string; version: number; content_hash: string } }>(
+app.put<{
+  Params: { noteId: string };
+  Body: { ciphertext: string; version: number; content_hash: string; deleted?: boolean };
+}>(
   '/api/v1/sync/notes/:noteId',
   async (req, reply) => {
     const userId = authUser(req.headers.authorization);
     if (!userId) return reply.code(401).send({ error: 'unauthorized' });
     const { noteId } = req.params;
-    const { ciphertext, version, content_hash } = req.body;
+    const { ciphertext, version, content_hash, deleted } = req.body;
     const existingVersion = store.getNoteVersion(userId, noteId);
     if (existingVersion !== undefined && version < existingVersion) {
       return reply.code(409).send({ error: 'version_conflict', server_version: existingVersion });
     }
-    store.upsertNote(userId, noteId, ciphertext, version, content_hash, new Date().toISOString());
+    store.upsertNote(userId, noteId, ciphertext, version, content_hash, new Date().toISOString(), !!deleted);
     return { ok: true };
   },
 );

@@ -86,6 +86,22 @@ export class SyncClient {
     let chatPulled = 0;
     const localMap = new Map(notes.map((n) => [n.id, n]));
 
+    // Push deletion tombstones first, then hard-delete the local tombstone rows: once the server
+    // knows, keeping (and re-decrypting) them locally on every unlock serves no purpose.
+    if (storage) {
+      const deletedStubs = await storage.listDeletedNoteStubs();
+      for (const stub of deletedStubs) {
+        const enc = encryptNoteForSync(stub, notesKey);
+        const pushResult = await this.api.pushNote(this.session.token, stub.id, {
+          ciphertext: encodeWireCiphertext(enc),
+          version: stub.version,
+          content_hash: stub.contentHash,
+          deleted: true,
+        });
+        if (!pushResult.conflict) await storage.deleteNote(stub.id);
+      }
+    }
+
     for (const note of notes) {
       if (note.deleted || note.syncStatus === 'synced') continue;
       const enc = encryptNoteForSync(note, notesKey);
@@ -114,7 +130,20 @@ export class SyncClient {
 
     const remoteItems = await this.api.pullNotes(this.session.token);
     for (const item of remoteItems) {
-      if (item.deleted) continue;
+      if (item.deleted) {
+        // Deletion made on another device: drop our local copy (tab pruning and UI state are
+        // reconciled by the caller from the returned notes list).
+        const local = localMap.get(item.note_id);
+        if (local && item.version >= local.serverVersion) {
+          localMap.delete(item.note_id);
+          if (storage) await storage.deleteNote(item.note_id);
+          pulled++;
+        } else if (!local && storage) {
+          // Not in the caller's (non-deleted) list, but a stale local tombstone row may remain.
+          await storage.deleteNote(item.note_id);
+        }
+        continue;
+      }
       const remote = decryptNoteFromSync(
         item.note_id,
         item.ciphertext,

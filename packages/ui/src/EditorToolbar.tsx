@@ -5,9 +5,11 @@ import { useT } from '@fastnote/i18n';
 interface EditorToolbarProps {
   editor: Editor | null;
   mode: EditorMode;
+  /** Hides the formula buttons when math rendering is disabled in settings. */
+  enableMath?: boolean;
 }
 
-export function EditorToolbar({ editor, mode }: EditorToolbarProps) {
+export function EditorToolbar({ editor, mode, enableMath = false }: EditorToolbarProps) {
   const t = useT();
   if (mode !== 'wysiwyg' || !editor) return null;
 
@@ -40,15 +42,19 @@ export function EditorToolbar({ editor, mode }: EditorToolbarProps) {
         const url = prompt(t('editorToolbar.linkPrompt'));
         if (url) editor.chain().focus().setLink({ href: url }).run();
       }, editor.isActive('link'))}
-      <span className="fn-editor-toolbar__sep" />
-      {btn('∑', () => {
-        const latex = prompt(t('editorToolbar.formulaInlinePrompt'));
-        if (latex) editor.chain().focus().insertInlineMath({ latex }).run();
-      }, editor.isActive('inlineMath'))}
-      {btn('∑∑', () => {
-        const latex = prompt(t('editorToolbar.formulaBlockPrompt'));
-        if (latex) editor.chain().focus().insertBlockMath({ latex }).run();
-      }, editor.isActive('blockMath'))}
+      {enableMath && (
+        <>
+          <span className="fn-editor-toolbar__sep" />
+          {btn('∑', () => {
+            const latex = prompt(t('editorToolbar.formulaInlinePrompt'));
+            if (latex) editor.chain().focus().insertInlineMath({ latex }).run();
+          }, editor.isActive('inlineMath'))}
+          {btn('∑∑', () => {
+            const latex = prompt(t('editorToolbar.formulaBlockPrompt'));
+            if (latex) editor.chain().focus().insertBlockMath({ latex }).run();
+          }, editor.isActive('blockMath'))}
+        </>
+      )}
     </div>
   );
 }
