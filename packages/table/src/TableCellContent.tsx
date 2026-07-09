@@ -1,4 +1,4 @@
-import { useMemo, useState, type DragEvent, type KeyboardEvent } from 'react';
+import { useMemo, useState, type CSSProperties, type DragEvent, type KeyboardEvent } from 'react';
 import type { NoteAttachment } from '@fastnote/shared';
 import {
   attachmentDisplayLabel,
@@ -35,6 +35,10 @@ interface TableCellContentProps {
   colId: string;
   onMoveAttachment: (from: AttachmentDragPos, to: AttachmentDragPos) => void;
   onKeyDown?: (e: KeyboardEvent<HTMLInputElement>) => void;
+  /** Per-cell text formatting (bold / font size / color) applied to the text inputs. */
+  textStyle?: CSSProperties;
+  /** Reports how many characters are selected in the cell's text input (0 when none/blurred). */
+  onTextSelect?: (count: number) => void;
 }
 
 function TableCellContent({
@@ -56,6 +60,8 @@ function TableCellContent({
   colId,
   onMoveAttachment,
   onKeyDown,
+  textStyle,
+  onTextSelect,
 }: TableCellContentProps) {
   // `editing` tracks whether this cell's text input currently has focus, so a
   // formula cell can show the raw formula while typing and the computed
@@ -171,13 +177,21 @@ function TableCellContent({
           <input
             key={`text-${index}`}
             className={isFormula ? 'fn-table-cell__text fn-table-cell__formula-input' : 'fn-table-cell__text'}
+            style={textStyle}
             value={isFormula && !editing ? displayValue : seg.text}
             onFocus={() => {
               setEditing(true);
               onFocus();
             }}
-            onBlur={() => setEditing(false)}
+            onBlur={() => {
+              setEditing(false);
+              onTextSelect?.(0);
+            }}
             onChange={(e) => updateTextSegment(index, e.target.value)}
+            onSelect={(e) => {
+              const el = e.target as HTMLInputElement;
+              onTextSelect?.(Math.abs((el.selectionEnd ?? 0) - (el.selectionStart ?? 0)));
+            }}
             onKeyDown={onKeyDown}
             data-row-idx={rowIdx}
             data-col-idx={colIdx}

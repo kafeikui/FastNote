@@ -168,12 +168,14 @@ export class JsonRelayStore {
     version: number,
     contentHash: string,
     updatedAt: string,
+    deleted = false,
   ): void {
     const existing = this.data.note_blobs.find((n) => n.user_id === userId && n.note_id === noteId);
     if (existing) {
       existing.ciphertext = ciphertext;
       existing.version = version;
       existing.content_hash = contentHash;
+      existing.deleted = deleted ? 1 : 0;
       existing.updated_at = updatedAt;
     } else {
       this.data.note_blobs.push({
@@ -182,7 +184,7 @@ export class JsonRelayStore {
         ciphertext,
         version,
         content_hash: contentHash,
-        deleted: 0,
+        deleted: deleted ? 1 : 0,
         updated_at: updatedAt,
       });
     }

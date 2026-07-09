@@ -46,17 +46,36 @@ export interface SyncNotePayload {
 export interface TableColumn {
   id: string;
   name: string;
+  /** Column width in px; unset means auto. */
+  width?: number;
+}
+
+/** Per-cell presentation overrides; absent keys mean "default". */
+export interface TableCellStyle {
+  bold?: boolean;
+  /** Font size in px. */
+  fontSize?: number;
+  /** Text color, CSS color string. */
+  color?: string;
+  /** Cell background fill, CSS color string. */
+  fill?: string;
 }
 
 export interface TableRow {
   id: string;
   cells: Record<string, string>;
+  /** Row height in px; unset means auto. */
+  height?: number;
+  /** Cell styles keyed by column id (parallel to `cells`). */
+  styles?: Record<string, TableCellStyle>;
 }
 
 export interface TableDocument {
   version: 1;
   columns: TableColumn[];
   rows: TableRow[];
+  /** Excel-style freeze: keeps the first data column visible while scrolling horizontally. */
+  freezeFirstColumn?: boolean;
 }
 
 export interface ChatAttachmentRef {
@@ -348,7 +367,13 @@ export function applySortMode(notes: NoteNode[], mode: Exclude<TreeSortMode, 'ma
   return changed ? result : notes;
 }
 
-export type ShortcutAction = 'renameNote' | 'lockVault' | 'tableRepeatAction';
+export type ShortcutAction =
+  | 'renameNote'
+  | 'lockVault'
+  | 'tableRepeatAction'
+  | 'tableUndo'
+  | 'tableRedo'
+  | 'deleteSelected';
 
 export interface ShortcutBinding {
   key: string;
@@ -363,6 +388,9 @@ export const DEFAULT_SHORTCUTS: ShortcutBindings = {
   renameNote: { key: 'F2' },
   lockVault: { key: 'l', ctrl: true },
   tableRepeatAction: { key: 'F4' },
+  tableUndo: { key: 'z', ctrl: true },
+  tableRedo: { key: 'y', ctrl: true },
+  deleteSelected: { key: 'Delete' },
 };
 
 interface ShortcutKeyEventLike {

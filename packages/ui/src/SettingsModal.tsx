@@ -6,7 +6,14 @@ import { DEFAULT_SHORTCUTS, formatShortcutBinding, shortcutBindingFromEvent } fr
 import { LOCALES, LOCALE_LABELS, useT, type Locale } from '@fastnote/i18n';
 import { chatSoundLabel, playChatNotificationSound } from './chatNotification';
 
-const SHORTCUT_ACTIONS: ShortcutAction[] = ['renameNote', 'lockVault', 'tableRepeatAction'];
+const SHORTCUT_ACTIONS: ShortcutAction[] = [
+  'renameNote',
+  'lockVault',
+  'tableRepeatAction',
+  'tableUndo',
+  'tableRedo',
+  'deleteSelected',
+];
 
 const THEME_SWATCHES: Record<UiThemeId, string> = {
   warm: '#c97b5a',
@@ -32,6 +39,8 @@ interface SettingsModalProps {
   locale: Locale;
   shortcuts: ShortcutBindings;
   onShortcutsChange: (bindings: ShortcutBindings) => void;
+  enableMath: boolean;
+  onEnableMathChange: (enable: boolean) => void;
   onClose: () => void;
   onSaveServer: (url: string) => void;
   onSaveVaultLabel: (label: string) => void;
@@ -60,6 +69,8 @@ export function SettingsModal({
   locale,
   shortcuts,
   onShortcutsChange,
+  enableMath,
+  onEnableMathChange,
   onClose,
   onSaveServer,
   onSaveVaultLabel,
@@ -82,6 +93,9 @@ export function SettingsModal({
     renameNote: t('settingsModal.shortcuts.renameNote'),
     lockVault: t('settingsModal.shortcuts.lockVault'),
     tableRepeatAction: t('settingsModal.shortcuts.tableRepeatAction'),
+    tableUndo: t('settingsModal.shortcuts.tableUndo'),
+    tableRedo: t('settingsModal.shortcuts.tableRedo'),
+    deleteSelected: t('settingsModal.shortcuts.deleteSelected'),
   };
 
   const handleShortcutKeyDown = (action: ShortcutAction, e: ReactKeyboardEvent<HTMLButtonElement>) => {
@@ -245,6 +259,19 @@ export function SettingsModal({
               </button>
             ))}
           </div>
+        </fieldset>
+        <hr />
+        <fieldset className="fn-field fn-field--checkboxes">
+          <legend>{t('settingsModal.editorLegend')}</legend>
+          <label className="fn-checkbox">
+            <input
+              type="checkbox"
+              checked={enableMath}
+              onChange={(e) => onEnableMathChange(e.target.checked)}
+            />
+            <span>{t('settingsModal.enableMath')}</span>
+          </label>
+          <p className="fn-field__hint">{t('settingsModal.enableMathHint')}</p>
         </fieldset>
         <hr />
         <fieldset className="fn-field fn-field--checkboxes">

@@ -1,4 +1,4 @@
-import type { TableColumn, TableDocument, TableRow } from '@fastnote/shared';
+import type { TableCellStyle, TableColumn, TableDocument, TableRow } from '@fastnote/shared';
 import { TABLE_FILE_MAGIC, TABLE_FILE_VERSION, expandAttachmentRefsForExport } from '@fastnote/shared';
 import {
   decryptString,
@@ -284,7 +284,14 @@ export function removeColumn(doc: TableDocument, columnId: string): TableDocumen
     rows: doc.rows.map((r) => {
       const cells = { ...r.cells };
       delete cells[columnId];
-      return { ...r, cells };
+      const next: TableRow = { ...r, cells };
+      if (r.styles && columnId in r.styles) {
+        const styles = { ...r.styles };
+        delete styles[columnId];
+        if (Object.keys(styles).length === 0) delete next.styles;
+        else next.styles = styles;
+      }
+      return next;
     }),
   };
 }
@@ -312,5 +319,88 @@ export function renameColumn(doc: TableDocument, columnId: string, name: string)
   return {
     ...doc,
     columns: doc.columns.map((c) => (c.id === columnId ? { ...c, name } : c)),
+  };
+}
+
+/**
+ * Excel-style "use first row as header": renames every column to the first row's cell content
+ * (columns whose cell is empty keep their name) and removes that row from the data. If it was
+ * the only row, an empty one is added so the table never ends up rowless.
+ */
+export function promoteFirstRowToHeader(doc: TableDocument): TableDocument {
+  const first = doc.rows[0];
+  if (!first) return doc;
+  const columns = doc.columns.map((c) => {
+    const v = (first.cells[c.id] ?? '').trim();
+    return v ? { ...c, name: v } : c;
+  });
+  let rows = doc.rows.slice(1);
+  if (rows.length === 0) {
+    const cells: Record<string, string> = {};
+    for (const c of columns) cells[c.id] = '';
+    rows = [{ id: crypto.randomUUID(), cells }];
+  }
+  return { ...doc, columns, rows };
+}
+
+export const MIN_COL_WIDTH = 48;
+export const MAX_COL_WIDTH = 1200;
+export const MIN_ROW_HEIGHT = 26;
+export const MAX_ROW_HEIGHT = 600;
+
+export function setColumnWidth(doc: TableDocument, columnId: string, width: number): TableDocument {
+  const clamped = Math.round(Math.min(MAX_COL_WIDTH, Math.max(MIN_COL_WIDTH, width)));
+  return {
+    ...doc,
+    columns: doc.columns.map((c) => (c.id === columnId ? { ...c, width: clamped } : c)),
+  };
+}
+
+export function setRowHeight(doc: TableDocument, rowId: string, height: number): TableDocument {
+  const clamped = Math.round(Math.min(MAX_ROW_HEIGHT, Math.max(MIN_ROW_HEIGHT, height)));
+  return {
+    ...doc,
+    rows: doc.rows.map((r) => (r.id === rowId ? { ...r, height: clamped } : r)),
+  };
+}
+
+/**
+ * Merges a style patch into every listed cell. Keys explicitly set to `undefined` in the patch
+ * are removed (back to default); cells whose style ends up empty drop the entry entirely.
+ */
+export function applyCellStyle(
+  doc: TableDocument,
+  cells: Array<{ rowId: string; colId: string }>,
+  patch: Partial<TableCellStyle>,
+): TableDocument {
+  if (cells.length === 0) return doc;
+  const byRow = new Map<string, string[]>();
+  for (const c of cells) {
+    const list = byRow.get(c.rowId) ?? [];
+    list.push(c.colId);
+    byRow.set(c.rowId, list);
+  }
+  return {
+    ...doc,
+    rows: doc.rows.map((row) => {
+      const colIds = byRow.get(row.id);
+      if (!colIds) return row;
+      const styles = { ...(row.styles ?? {}) };
+      for (const colId of colIds) {
+        const merged: TableCellStyle = { ...(styles[colId] ?? {}) };
+        for (const key of Object.keys(patch) as Array<keyof TableCellStyle>) {
+          const value = patch[key];
+          if (value === undefined) delete merged[key];
+          else (merged as Record<string, unknown>)[key] = value;
+        }
+        if (Object.keys(merged).length === 0) delete styles[colId];
+        else styles[colId] = merged;
+      }
+      if (Object.keys(styles).length === 0) {
+        const { styles: _drop, ...rest } = row;
+        return rest;
+      }
+      return { ...row, styles };
+    }),
   };
 }
