@@ -1,6 +1,6 @@
 {
   "name": "@fastnote/desktop",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "description": "FastNote desktop client - encrypted notes + E2E messaging",
   "author": "kafeikui",
@@ -13,11 +13,11 @@
     "dev": "vite",
     "build": "tsc -p tsconfig.electron.json && vite build",
     "typecheck": "tsc --noEmit",
-    "pack": "electron-builder --dir",
-    "dist": "electron-builder",
-    "dist:mac": "electron-builder --mac",
-    "dist:win": "electron-builder --win",
-    "dist:linux": "electron-builder --linux"
+    "pack": "pnpm build && electron-builder --dir",
+    "dist": "pnpm build && electron-builder",
+    "dist:mac": "pnpm build && electron-builder --mac",
+    "dist:win": "pnpm build && electron-builder --win",
+    "dist:linux": "pnpm build && electron-builder --linux"
   },
   "dependencies": {
     "@fastnote/api": "workspace:*",

@@ -591,6 +591,16 @@ export function saveEnableMath(enable: boolean): void {
   localStorage.setItem(ENABLE_MATH_KEY, enable ? "1" : "0");
 }
 
+const AI_PANEL_OPEN_KEY = "fastnote_ai_panel_open";
+
+export function loadAiPanelOpen(): boolean {
+  return localStorage.getItem(AI_PANEL_OPEN_KEY) === "1";
+}
+
+export function saveAiPanelOpen(open: boolean): void {
+  localStorage.setItem(AI_PANEL_OPEN_KEY, open ? "1" : "0");
+}
+
 export const SIDEBAR_WIDTH_MIN = 180;
 // Wide enough that long note/folder titles can be dragged fully into view instead of being
 // truncated with an ellipsis.

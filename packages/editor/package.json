@@ -1,6 +1,6 @@
 {
   "name": "@fastnote/editor",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
@@ -9,14 +9,14 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@fastnote/shared": "workspace:*",
-    "@fastnote/ui": "workspace:*",
-    "@fastnote/i18n": "workspace:*",
     "@codemirror/commands": "^6.10.4",
     "@codemirror/lang-markdown": "^6.3.2",
+    "@codemirror/search": "^6.7.1",
     "@codemirror/state": "^6.7.0",
     "@codemirror/view": "^6.36.2",
-    "codemirror": "^6.0.1",
+    "@fastnote/i18n": "workspace:*",
+    "@fastnote/shared": "workspace:*",
+    "@fastnote/ui": "workspace:*",
     "@tiptap/core": "^3.27.1",
     "@tiptap/extension-code-block": "^3.27.1",
     "@tiptap/extension-link": "^3.27.1",
@@ -26,6 +26,7 @@
     "@tiptap/pm": "^3.27.1",
     "@tiptap/react": "^3.27.1",
     "@tiptap/starter-kit": "^3.27.1",
+    "codemirror": "^6.0.1",
     "katex": "^0.16.11",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

@@ -28,9 +28,16 @@ interface NoteTreeProps {
   onRename: (id: string, title: string) => void;
   onDelete: (id: string) => void;
   onMove: (dragId: string, targetId: string | null, position: TreeDropPosition) => void;
+  /** Opens the cross-vault transfer dialog for this node (plus the current multi-selection). */
+  onTransfer?: (id: string) => void;
   /** When set to a node id, that node enters rename mode (e.g. via the F2 shortcut). */
   renameRequestId?: string | null;
   onRenameRequestHandled?: () => void;
+  /**
+   * Whether to show the pending-sync dot. Only meaningful for cloud-connected vaults; in a
+   * local-only vault every node is permanently "pending" and the dot would just be noise.
+   */
+  showSyncStatus?: boolean;
 }
 
 type DropHint = TreeDropPosition | null;
@@ -61,8 +68,10 @@ function TreeNode({
   onRename,
   onDelete,
   onMove,
+  onTransfer,
   renameRequestId,
   onRenameRequestHandled,
+  showSyncStatus,
   draggingId,
   onDragStartNode,
   onDragEndNode,
@@ -84,8 +93,10 @@ function TreeNode({
   onRename: (id: string, title: string) => void;
   onDelete: (id: string) => void;
   onMove: (dragId: string, targetId: string | null, position: TreeDropPosition) => void;
+  onTransfer?: (id: string) => void;
   renameRequestId?: string | null;
   onRenameRequestHandled?: () => void;
+  showSyncStatus?: boolean;
   draggingId: string | null;
   onDragStartNode: (id: string) => void;
   onDragEndNode: () => void;
@@ -232,7 +243,9 @@ function TreeNode({
           >
             <span className="fn-tree-node__icon">{icon}</span>
             <span className="fn-tree-node__text">{node.title || defaultTitle}</span>
-            {node.syncStatus === 'pending' && <span className="fn-sync-dot" title={t('noteTree.pendingSync')} />}
+            {showSyncStatus && node.syncStatus === 'pending' && (
+              <span className="fn-sync-dot" title={t('noteTree.pendingSync')} />
+            )}
             {node.syncStatus === 'conflict' && <span className="fn-conflict-dot" title={t('noteTree.conflict')} />}
           </button>
         )}
@@ -257,6 +270,11 @@ function TreeNode({
           )}
         </div>
         <div className="fn-tree-node__actions fn-tree-node__actions--always">
+          {onTransfer && (
+            <button type="button" title={t('noteTree.transfer')} onClick={() => onTransfer(node.id)}>
+              ⇄
+            </button>
+          )}
           <button type="button" title={t('noteTree.rename')} onClick={startRename}>
             ✎
           </button>
@@ -292,8 +310,10 @@ function TreeNode({
               onRename={onRename}
               onDelete={onDelete}
               onMove={onMove}
+              onTransfer={onTransfer}
               renameRequestId={renameRequestId}
               onRenameRequestHandled={onRenameRequestHandled}
+              showSyncStatus={showSyncStatus}
               draggingId={draggingId}
               onDragStartNode={onDragStartNode}
               onDragEndNode={onDragEndNode}
@@ -322,8 +342,10 @@ export function NoteTree({
   onRename,
   onDelete,
   onMove,
+  onTransfer,
   renameRequestId,
   onRenameRequestHandled,
+  showSyncStatus,
 }: NoteTreeProps) {
   const t = useT();
   const [rootDrop, setRootDrop] = useState(false);
@@ -334,7 +356,7 @@ export function NoteTree({
   // dropped onto targets that are currently scrolled out of view. Capture phase: the per-node
   // dragover handlers stop propagation, so a bubble-phase handler here would never fire.
   const handleDragAutoScroll = (e: DragEvent) => {
-    const scroller = (e.currentTarget as HTMLElement).closest('.fn-sidebar');
+    const scroller = (e.currentTarget as HTMLElement).closest('.fn-notes-sidebar__tree, .fn-sidebar');
     if (!scroller) return;
     const rect = scroller.getBoundingClientRect();
     const zone = 48;
@@ -413,8 +435,10 @@ export function NoteTree({
             onRename={onRename}
             onDelete={onDelete}
             onMove={onMove}
+            onTransfer={onTransfer}
             renameRequestId={renameRequestId}
             onRenameRequestHandled={onRenameRequestHandled}
+            showSyncStatus={showSyncStatus}
             draggingId={draggingId}
             onDragStartNode={setDraggingId}
             onDragEndNode={() => setDraggingId(null)}

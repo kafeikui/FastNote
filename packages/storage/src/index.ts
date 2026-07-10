@@ -1,5 +1,5 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
-import type { NoteAttachment, NoteNode, ChatMessage, ChatAttachmentRef, ChatWireAttachment } from '@fastnote/shared';
+import type { NoteAttachment, NoteNode, ChatMessage, ChatAttachmentRef, ChatWireAttachment, AiSessionNode, AiMessage } from '@fastnote/shared';
 import { META_KEYS } from '@fastnote/shared';
 import type { ChatStoredPayload } from '@fastnote/shared';
 import { storedToChatMessage } from '@fastnote/shared';
@@ -19,7 +19,7 @@ import {
   type EncryptedPayload,
 } from '@fastnote/crypto';
 
-const DB_VERSION = 5;
+const DB_VERSION = 6;
 
 export interface StorageOptions {
   /** Logical vault namespace — maps to IndexedDB database name. */
@@ -54,8 +54,25 @@ interface StoredChatAttachment {
   updatedAt: string;
 }
 
+/** AI Workbench session/folder row — title and message payload are encrypted with notesKey. */
+interface StoredAiSession {
+  id: string;
+  parentId: string | null;
+  kind: 'folder' | 'session';
+  titleEnc: string;
+  titleNonce: string;
+  payloadEnc: string;
+  payloadNonce: string;
+  sortOrder: number;
+  updatedAt: string;
+}
+
 interface FastNoteDB extends DBSchema {
   vault_meta: { key: string; value: string };
+  ai_sessions_local: {
+    key: string;
+    value: StoredAiSession;
+  };
   notes_local: {
     key: string;
     value: StoredNote;
@@ -186,6 +203,9 @@ export interface StorageAdapter {
   ): Promise<{ meta: ChatAttachmentRef; data: Uint8Array } | null>;
   updateChatAttachmentDescription(id: string, description: string, notesKey: Uint8Array): Promise<void>;
   deleteChatAttachment(id: string): Promise<void>;
+  listAiSessions(notesKey: Uint8Array): Promise<AiSessionNode[]>;
+  saveAiSession(session: AiSessionNode, notesKey: Uint8Array): Promise<void>;
+  deleteAiSession(id: string): Promise<void>;
 }
 
 function pack(payload: EncryptedPayload): { enc: string; nonce: string } {
@@ -338,6 +358,9 @@ export class WebStorageAdapter implements StorageAdapter {
             // is what used to make unlock stutter on vaults with large attachments.
             tx.objectStore('notes_local').createIndex('by_deleted', 'deleted');
             tx.objectStore('attachments_local').createIndex('by_deleted', 'deleted');
+          }
+          if (oldVersion < 6) {
+            db.createObjectStore('ai_sessions_local', { keyPath: 'id' });
           }
         },
       });
@@ -803,6 +826,51 @@ export class WebStorageAdapter implements StorageAdapter {
   async deleteChatAttachment(id: string): Promise<void> {
     const db = await this.getDb();
     await db.delete('chat_attachments_local', id);
+  }
+
+  async listAiSessions(notesKey: Uint8Array): Promise<AiSessionNode[]> {
+    const db = await this.getDb();
+    const rows = await db.getAll('ai_sessions_local');
+    return Promise.all(
+      rows.map(async (row) => ({
+        id: row.id,
+        parentId: row.parentId,
+        kind: row.kind,
+        title: await decryptStringNative(notesKey, unpack(row.titleEnc, row.titleNonce)),
+        messages:
+          row.kind === 'session'
+            ? (JSON.parse(
+                await decryptStringNative(notesKey, unpack(row.payloadEnc, row.payloadNonce)),
+              ) as AiMessage[])
+            : [],
+        sortOrder: row.sortOrder,
+        updatedAt: row.updatedAt,
+      })),
+    );
+  }
+
+  async saveAiSession(session: AiSessionNode, notesKey: Uint8Array): Promise<void> {
+    const title = pack(await encryptStringNative(notesKey, session.title));
+    const payload = pack(
+      await encryptStringNative(notesKey, JSON.stringify(session.kind === 'session' ? session.messages : [])),
+    );
+    const db = await this.getDb();
+    await db.put('ai_sessions_local', {
+      id: session.id,
+      parentId: session.parentId,
+      kind: session.kind,
+      titleEnc: title.enc,
+      titleNonce: title.nonce,
+      payloadEnc: payload.enc,
+      payloadNonce: payload.nonce,
+      sortOrder: session.sortOrder,
+      updatedAt: session.updatedAt,
+    });
+  }
+
+  async deleteAiSession(id: string): Promise<void> {
+    const db = await this.getDb();
+    await db.delete('ai_sessions_local', id);
   }
 }
 

@@ -1,0 +1,17 @@
+# FastNote — 项目工作约定（.clinerules）
+
+## 版本号规则（用户于 2026-07-10 制定，除非用户另行指定，一律遵守）
+
+- **本地新增 feature 或修复 bug 时**：bump **patch** 版本（x.y.Z）。
+- **每次做 git 提交时**：bump **minor** 版本（x.Y.0）。
+- bump 时必须同步更新**全部 17 个** `package.json`（根 + `apps/web` + `apps/desktop` + `server` + `packages/*` 十三个包），保持版本号一致；`pnpm-lock.yaml` 无需改动（workspace 内部均为 `workspace:*` 引用）。
+- 提交信息沿用 `Bump vX.Y.Z: 功能摘要` 风格（参考 git log 历史）。
+
+## 其它已确立的关键约定（详见 memory-bank/）
+
+- Electron 渲染进程禁止使用 `window.prompt()`（返回 null），一律用 `InlineInputBar` 等内联输入；剪贴板写入只能用 `document.execCommand('copy')`（权限全拒，不用 `navigator.clipboard`）。
+- 新增对外网络访问必须同步更新 `packages/shared/src/csp.ts` 和两份 `index.html` 引导脚本（唯一既有第三方例外：`api.anthropic.com`，AI Workbench 专用）。
+- 任何落盘的新数据必须过"是否泄露明文"审查；批量加解密热路径用 WebCrypto native 版本。
+- 编辑器（NoteEditor）里所有宿主回调 prop 必须先包 ref 再进 effect 依赖，防止宿主重渲染导致 effect 重跑清空状态。
+- 桌面打包脚本（`pack`/`dist*`）必须保持 `pnpm build && electron-builder ...` 的"先构建再打包"形式。
+- 新增面向用户的字符串必须中英双语同步更新（`packages/i18n/src/locales/zh.ts` + `en.ts`）。

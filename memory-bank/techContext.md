@@ -19,6 +19,8 @@
 | 本地存储 | `idb`（IndexedDB 封装），Web 和 Electron 共用 |
 | 全文搜索 | `minisearch`（内存索引 + 加密快照持久化） |
 | 国际化 | 自研 `packages/i18n`（无第三方 i18n 库），当前支持中文/英文 |
+| AI（可选功能） | `packages/ai` 自研 Anthropic Messages API 客户端（原生 fetch + 手写 SSE 解析，无 SDK 依赖）；助手回复渲染用 `marked` + `dompurify`（均为纯本地库，`packages/ui` 直接依赖） |
+| 编辑器查找替换 | `@codemirror/search`（源码模式）+ 自研 ProseMirror 插件（渲染模式，`packages/editor/src/FindReplaceExtension.ts`） |
 | 服务端 | Fastify 5 + `@fastify/websocket` + `@fastify/cors` |
 | 服务端鉴权 | `jsonwebtoken`（JWT，仅含 user_id/device_id，不含密钥material） |
 | 服务端持久化 | 自研 `JsonRelayStore`（JSON 文件），`sql.js` 仅用于历史数据迁移 |
@@ -28,8 +30,8 @@
 代码库已做过全量依赖审计（见对话历史）：
 - 无遥测/统计/崩溃上报类库（sentry / posthog / mixpanel / amplitude / bugsnag / firebase 等，全仓搜索均为 0 命中）。
 - 无自动更新逻辑（`electron-updater` / `autoUpdater` 未使用；`electron-builder` 配置里没有 `publish` 字段，只用于本机手动打包）。
-- 所有 `fetch()` / `WebSocket` 调用都经过用户在设置里配置的单一 `serverUrl`（`packages/api`、`packages/im`），没有硬编码的第三方域名。
-- 每次新增依赖后，建议重新跑一遍上述检查（关键词搜索 + `pnpm why <pkg>` 确认引入路径）。
+- 所有 `fetch()` / `WebSocket` 调用都经过用户在设置里配置的单一 `serverUrl`（`packages/api`、`packages/im`），**唯一例外**是 `packages/ai` 直连 `https://api.anthropic.com`（2026-07-10 用户明确要求的 AI Workbench 功能；opt-in——只有用户保存 API key 并主动发消息才有流量；CSP 三处放行）。
+- 每次新增依赖后，建议重新跑一遍上述检查（关键词搜索 + `pnpm why <pkg>` 确认引入路径）。`marked`/`dompurify`（AI 回复渲染）已核查：纯本地解析/消毒，无网络行为。
 
 ## 项目结构与命令
 

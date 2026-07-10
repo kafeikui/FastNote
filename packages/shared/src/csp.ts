@@ -39,7 +39,11 @@ function originsForServerUrl(serverUrl: string): string[] {
 }
 
 export function buildContentSecurityPolicy(serverUrl: string): string {
-  const connectSrc = ["'self'", ...originsForServerUrl(serverUrl)].join(' ');
+  // https://api.anthropic.com is the single third-party exception to the
+  // "only the user's own server" rule: it powers the opt-in AI Workbench and
+  // is only ever contacted after the user saves an Anthropic API key in a
+  // vault's settings (see packages/ai).
+  const connectSrc = ["'self'", ...originsForServerUrl(serverUrl), 'https://api.anthropic.com'].join(' ');
   return [
     "default-src 'self'",
     "script-src 'self'",

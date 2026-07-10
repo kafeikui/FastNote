@@ -7,15 +7,26 @@ import { Markdown } from '@tiptap/markdown';
 import { EditorView, keymap } from '@codemirror/view';
 import { Prec } from '@codemirror/state';
 import { deleteLine } from '@codemirror/commands';
+import {
+  search as cmSearch,
+  SearchQuery,
+  setSearchQuery,
+  findNext as cmFindNext,
+  findPrevious as cmFindPrevious,
+  replaceNext as cmReplaceNext,
+  replaceAll as cmReplaceAll,
+} from '@codemirror/search';
 import { basicSetup } from 'codemirror';
 import { markdown } from '@codemirror/lang-markdown';
 import { useEffect, useRef } from 'react';
 import type { AnyExtension } from '@tiptap/core';
-import type { EditorMode, NoteAttachment } from '@fastnote/shared';
+import { TextSelection } from '@tiptap/pm/state';
+import type { EditorMode, NoteAttachment, FindReplaceController, FindReplaceStatus } from '@fastnote/shared';
 import { useT } from '@fastnote/i18n';
 import { AttachmentRef } from './AttachmentRefExtension';
 import { EnhancedCodeBlock } from './CodeBlockExtension';
 import { LineEditing } from './LineEditingExtension';
+import { FindReplace, findReplacePluginKey } from './FindReplaceExtension';
 import { serializeDocJsonToMarkdown } from './markdownSerialize';
 import { normalizeLatexDelimiters } from './latexDelimiters';
 import { preserveBlankLines } from './blankLines';
@@ -36,6 +47,13 @@ export interface NoteEditorProps {
   onRegisterFormatJson?: (format: (() => boolean) | null) => void;
   /** Reports the number of characters currently selected (0 when the selection is empty). */
   onSelectionChars?: (count: number) => void;
+  /**
+   * Called when the user clicks an existing formula to edit it. The host shows an input UI and
+   * calls `apply` with the new LaTeX. (window.prompt is unavailable in the Electron renderer.)
+   */
+  onEditFormula?: (latex: string, apply: (next: string) => void) => void;
+  /** Registers the find/replace driver for the current view (source or render mode). */
+  onRegisterFindReplace?: (controller: FindReplaceController | null) => void;
   attachments?: NoteAttachment[];
   onAttachmentDownload?: (attachmentId: string) => void;
   onAttachmentEdit?: (attachmentId: string, description: string) => void | Promise<void>;
@@ -58,6 +76,8 @@ export function NoteEditor({
   onRegisterInsert,
   onRegisterFormatJson,
   onSelectionChars,
+  onEditFormula,
+  onRegisterFindReplace,
   attachments = [],
   onAttachmentDownload,
   onAttachmentEdit,
@@ -87,8 +107,13 @@ export function NoteEditor({
   const editorRef = useRef<Editor | null>(null);
   const onSelectionCharsRef = useRef(onSelectionChars);
   onSelectionCharsRef.current = onSelectionChars;
-  const editFormulaPromptRef = useRef(t('noteEditor.editFormulaPrompt'));
-  editFormulaPromptRef.current = t('noteEditor.editFormulaPrompt');
+  const onEditFormulaRef = useRef(onEditFormula);
+  onEditFormulaRef.current = onEditFormula;
+  // Must be a ref: the host passes a fresh arrow function every render, and using it as an
+  // effect dependency would re-run the find/replace registration effect (whose cleanup clears
+  // the active query and highlights) on every host re-render.
+  const onRegisterFindReplaceRef = useRef(onRegisterFindReplace);
+  onRegisterFindReplaceRef.current = onRegisterFindReplace;
 
   // Math parsing/rendering is opt-in: KaTeX work on long documents can make render mode very
   // slow, so the extension (and the $/\[ delimiter normalization) is only wired up when enabled.
@@ -103,6 +128,7 @@ export function NoteEditor({
     StarterKit.configure({ link: false, codeBlock: false }),
     EnhancedCodeBlock,
     LineEditing,
+    FindReplace,
     Link.configure({
       openOnClick: false,
       autolink: false,
@@ -121,16 +147,16 @@ export function NoteEditor({
         katexOptions: { throwOnError: false },
         inlineOptions: {
           onClick: (node, pos) => {
-            const latex = window.prompt(editFormulaPromptRef.current, (node.attrs.latex as string) ?? '');
-            if (latex === null) return;
-            editorRef.current?.chain().focus().updateInlineMath({ latex, pos }).run();
+            onEditFormulaRef.current?.((node.attrs.latex as string) ?? '', (latex) => {
+              editorRef.current?.chain().focus().updateInlineMath({ latex, pos }).run();
+            });
           },
         },
         blockOptions: {
           onClick: (node, pos) => {
-            const latex = window.prompt(editFormulaPromptRef.current, (node.attrs.latex as string) ?? '');
-            if (latex === null) return;
-            editorRef.current?.chain().focus().updateBlockMath({ latex, pos }).run();
+            onEditFormulaRef.current?.((node.attrs.latex as string) ?? '', (latex) => {
+              editorRef.current?.chain().focus().updateBlockMath({ latex, pos }).run();
+            });
           },
         },
       }),
@@ -148,6 +174,21 @@ export function NoteEditor({
       extensions,
       content: prepareContent(content),
       contentType: 'markdown',
+      editorProps: {
+        // Ctrl/Cmd+click opens the link. window.open is intercepted by the Electron main
+        // process (setWindowOpenHandler) and routed to the system default browser; in the web
+        // app it opens a normal new tab.
+        handleClick: (_view, _pos, event) => {
+          if (!event.ctrlKey && !event.metaKey) return false;
+          const anchor = (event.target as HTMLElement | null)?.closest?.('a[href]');
+          const href = anchor?.getAttribute('href');
+          if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
+            window.open(href, '_blank', 'noopener');
+            return true;
+          }
+          return false;
+        },
+      },
       onUpdate: ({ editor: e }) => {
         if (modeRef.current !== 'wysiwyg') return;
         onChangeRef.current(getMarkdown(e));
@@ -200,6 +241,80 @@ export function NoteEditor({
       onSelectionCharsRef.current?.(0);
     };
   }, [editor, mode]);
+
+  // Render-mode find/replace: driven by the ProseMirror plugin in FindReplaceExtension, which
+  // owns match computation and highlight decorations.
+  useEffect(() => {
+    if (!editor || mode !== 'wysiwyg' || !onRegisterFindReplaceRef.current) return;
+
+    const dispatchFind = (query: string, activeIndex: number) => {
+      if (editor.isDestroyed) return;
+      editor.view.dispatch(editor.state.tr.setMeta(findReplacePluginKey, { query, activeIndex }));
+    };
+
+    const status = (): FindReplaceStatus => {
+      const s = findReplacePluginKey.getState(editor.state);
+      const total = s?.matches.length ?? 0;
+      return { total, current: total > 0 ? (s?.activeIndex ?? 0) + 1 : 0 };
+    };
+
+    const scrollToActive = () => {
+      const s = findReplacePluginKey.getState(editor.state);
+      const m = s?.matches[s.activeIndex];
+      if (!m) return;
+      const sel = TextSelection.create(editor.state.doc, m.from, m.to);
+      editor.view.dispatch(editor.state.tr.setSelection(sel).scrollIntoView());
+    };
+
+    const step = (dir: 1 | -1): FindReplaceStatus => {
+      const s = findReplacePluginKey.getState(editor.state);
+      const total = s?.matches.length ?? 0;
+      if (!s || total === 0) return { total: 0, current: 0 };
+      dispatchFind(s.query, (s.activeIndex + dir + total) % total);
+      scrollToActive();
+      return status();
+    };
+
+    onRegisterFindReplaceRef.current({
+      search: (query) => {
+        dispatchFind(query, 0);
+        if (query) scrollToActive();
+        return status();
+      },
+      next: () => step(1),
+      prev: () => step(-1),
+      replace: (replacement) => {
+        const s = findReplacePluginKey.getState(editor.state);
+        const m = s?.matches[s.activeIndex];
+        if (!m) return status();
+        // The doc change makes the plugin recompute matches; the active index stays put, which
+        // naturally lands on the next remaining match.
+        editor.view.dispatch(editor.state.tr.insertText(replacement, m.from, m.to));
+        scrollToActive();
+        return status();
+      },
+      replaceAll: (replacement) => {
+        const s = findReplacePluginKey.getState(editor.state);
+        if (!s || s.matches.length === 0) return 0;
+        const count = s.matches.length;
+        const tr = editor.state.tr;
+        // Back to front so earlier positions stay valid without mapping.
+        for (const m of [...s.matches].reverse()) {
+          tr.insertText(replacement, m.from, m.to);
+        }
+        editor.view.dispatch(tr);
+        return count;
+      },
+      close: () => {
+        dispatchFind('', 0);
+      },
+    });
+
+    return () => {
+      dispatchFind('', 0);
+      onRegisterFindReplaceRef.current?.(null);
+    };
+  }, [editor, mode, noteId]);
 
   // Render-mode "format JSON": formats the selected text (or the whole document when nothing is
   // selected) and replaces it with a json code block, which is the only rich-text construct that
@@ -259,10 +374,19 @@ export function NoteEditor({
       extensions: [
         basicSetup,
         markdown(),
+        // Provides the search state used by the shared find/replace bar (driven programmatically
+        // below — CodeMirror's own panel stays hidden).
+        cmSearch(),
         // Prec.high: basicSetup's search keymap already claims Mod-d (select next occurrence),
         // so the delete-line binding must take precedence. Alt-ArrowUp/Down (move line) already
-        // ship in the default keymap.
-        Prec.high(keymap.of([{ key: 'Mod-d', run: deleteLine }])),
+        // ship in the default keymap. Mod-f is swallowed so CodeMirror's built-in search panel
+        // never opens — the app-level shortcut opens the shared find/replace bar instead.
+        Prec.high(
+          keymap.of([
+            { key: 'Mod-d', run: deleteLine },
+            { key: 'Mod-f', run: () => true },
+          ]),
+        ),
         EditorView.updateListener.of((update) => {
           if (update.selectionSet || update.docChanged) {
             const { from, to } = update.state.selection.main;
@@ -290,6 +414,72 @@ export function NoteEditor({
       onChangeRef.current(view.state.doc.toString());
     });
 
+    // Source-mode find/replace: programmatic driving of @codemirror/search (no built-in panel).
+    // The selection is placed on the current match; basicSetup's highlightSelectionMatches then
+    // highlights the other occurrences.
+    if (onRegisterFindReplaceRef.current) {
+      let frQuery = '';
+
+      const applyQuery = (query: string, replacement: string) => {
+        cmView.current?.dispatch({
+          effects: setSearchQuery.of(
+            new SearchQuery({ search: query, replace: replacement, caseSensitive: false }),
+          ),
+        });
+      };
+
+      const frStatus = (): FindReplaceStatus => {
+        const view = cmView.current;
+        if (!view || !frQuery) return { total: 0, current: 0 };
+        const q = new SearchQuery({ search: frQuery, caseSensitive: false });
+        const cursor = q.getCursor(view.state) as Iterator<{ from: number; to: number }>;
+        const sel = view.state.selection.main;
+        let total = 0;
+        let current = 0;
+        for (let r = cursor.next(); !r.done; r = cursor.next()) {
+          total++;
+          if (r.value.from < sel.to) current = total;
+        }
+        return { total, current };
+      };
+
+      onRegisterFindReplaceRef.current({
+        search: (query) => {
+          frQuery = query;
+          applyQuery(query, '');
+          if (query && cmView.current) {
+            // Search from the top so the first hit is the first match in the document.
+            cmView.current.dispatch({ selection: { anchor: 0 } });
+            cmFindNext(cmView.current);
+          }
+          return frStatus();
+        },
+        next: () => {
+          if (cmView.current) cmFindNext(cmView.current);
+          return frStatus();
+        },
+        prev: () => {
+          if (cmView.current) cmFindPrevious(cmView.current);
+          return frStatus();
+        },
+        replace: (replacement) => {
+          applyQuery(frQuery, replacement);
+          if (cmView.current) cmReplaceNext(cmView.current);
+          return frStatus();
+        },
+        replaceAll: (replacement) => {
+          const before = frStatus().total;
+          applyQuery(frQuery, replacement);
+          if (cmView.current) cmReplaceAll(cmView.current);
+          return before;
+        },
+        close: () => {
+          frQuery = '';
+          applyQuery('', '');
+        },
+      });
+    }
+
     onRegisterFormatJson?.(() => {
       const view = cmView.current;
       if (!view) return false;
@@ -313,6 +503,7 @@ export function NoteEditor({
 
     return () => {
       onRegisterFormatJson?.(null);
+      onRegisterFindReplaceRef.current?.(null);
       onSelectionCharsRef.current?.(0);
       cmView.current?.destroy();
       cmView.current = null;

@@ -2,7 +2,7 @@
 
 ## 状态总览
 
-MVP（`docs/PHASE1.md` M1–M8）已全部完成并在 M8 之后继续做了大量体验/安全类增强。当前版本号 `0.5.0`（2026-07-09 bump，覆盖解锁/上锁性能优化全套、内置日志查看器、im/sync tsconfig 修复；此前 2026-07-06 ~ 07-09 陆续 0.2.0 → 0.3.0 → 0.4.0，覆盖标签页系统、侧边栏增强、KaTeX、表格大改造、硬删除、快捷键系统等，详见下方清单与 `activeContext.md`）。Web 前端有 Vercel 部署方案（`vercel.json` + `docs/VERCEL.md`），与自托管中继服务器（`docs/DEPLOYMENT.md`）完全独立、互不影响。
+MVP（`docs/PHASE1.md` M1–M8）已全部完成并在 M8 之后继续做了大量体验/安全类增强。当前版本号 `0.6.0`（2026-07-10 bump，覆盖：AI Workbench（Claude 对话，加密会话树 + API key 库内加密）、跨密码库文件传输/移动、笔记查找替换（Ctrl+F 双模式）、渲染工具栏 prompt 失效修复，以及随后的 6 项反馈——AI 面板置顶固定、AI 回复渲染/源码切换、AI/笔记快速切换按钮、渲染模式查找失效修复、Ctrl+点击链接开系统浏览器、绿点仅云登录显示；此前 0.2.0 → 0.5.0 历史见下方清单与 `activeContext.md`）。**桌面打包脚本已修复**：`apps/desktop` 的 `dist:mac`/`dist:win`/`dist:linux`/`pack`/`dist` 原来只跑 `electron-builder`、直接打包上一次遗留的 `dist/` 产物（不重新构建），导致打出的包不含最新代码；现在全部改为 `pnpm build && electron-builder ...` 先重建再打包（CI workflow 本来就先跑 build，不受影响）。Web 前端有 Vercel 部署方案（`vercel.json` + `docs/VERCEL.md`），与自托管中继服务器（`docs/DEPLOYMENT.md`）完全独立、互不影响。
 
 ## 已完成 — 核心功能（MVP）
 
@@ -53,6 +53,10 @@ MVP（`docs/PHASE1.md` M1–M8）已全部完成并在 M8 之后继续做了大�
 - **硬删除架构（2026-07，0.4.0）**：本地库直接硬删；云库轻量墓碑（清空明文）→ 推送 `deleted: true` → 本地 purge；解锁跳过墓碑行
 - **解锁/上锁性能优化（2026-07-09）**：WebCrypto 原生 AES-GCM（与 noble 线格式兼容，已验证互解）、IndexedDB `getAll()` 批量读取 + 24 篇并行解密、~16ms 时间片 yield + 进度条、搜索快照新鲜度指纹（命中跳过 MiniSearch 全量重建）、索引 dirty 标记（上锁无变化跳过快照保存）；第二轮把网络请求（盐值回填/IM 握手）、聊天历史解密、搜索索引准备（`loadJSONAsync`/`addAllAsync` 分块后台构建 + 编辑重放队列）全部移出解锁关键路径，DB v5 加 `by_deleted` 索引让 `purgeDeleted` 只取键；1000+ 篇笔记实现秒开（用户确认）
 - **内置日志查看器（2026-07-09）**：`packages/shared/logBuffer.ts` 内存环形缓冲捕获 console 输出（上限 2000 条，不落盘）+ `LogsModal` 弹窗（复制/导出 .txt/清空），右上角 📋 按钮打开——桌面打包版无 DevTools 也能查看解锁耗时日志和报错
+- **AI Workbench（2026-07-10）**：新包 `packages/ai`（`AnthropicClient` SSE 流式直连 api.anthropic.com，CSP 三处放行——唯一第三方例外，仅用户配置 key 后才有流量）；API key/模型 masterKey 加密存 `vault_meta`（`META_KEYS.aiSettings`）；DB v6 新增 `ai_sessions_local`（notesKey 加密会话树：文件夹 + 会话，payload 为完整消息数组）；侧栏可折叠"AI 助手"分区（`AiSessionTree`：嵌套文件夹/新建/重命名/删除/拖拽移动）+ `AiWorkbench` 主界面（流式渲染、可中止、`MarkdownView` = marked + dompurify）
+- **跨库传输/移动（2026-07-10）**：NoteTree 行级 ⇄ 按钮（含多选批量）→ `VaultTransferModal`（目标库 + 密码验证 + 复制/移动）→ 子树收集去重、全新 UUID、parentId 重映射、附件目标库重加密 + `fnattach:` 引用重写；移动 = 复制后走 `handleDeleteMany`
+- **查找替换（2026-07-10）**：`findInNote` 快捷键（默认 Ctrl+F，可自定义）；共享 `FindReplaceBar`（计数/上下个/替换/全部替换/Esc）；源码模式 `@codemirror/search` 程序化驱动（吞掉 CM 自带 Mod-f 面板）；渲染模式自研 ProseMirror 插件（`FindReplaceExtension`，Decoration 高亮，匹配不跨节点）
+- **渲染工具栏 prompt 修复（2026-07-10）**：链接/公式插入与公式点击编辑全部改为 `InlineInputBar` 内联输入（Electron 下 `window.prompt` 返回 null 不可用——项目约定禁止 prompt）
 
 ## 进行中 / 本次会话任务
 

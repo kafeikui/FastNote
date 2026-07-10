@@ -128,7 +128,40 @@ export const META_KEYS = {
   chatSessions: 'chat_sessions',
   chatStorageMigrated: 'chat_storage_migrated',
   boundUsername: 'bound_username',
+  /** Encrypted JSON `{apiKey, model}` for the AI Workbench, per vault. */
+  aiSettings: 'ai_settings',
 } as const;
+
+// ---------------------------------------------------------------------------
+// AI Workbench
+// ---------------------------------------------------------------------------
+
+/** Per-vault AI Workbench settings, stored encrypted in vault_meta. */
+export interface AiSettings {
+  apiKey: string;
+  model: string;
+}
+
+export interface AiMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  /** ISO timestamp. */
+  ts: string;
+}
+
+export type AiSessionKind = 'folder' | 'session';
+
+/** A node of the AI session tree (folders organize sessions). */
+export interface AiSessionNode {
+  id: string;
+  parentId: string | null;
+  kind: AiSessionKind;
+  title: string;
+  /** Full conversation history; always empty for folders. */
+  messages: AiMessage[];
+  sortOrder: number;
+  updatedAt: string;
+}
 
 export const HKDF_INFO = {
   notes: 'fastnote-notes-v1',
@@ -381,7 +414,8 @@ export type ShortcutAction =
   | 'tableRepeatAction'
   | 'tableUndo'
   | 'tableRedo'
-  | 'deleteSelected';
+  | 'deleteSelected'
+  | 'findInNote';
 
 export interface ShortcutBinding {
   key: string;
@@ -399,6 +433,7 @@ export const DEFAULT_SHORTCUTS: ShortcutBindings = {
   tableUndo: { key: 'z', ctrl: true },
   tableRedo: { key: 'y', ctrl: true },
   deleteSelected: { key: 'Delete' },
+  findInNote: { key: 'f', ctrl: true },
 };
 
 interface ShortcutKeyEventLike {
@@ -439,6 +474,31 @@ export function shortcutBindingFromEvent(e: ShortcutKeyEventLike): ShortcutBindi
     shift: e.shiftKey,
     alt: e.altKey,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Note find & replace
+// ---------------------------------------------------------------------------
+
+/** `current` is 1-based; both are 0 when there are no matches. */
+export interface FindReplaceStatus {
+  total: number;
+  current: number;
+}
+
+/**
+ * Mode-specific search driver registered by the editor (CodeMirror in source mode, a ProseMirror
+ * plugin in render mode) and driven by the shared FindReplaceBar UI.
+ */
+export interface FindReplaceController {
+  search: (query: string) => FindReplaceStatus;
+  next: () => FindReplaceStatus;
+  prev: () => FindReplaceStatus;
+  replace: (replacement: string) => FindReplaceStatus;
+  /** Returns the number of replacements made. */
+  replaceAll: (replacement: string) => number;
+  /** Clears the query and any highlight decorations. */
+  close: () => void;
 }
 
 export function isTableNode(node: NoteNode): boolean {

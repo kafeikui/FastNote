@@ -1,7 +1,7 @@
 import { useState, useEffect, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { ChatNotificationSettings, ChatSoundId, UiThemeId } from '@fastnote/api';
 import { CHAT_SOUND_IDS, UI_THEMES } from '@fastnote/api';
-import type { ShortcutAction, ShortcutBindings } from '@fastnote/shared';
+import type { AiSettings, ShortcutAction, ShortcutBindings } from '@fastnote/shared';
 import { DEFAULT_SHORTCUTS, formatShortcutBinding, shortcutBindingFromEvent } from '@fastnote/shared';
 import { LOCALES, LOCALE_LABELS, useT, type Locale } from '@fastnote/i18n';
 import { chatSoundLabel, playChatNotificationSound } from './chatNotification';
@@ -13,6 +13,7 @@ const SHORTCUT_ACTIONS: ShortcutAction[] = [
   'tableUndo',
   'tableRedo',
   'deleteSelected',
+  'findInNote',
 ];
 
 const THEME_SWATCHES: Record<UiThemeId, string> = {
@@ -41,6 +42,11 @@ interface SettingsModalProps {
   onShortcutsChange: (bindings: ShortcutBindings) => void;
   enableMath: boolean;
   onEnableMathChange: (enable: boolean) => void;
+  /** Per-vault AI Workbench settings (null while not configured). */
+  aiSettings: AiSettings | null;
+  /** Built-in Claude model choices; a custom model ID can also be typed. */
+  aiModels: Array<{ id: string; label: string }>;
+  onAiSettingsSave: (settings: AiSettings) => void;
   onClose: () => void;
   onSaveServer: (url: string) => void;
   onSaveVaultLabel: (label: string) => void;
@@ -71,6 +77,9 @@ export function SettingsModal({
   onShortcutsChange,
   enableMath,
   onEnableMathChange,
+  aiSettings,
+  aiModels,
+  onAiSettingsSave,
   onClose,
   onSaveServer,
   onSaveVaultLabel,
@@ -88,6 +97,12 @@ export function SettingsModal({
   const [pathDraft, setPathDraft] = useState(dataDirectory);
   const [vaultLabelDraft, setVaultLabelDraft] = useState(vaultLabel);
   const [recordingAction, setRecordingAction] = useState<ShortcutAction | null>(null);
+  const [aiKeyDraft, setAiKeyDraft] = useState(aiSettings?.apiKey ?? '');
+  const initialModel = aiSettings?.model ?? aiModels[0]?.id ?? '';
+  const isCustomModel = !!initialModel && !aiModels.some((m) => m.id === initialModel);
+  const [aiModelDraft, setAiModelDraft] = useState(isCustomModel ? 'custom' : initialModel);
+  const [aiCustomModelDraft, setAiCustomModelDraft] = useState(isCustomModel ? initialModel : '');
+  const [aiSaved, setAiSaved] = useState(false);
 
   const SHORTCUT_LABELS: Record<ShortcutAction, string> = {
     renameNote: t('settingsModal.shortcuts.renameNote'),
@@ -96,6 +111,7 @@ export function SettingsModal({
     tableUndo: t('settingsModal.shortcuts.tableUndo'),
     tableRedo: t('settingsModal.shortcuts.tableRedo'),
     deleteSelected: t('settingsModal.shortcuts.deleteSelected'),
+    findInNote: t('settingsModal.shortcuts.findInNote'),
   };
 
   const handleShortcutKeyDown = (action: ShortcutAction, e: ReactKeyboardEvent<HTMLButtonElement>) => {
@@ -272,6 +288,67 @@ export function SettingsModal({
             <span>{t('settingsModal.enableMath')}</span>
           </label>
           <p className="fn-field__hint">{t('settingsModal.enableMathHint')}</p>
+        </fieldset>
+        <hr />
+        <fieldset className="fn-field fn-field--checkboxes">
+          <legend>{t('settingsModal.ai.legend')}</legend>
+          <label className="fn-field">
+            <span>{t('settingsModal.ai.apiKeyLabel')}</span>
+            <input
+              type="password"
+              value={aiKeyDraft}
+              onChange={(e) => {
+                setAiKeyDraft(e.target.value);
+                setAiSaved(false);
+              }}
+              placeholder="sk-ant-..."
+              autoComplete="off"
+            />
+          </label>
+          <label className="fn-field">
+            <span>{t('settingsModal.ai.modelLabel')}</span>
+            <select
+              value={aiModelDraft}
+              onChange={(e) => {
+                setAiModelDraft(e.target.value);
+                setAiSaved(false);
+              }}
+            >
+              {aiModels.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
+              <option value="custom">{t('settingsModal.ai.customModel')}</option>
+            </select>
+          </label>
+          {aiModelDraft === 'custom' && (
+            <label className="fn-field">
+              <span>{t('settingsModal.ai.customModelLabel')}</span>
+              <input
+                value={aiCustomModelDraft}
+                onChange={(e) => {
+                  setAiCustomModelDraft(e.target.value);
+                  setAiSaved(false);
+                }}
+                placeholder="claude-..."
+              />
+            </label>
+          )}
+          <p className="fn-field__hint">{t('settingsModal.ai.hint')}</p>
+          <div className="fn-modal__actions">
+            <button
+              type="button"
+              disabled={aiModelDraft === 'custom' && !aiCustomModelDraft.trim()}
+              onClick={() => {
+                const model = aiModelDraft === 'custom' ? aiCustomModelDraft.trim() : aiModelDraft;
+                onAiSettingsSave({ apiKey: aiKeyDraft.trim(), model });
+                setAiSaved(true);
+              }}
+            >
+              {aiSaved ? t('settingsModal.ai.saved') : t('settingsModal.ai.save')}
+            </button>
+          </div>
         </fieldset>
         <hr />
         <fieldset className="fn-field fn-field--checkboxes">

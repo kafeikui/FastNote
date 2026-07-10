@@ -28,7 +28,11 @@
           // localStorage unavailable — fall back to the default.
         }
         window.__FASTNOTE_CSP_SERVER_URL__ = serverUrl;
-        var connectSrc = ["'self'"].concat(originsForServerUrl(serverUrl)).join(' ');
+        // api.anthropic.com: opt-in AI Workbench (only used after the user saves an API key).
+        var connectSrc = ["'self'"]
+          .concat(originsForServerUrl(serverUrl))
+          .concat(['https://api.anthropic.com'])
+          .join(' ');
         var policy = [
           "default-src 'self'",
           "script-src 'self'",

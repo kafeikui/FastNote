@@ -477,6 +477,24 @@ button:active:not(:disabled) {
      `box-sizing: border-box` (set globally) means this comes out of the already-fixed width above
      rather than adding to it, so long titles simply truncate a little earlier instead. */
   padding-right: 14px;
+  /* Definite height so the notes sidebar (.fn-notes-sidebar) can split it into a fixed AI panel
+     and an independently scrolling tree area. Overflowing content in the other sidebar views
+     (chat, search results) still extends .fn-sidebar's scroll area as before. */
+  height: 100%;
+}
+
+/* Notes-view sidebar: fixed AI panel on top, scrolling file tree below. */
+.fn-notes-sidebar {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.fn-notes-sidebar__tree {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .fn-sidebar-toggle {
@@ -1584,6 +1602,49 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   flex-wrap: wrap;
   gap: 0.25rem;
   margin-bottom: 0.5rem;
+}
+
+/* Inline prompt row (replaces window.prompt, unavailable in Electron) */
+.fn-inline-input {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.5rem;
+  margin-bottom: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.fn-inline-input__label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.fn-inline-input input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.fn-inline-input button {
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.fn-inline-input button:hover {
+  background: var(--surface-hover, rgba(127, 127, 127, 0.12));
 }
 
 .fn-editor-toolbar button {
@@ -2896,5 +2957,452 @@ body.fn-resizing-note .fn-note-resize-handle::after {
 .fn-attachments__actions button:hover {
   background: var(--accent-soft);
   border-color: var(--accent);
+}
+
+/* ---------------------------------------------------------------------------
+ * Find & replace
+ * ------------------------------------------------------------------------- */
+
+.fn-findbar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.4rem 0.5rem;
+  margin-bottom: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.fn-findbar__row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.fn-findbar__row input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.fn-findbar__count {
+  flex: 0 0 auto;
+  min-width: 3.2em;
+  text-align: center;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.fn-findbar__row button {
+  flex: 0 0 auto;
+  padding: 0.25rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.fn-findbar__row button:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.fn-findbar__row button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Render-mode match highlights (ProseMirror decorations) */
+.fn-find-match {
+  background: rgba(255, 213, 79, 0.45);
+  border-radius: 2px;
+}
+
+.fn-find-match--active {
+  background: rgba(255, 152, 0, 0.65);
+  outline: 1px solid rgba(230, 126, 0, 0.9);
+}
+
+/* ---------------------------------------------------------------------------
+ * AI Workbench
+ * ------------------------------------------------------------------------- */
+
+.fn-ai-panel {
+  /* Pinned above the file tree: doesn't scroll with it, caps its own height and scrolls the
+     session tree internally when expanded. */
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 45%;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.25rem;
+  background: var(--surface);
+}
+
+.fn-ai-panel .fn-ai-tree {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.fn-ai-panel__header {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  width: 100%;
+  padding: 0.35rem 0.5rem;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text);
+  text-align: left;
+}
+
+.fn-ai-panel__header:hover {
+  background: var(--accent-soft);
+  border-radius: 6px;
+}
+
+.fn-ai-panel__chevron {
+  width: 1em;
+  color: var(--text-muted);
+}
+
+.fn-ai-tree {
+  padding: 0.15rem 0.25rem 0.5rem;
+  border-radius: 6px;
+}
+
+.fn-ai-tree--drop {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+
+.fn-ai-tree__toolbar {
+  display: flex;
+  gap: 0.35rem;
+  padding: 0.2rem 0.25rem 0.4rem;
+}
+
+.fn-ai-tree__toolbar button {
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 0.75rem;
+}
+
+.fn-ai-tree__toolbar button:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.fn-ai-tree__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.fn-ai-tree__row {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.25rem 0.35rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  min-width: 0;
+}
+
+.fn-ai-tree__row:hover {
+  background: var(--accent-soft);
+}
+
+.fn-ai-tree__row--active {
+  background: var(--accent-soft);
+  outline: 1px solid var(--accent);
+}
+
+.fn-ai-tree__row--drop {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+
+.fn-ai-tree__icon {
+  flex: 0 0 auto;
+  width: 1.1em;
+  text-align: center;
+  font-size: 0.8em;
+  color: var(--text-muted);
+}
+
+.fn-ai-tree__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fn-ai-tree__rename {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.1rem 0.3rem;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.fn-ai-tree__actions {
+  display: none;
+  flex: 0 0 auto;
+  gap: 0.1rem;
+}
+
+.fn-ai-tree__row:hover .fn-ai-tree__actions {
+  display: inline-flex;
+}
+
+.fn-ai-tree__actions button {
+  padding: 0 0.25rem;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.fn-ai-tree__actions button:hover {
+  color: var(--accent);
+}
+
+.fn-ai-tree__empty {
+  margin: 0.25rem 0.5rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.fn-ai-workbench {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+.fn-ai-workbench__header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.fn-ai-workbench__viewmode {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.fn-ai-workbench__viewmode button {
+  padding: 0.15rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 0.78rem;
+}
+
+.fn-ai-workbench__viewmode button.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.fn-ai-workbench__title {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.fn-ai-workbench__messages {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.fn-ai-workbench__empty {
+  margin: 2rem auto;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.fn-ai-msg {
+  max-width: 52rem;
+  width: 100%;
+  margin: 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.6rem 0.9rem;
+  background: var(--surface);
+}
+
+.fn-ai-msg--user {
+  background: var(--accent-soft);
+}
+
+.fn-ai-msg--streaming {
+  border-style: dashed;
+}
+
+.fn-ai-msg__role {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.3rem;
+}
+
+.fn-ai-msg__body--plain {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.9rem;
+}
+
+/* Raw markdown source view of assistant replies */
+.fn-ai-msg__body--source {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.fn-ai-workbench__error {
+  max-width: 52rem;
+  width: 100%;
+  margin: 0 auto;
+  color: #c0392b;
+  font-size: 0.85rem;
+}
+
+.fn-ai-workbench__composer {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-end;
+  padding: 0.75rem 1rem;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.fn-ai-workbench__composer textarea {
+  flex: 1 1 auto;
+  min-width: 0;
+  resize: vertical;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.9rem;
+  font-family: inherit;
+}
+
+.fn-ai-workbench__composer button {
+  flex: 0 0 auto;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.fn-ai-workbench__composer button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.fn-ai-workbench__configure {
+  margin: 0 auto;
+}
+
+/* Sanitized markdown rendering (AI replies) */
+.fn-md-view {
+  font-size: 0.9rem;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.fn-md-view > :first-child {
+  margin-top: 0;
+}
+
+.fn-md-view > :last-child {
+  margin-bottom: 0;
+}
+
+.fn-md-view pre {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.8rem;
+  overflow-x: auto;
+}
+
+.fn-md-view code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85em;
+}
+
+.fn-md-view :not(pre) > code {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.05em 0.3em;
+}
+
+.fn-md-view table {
+  border-collapse: collapse;
+  margin: 0.5rem 0;
+}
+
+.fn-md-view th,
+.fn-md-view td {
+  border: 1px solid var(--border);
+  padding: 0.25rem 0.55rem;
+}
+
+.fn-md-view blockquote {
+  margin: 0.5rem 0;
+  padding: 0.25rem 0.75rem;
+  border-left: 3px solid var(--border);
+  color: var(--text-muted);
 }
 

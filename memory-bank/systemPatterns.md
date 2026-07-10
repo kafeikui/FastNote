@@ -18,6 +18,7 @@ FastNote/
 │   ├── table/                # 表格文档模型、CSV/.fnxt 导入导出
 │   ├── api/                  # HTTP ApiClient + 所有 localStorage 设置的读写函数
 │   ├── i18n/                 # 中/英文词典、I18nProvider、useT()/useLocale() hook、语言持久化（2026-07 新增）
+│   ├── ai/                   # AnthropicClient：Claude Messages API 直连 + SSE 流式解析（2026-07-10 新增，唯一的第三方网络包）
 │   ├── app/                  # VaultApp：整个应用的顶层状态机和业务编排（最大的包）
 │   └── ui/                   # 纯展示型 React 组件（NoteTree、ChatPanel、SettingsModal…）
 └── server/                    # 自托管中继：Fastify + WebSocket + JSON 文件存储
@@ -71,6 +72,8 @@ FastNote/
 
 **这是一个强约束**：以后如果要接入任何新的第三方网络服务（字体 CDN、图床、AI API 等），必须同步更新 `csp.ts` 和两份 `index.html` 里的引导脚本，否则浏览器会直接拦截请求——这是刻意设计的摩擦，用来防止"顺手"引入非自托管的外部依赖。
 
+**唯一的功能性例外（2026-07-10，用户明确要求）**：`https://api.anthropic.com` 已在三处 CSP 中静态放行，供 AI Workbench（`packages/ai`）直连 Claude Messages API。只有用户在设置里主动保存 Anthropic API key 并发送消息时才会产生流量；key 用 masterKey 加密存 `vault_meta`，锁定后不可读。
+
 ### 8. 服务端持久化：JSON 文件存储，非直接 SQLite 表
 
 `server/src/store.ts` 的 `JsonRelayStore` 实际用 JSON 文件（`data/relay.json`）做持久化（配合 `data/relay.db.bak` 之类的历史/迁移文件，见 `server/src/migrate.ts` 做旧格式迁移）。`sql.js` 依赖存在于 `server/package.json`，主要用于迁移/兼容旧数据，不是主存储路径。这个数据目录默认是 `./data`（`DATA_DIR` 环境变量可覆盖），**已加入 `.gitignore`**，因为里面是真实的（哪怕是密文的）用户数据。
@@ -120,6 +123,25 @@ FastNote/
 - **内置日志查看器**（桌面打包版没有 DevTools）：`packages/shared/logBuffer.ts` 的 `installConsoleCapture()` 在 `VaultApp` 模块顶层调用，包装 console 四个方法写入内存环形缓冲（2000 条上限，绝不自动落盘）；右上角 📋 按钮打开 `LogsModal`（复制/导出/清空）。用户报问题时让他从这里导出日志。
 - **Electron 权限硬化是无例外的全拒**（用户明确决策，2026-07-09）：`apps/desktop/electron/main.ts` 拒绝一切权限请求，**包括剪贴板写入**——不开任何白名单。因此渲染层任何"复制到剪贴板"功能都**不能用 `navigator.clipboard`**（桌面版必抛 `NotAllowedError`），必须用无需权限的 `document.execCommand('copy')`（隐藏 textarea + select，见 `LogsModal.handleCopy`）。
 
+### 14. 禁止 window.prompt；内联输入代替（2026-07-10 确立）
+
+Electron 渲染进程**不支持 `window.prompt()`**（同步返回 null，无任何 UI），`confirm()`/`alert()` 可用。历史上渲染工具栏的链接/公式按钮和表头重命名都因此静默失效。**约定**：任何需要用户输入一小段文本的场景一律用内联输入组件——通用的 `packages/ui/src/InlineInputBar.tsx`（label + input + 确认/取消，Enter/Esc），或像表格列重命名那样的就地 input。编辑器内部事件（如 Mathematics 扩展的公式点击编辑）通过回调 prop（`onEditFormula(latex, apply)`) 把输入请求抛给宿主 `VaultApp` 渲染。
+
+### 15. AI Workbench 架构（2026-07-10 新增）
+
+- **网络层**（`packages/ai`）：无任何内部包依赖的纯客户端。`AnthropicClient.streamMessage()` 手写 SSE 解析（按行切 `data:`、处理 `content_block_delta.text_delta`），支持 `AbortSignal` 中止；浏览器直连需要 `anthropic-dangerous-direct-browser-access: true` 请求头。模型列表 `CLAUDE_MODELS` 内置 + 设置里可填自定义 ID。
+- **密钥存储**：`META_KEYS.aiSettings`（`vault_meta`），`{apiKey, model}` 用 **masterKey** 加密（与身份密钥包装同级别）；解锁后在后台 IIFE 里解密进内存 state，上锁清空。
+- **会话存储**：DB v6 的 `ai_sessions_local`，行结构仿 chat（`titleEnc/payloadEnc` + nonce，**notesKey** 加密），`kind: 'folder' | 'session'`，payload 是完整 `AiMessage[]`（每次消息变更全量重写——会话体量小，不做增量）。
+- **UI 编排**：`AiSessionTree`（侧栏可折叠分区，树渲染自包含，不复用 NoteTree）+ `AiWorkbench`（`activeAiSessionId` 非空时替换 main 插槽；`openNoteInGroup`/`selectTabInGroup` 会将其置空切回笔记视图）。流式期间助手消息实时用 `MarkdownView`（marked + dompurify，均为纯本地库）渲染；中止保留已流出的部分文本。网络调用在 `VaultApp.handleAiSend` 中进行，`AiWorkbench` 只拿一个 `sendMessage(messages, onDelta, signal)` 回调（ui 包不依赖 packages/ai）。
+
+### 16. 跨库传输：双 storage 适配器 + 全量重生成 ID（2026-07-10 新增）
+
+`createStorage({namespace})` 可同时打开第二个库的 IndexedDB（已验证可并存）。`handleTransferToVault` 流程：读目标库 salt/verifier → `deriveKeysFromPassword` 验密 → 收集选中子树（多选中互为后代的去重）→ **所有节点/附件都生成全新 UUID**（防目标库冲突），parentId 在映射表内重映射、子树根落到目标库根层级 → 附件先解密再用目标 notesKey 重加密保存，正文中 `fnattach:<uuid>` 引用做 old→new 字符串替换 → 笔记以 `version: 1 / serverVersion: 0 / syncStatus: 'pending'` 写入（目标库若有云账号，下次同步自然推送）→ 移动模式复用 `handleDeleteMany`（本地库硬删 / 云库墓碑）。
+
+### 17. 查找替换：统一 controller 接口 + 双模式驱动（2026-07-10 新增）
+
+`shared` 定义 `FindReplaceController`（search/next/prev/replace/replaceAll/close，同步返回 `{total, current}`），`NoteEditor` 按当前模式注册到宿主（`onRegisterFindReplace`），共享 `FindReplaceBar` 通过 **getter prop**（`getController`）拿最新 controller（模式切换会换实例，不能捕获）。源码模式：`@codemirror/search` 程序化驱动（`setSearchQuery`/`findNext`/`replaceNext`/`replaceAll`），`Prec.high` 吞掉 `Mod-f` 阻止 CM 自带面板；当前匹配靠选中呈现，basicSetup 的 `highlightSelectionMatches` 高亮其余匹配。渲染模式：`FindReplaceExtension` ProseMirror 插件（meta 驱动、Decoration 高亮、docChanged 自动重算；**匹配不跨文本节点**为已知限制）。快捷键 `findInNote`（默认 Ctrl+F）走全局 window keydown（编辑器内也生效），仅 notes 视图响应。
+
 ## 组件关系速览（`packages/ui`）
 
 - `UnlockScreen` — 多保险库选择 + 密码解锁 / 云账户同步 tab
@@ -127,6 +149,10 @@ FastNote/
 - `NoteTree` — 笔记/文件夹树，含拖拽排序、批量导入入口
 - `EditorToolbar` / editor（来自 `packages/editor`）— 笔记编辑
 - `ChatSidebar` / `ChatPanel` / `ChatAttachmentContent` — 聊天会话列表、消息流、附件渲染
-- `SettingsModal` — 服务器地址、通知、主题、保险库改名等所有设置的聚合入口
-- `AuthModal` / `AboutModal` — 登录注册 / 关于弹窗
+- `SettingsModal` — 服务器地址、通知、主题、保险库改名、快捷键、AI key/模型等所有设置的聚合入口
+- `AuthModal` / `AboutModal` / `LogsModal` — 登录注册 / 关于 / 日志查看弹窗
 - `NoteAttachments` / `EmbeddedAttachmentChip` — 笔记内附件的展示/嵌入
+- `InlineInputBar` — 通用内联文本输入行（prompt 替代品）
+- `FindReplaceBar` — 查找替换条（双模式共享，经 `getController` 驱动编辑器）
+- `AiSessionTree` / `AiWorkbench` / `MarkdownView` — AI 会话树 / 对话主界面 / 安全 markdown 渲染
+- `VaultTransferModal` — 跨库传输弹窗（目标库 + 密码 + 复制/移动）

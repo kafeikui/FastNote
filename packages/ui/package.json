@@ -1,6 +1,6 @@
 {
   "name": "@fastnote/ui",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
@@ -9,14 +9,20 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@fastnote/shared": "workspace:*",
     "@fastnote/api": "workspace:*",
     "@fastnote/i18n": "workspace:*",
+    "@fastnote/shared": "workspace:*",
     "@tiptap/core": "^3.27.1",
+    "dompurify": "^3.4.11",
+    "marked": "^18.0.6",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@tiptap/extension-link": "^3.27.1",
+    "@tiptap/extension-mathematics": "^3.27.1",
+    "@tiptap/pm": "^3.27.1",
+    "@tiptap/starter-kit": "^3.27.1",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
     "typescript": "^5.7.2"

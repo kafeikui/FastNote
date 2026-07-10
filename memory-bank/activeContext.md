@@ -1,6 +1,36 @@
 # Active Context — FastNote
 
-## 当前工作焦点（最新会话，2026-07-09：解锁/上锁性能优化 + typecheck 修复）
+## 当前工作焦点（最新会话，2026-07-10：AI Workbench + 跨库传输 + 查找替换 + prompt 修复）
+
+按用户确认的实施计划一次性完成四大功能（全部通过全仓 `pnpm build`；顺手修掉了 `packages/ui` 长期存在的 Tiptap `ChainedCommands` typecheck 失败——`EditorToolbar.tsx` 加三行 `import type {} from '@tiptap/starter-kit'/'@tiptap/extension-link'/'@tiptap/extension-mathematics'`（并加为 ui 的 devDependencies），把各扩展包里 `declare module '@tiptap/core'` 的命令类型增强拉进编译单元；注意必须写在源文件里而不是独立 .d.ts，因为 `packages/table` typecheck 会跨包编译 ui 源码、不读 ui 的 tsconfig include。`pnpm -r typecheck` 现在仅剩 `apps/desktop` 的 `@web/App` 别名既有问题）：
+
+1. **修复渲染工具栏链接/公式按钮**（根因：Electron 渲染进程 `window.prompt()` 返回 null，静默失效——**项目约定：禁止使用 window.prompt**，confirm/alert 可用）：
+   - 新增通用 `packages/ui/src/InlineInputBar.tsx`（label + input + 确认/取消，Enter/Esc），`EditorToolbar` 的 Link/∑/∑∑ 三个按钮改为切换内联输入行；Link 预填当前链接 href。
+   - `NoteEditor` 的 Mathematics `onClick`（inline/block 两处）不再用 prompt，改为新 prop `onEditFormula(latex, apply)` 把请求抛给宿主；`VaultApp` 用 `formulaEdit` state 在分组头部渲染同一个 `InlineInputBar`。
+2. **AI Workbench（Claude）**：
+   - 新包 `packages/ai`：`AnthropicClient.streamMessage()` 直连 `https://api.anthropic.com/v1/messages`（headers 含 `anthropic-dangerous-direct-browser-access: true`），手写 SSE 解析（`content_block_delta`/`text_delta`）逐字回调；`CLAUDE_MODELS` 内置 Sonnet 4.5 / Opus 4.1 / Haiku 4.5 + 设置里可填自定义模型 ID；`AnthropicApiError` 带 HTTP 状态。
+   - **CSP 三处**（csp.ts + 两个 index.html 引导脚本）`connect-src` 放行 `https://api.anthropic.com`——唯一的第三方例外，仅在用户主动配置 API key 后才会有流量。
+   - **存储**：`META_KEYS.aiSettings`，`{apiKey, model}` JSON 用 **masterKey** `encryptString` 加密存 `vault_meta`，解锁后后台解密载入，锁定即从内存清除。`packages/storage` **DB v6** 新增 `ai_sessions_local` store（`titleEnc/payloadEnc` 均 **notesKey** 加密，payload = `AiMessage[]`）；`StorageAdapter` 新增 `listAiSessions`/`saveAiSession`/`deleteAiSession`。shared 新增 `AiSettings`/`AiMessage`/`AiSessionNode` 类型。
+   - **UI**：`SettingsModal` 新增 AI fieldset（password 型 key 输入 + 模型下拉含"自定义"）；侧栏 NoteTree 下方新增可折叠"AI 助手"分区（`loadAiPanelOpen`/`saveAiPanelOpen` 持久化），`AiSessionTree`（文件夹嵌套、新建会话/文件夹、内联重命名、confirm 删除（文件夹级联）、HTML5 拖拽移动、防止文件夹拖进自身后代）；`AiWorkbench` 主界面（选中会话时替换 main 插槽；打开笔记/标签页自动切回）：消息流（用户纯文本气泡 / 助手 `MarkdownView` 渲染）、流式上屏、中止按钮（中止保留已流出的部分文本）、Enter 发送 Shift+Enter 换行、会话自动保存（每次消息变更全量加密重写）。
+   - `MarkdownView` = `marked`（gfm+breaks, 同步 parse）+ `dompurify` 消毒后 `dangerouslySetInnerHTML`，两个都是纯本地库（ui 新增直接依赖）。
+3. **跨库传输/移动**：NoteTree 每行新增 ⇄ 按钮（`onTransfer`，若该行在多选集合中则整组传输）→ `VaultTransferModal`（目标库下拉 = `vaultRegistry` 排除当前、目标库密码、复制/移动单选、进度/错误显示）→ `VaultApp.handleTransferToVault`：`createStorage({namespace})` 开第二适配器 → 读目标 salt/verifier 验密（`deriveKeysFromPassword`）→ 选中子树去重（选中项若已在另一选中项子树内则跳过）→ 全部生成新 UUID、重映射 parentId（子树外的 parent 置 null 落到目标库根）→ 附件解密后用目标 notesKey `saveAttachment`，正文里 `fnattach:` 引用按 old-id→new-id 字符串替换 → `saveNote`（version 1 / syncStatus pending）→ 移动模式最后走现有 `handleDeleteMany`。完成后 `alert` 汇总。
+4. **查找替换（Ctrl+F，双模式）**：
+   - shared 新增 `FindReplaceController`/`FindReplaceStatus` 接口 + `ShortcutAction` 新增 `findInNote`（默认 Ctrl+F，设置里可改；`loadShortcuts` 与默认值合并所以老用户自动获得）。
+   - `packages/ui/src/FindReplaceBar.tsx`：查找/替换双行、匹配计数 `current/total`、Enter=下一个 Shift+Enter=上一个、替换/全部替换、Esc 关闭。**prop 是 `getController` getter**（模式切换后 controller 会换，不能捕获实例）。
+   - 源码模式：editor 包新增直接依赖 `@codemirror/search`，CM 扩展加 `cmSearch()` + `Prec.high` 吞掉 `Mod-f`（阻止 CM 自带面板，让全局快捷键接管）；controller 用 `setSearchQuery`/`findNext`/`findPrevious`/`replaceNext`/`replaceAll` 程序化驱动，计数用 `SearchQuery.getCursor` 遍历（current = from < sel.to 的匹配数）；选中即当前匹配，basicSetup 的 `highlightSelectionMatches` 顺带高亮其余匹配。
+   - 渲染模式：`packages/editor/src/FindReplaceExtension.ts` ProseMirror 插件（`findReplacePluginKey` meta 驱动；大小写不敏感、**匹配不跨文本节点**为首版限制；Decoration.inline 高亮 `fn-find-match`(--active)；docChanged 自动重算）；controller 在 NoteEditor 的 effect 里注册：replace 用 `tr.insertText`（doc 变更后插件保持 activeIndex 自然落到下一个），replaceAll 倒序单事务。
+   - `VaultApp`：全局 keydown 处理 `findInNote`（仅 notes 视图，preventDefault 压掉浏览器原生查找；**编辑器内也生效**——window 冒泡监听不受输入焦点 guard 限制），`findBarGroupId` state 控制条渲染在活动分组头部（仅笔记分支），`findReplaceByGroupRef` 存各分组 controller；上锁清空。
+- i18n 新增：`settingsModal.ai.*`、`aiPanel.*`、`aiWorkbench.*`、`vaultTransfer.*`、`findReplace.*`、`noteTree.transfer`、`settingsModal.shortcuts.findInNote`（中英全量）。styles.css 新增 `.fn-inline-input*`、`.fn-findbar*`、`.fn-find-match*`、`.fn-ai-panel*`、`.fn-ai-tree*`、`.fn-ai-workbench*`、`.fn-ai-msg*`、`.fn-md-view*`。
+
+**追加（同日第二轮，用户反馈 6 项）**：
+1. **渲染模式查找失效的根因修复**：NoteEditor 的 wysiwyg 查找注册 effect 把宿主传的内联箭头函数 `onRegisterFindReplace` 放进了依赖数组——VaultApp 任意重渲染（例如 `scrollToActive` 设置选区 → `onSelectionChars` → setState）都会让 effect 重跑，cleanup 里的 `dispatchFind('', 0)` 把查询和高亮瞬间清空。改为 `onRegisterFindReplaceRef`（与 `onSelectionCharsRef` 同模式），deps 收窄为 `[editor, mode, noteId]`；源码模式注册同步改用 ref。**教训：编辑器里所有宿主回调 prop 一律先包 ref 再进 effect。**
+2. **AI 面板置顶且固定**：侧栏 notes 视图改为 `.fn-notes-sidebar` flex 列布局——AI 面板（`flex: 0 0 auto`，max-height 45%，展开时 `.fn-ai-tree` 内部滚动）固定在顶部，`.fn-notes-sidebar__tree`（flex:1 + overflow-y:auto）单独滚动文件树；`.fn-sidebar__content` 加 `height: 100%` 提供确定高度。NoteTree 拖拽自动滚动的 `closest('.fn-sidebar')` 改为 `closest('.fn-notes-sidebar__tree, .fn-sidebar')`。TreeToolbar 的 sticky 在新滚动容器下继续生效。
+3. **AI 会话渲染/源码切换**：AiWorkbench header 加"渲染/源码"toggle（`showSource` state），源码视图用等宽 `<pre>`（`.fn-ai-msg__body--source`），流式渲染同样遵循。
+4. **AI/笔记快速切换按钮**：顶部工具栏（notes 视图）新增 🤖/📝 按钮，`handleAiQuickSwitch`：在 AI 视图 → 回笔记；在笔记视图 → 回上次会话（`lastAiSessionIdRef`）或第一个会话，无会话则新建。
+5. **Ctrl/Cmd+点击链接**：NoteEditor `editorProps.handleClick` 检测 ctrl/meta + `a[href]`（仅 http/https）→ `window.open(_blank, noopener)`；Electron 主进程既有的 `setWindowOpenHandler` 会 deny + `shell.openExternal` 转交系统默认浏览器，Web 版开新标签页。
+6. **侧栏绿点**：是 `syncStatus === 'pending'` 的"待同步"标记，本地库永远 pending 纯属噪音。NoteTree 新增 `showSyncStatus` prop（VaultApp 传 `!!session`），绿点只在云账号登录时显示；冲突 ⚠ 始终显示。
+
+## 上一轮工作焦点（2026-07-09：解锁/上锁性能优化 + typecheck 修复）
 
 用户报告 1000+ 篇笔记的密码库解锁、上锁明显卡顿。诊断出四个瓶颈并按用户选定的"1–4 + 6 方案"全部实施：
 

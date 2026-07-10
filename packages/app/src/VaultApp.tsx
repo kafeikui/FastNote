@@ -36,6 +36,8 @@ import {
   saveShowLineNumbers,
   loadEnableMath,
   saveEnableMath,
+  loadAiPanelOpen,
+  saveAiPanelOpen,
   loadTabState,
   saveTabState,
   defaultTabState,
@@ -72,9 +74,10 @@ import {
   unwrapKey,
 } from '@fastnote/crypto';
 import { NoteEditor, flushEditorMarkdown } from '@fastnote/editor';
+import { AnthropicClient, CLAUDE_MODELS, DEFAULT_CLAUDE_MODEL } from '@fastnote/ai';
 import { IMClient, verifyExchangeKeypair } from '@fastnote/im';
 import { NoteSearchIndex } from '@fastnote/search';
-import type { ChatMessage, EditorMode, NodeType, NoteAttachment, NoteNode, UserSession, TreeDropPosition, ChatAttachmentRef, ChatWireAttachment, TabGroupState, ShortcutBindings } from '@fastnote/shared';
+import type { ChatMessage, EditorMode, NodeType, NoteAttachment, NoteNode, UserSession, TreeDropPosition, ChatAttachmentRef, ChatWireAttachment, TabGroupState, ShortcutBindings, AiSettings, AiSessionNode, AiMessage, FindReplaceController } from '@fastnote/shared';
 import { META_KEYS, downloadBlob, isEditableContentNode, computeTreeMove, applySortMode, buildAttachmentMarkdownRef, buildTree, decodeChatWire, toStoredPayload, storedToChatMessage, serverUrlNeedsReload, matchesShortcut, expandAttachmentRefsForExport, installConsoleCapture, getCapturedLogs, clearCapturedLogs, formatCapturedLogs } from '@fastnote/shared';
 import type { TreeItem } from '@fastnote/shared';
 import type { TreeSortMode } from '@fastnote/shared';
@@ -111,6 +114,11 @@ import {
   playChatNotificationSound,
   AboutModal,
   LogsModal,
+  InlineInputBar,
+  AiSessionTree,
+  AiWorkbench,
+  VaultTransferModal,
+  FindReplaceBar,
   NoteAttachments,
   DropdownMenu,
   type VaultListItem,
@@ -191,6 +199,24 @@ export function VaultApp() {
   const [editorModeByGroup, setEditorModeByGroup] = useState<Record<string, EditorMode>>({});
   const [tiptapEditorByGroup, setTiptapEditorByGroup] = useState<Record<string, Editor | null>>({});
   const [selCharsByGroup, setSelCharsByGroup] = useState<Record<string, number>>({});
+  // Inline formula editing (clicking an existing formula); window.prompt is unusable in Electron.
+  const [formulaEdit, setFormulaEdit] = useState<{
+    groupId: string;
+    latex: string;
+    apply: (next: string) => void;
+  } | null>(null);
+  // AI Workbench: per-vault settings (API key encrypted in vault_meta) + encrypted session tree.
+  const [aiSettings, setAiSettings] = useState<AiSettings | null>(null);
+  const [aiSessions, setAiSessions] = useState<AiSessionNode[]>([]);
+  const [activeAiSessionId, setActiveAiSessionId] = useState<string | null>(null);
+  // Find/replace bar: id of the tab group it is open in (null = closed).
+  const [findBarGroupId, setFindBarGroupId] = useState<string | null>(null);
+  const findReplaceByGroupRef = useRef<Record<string, FindReplaceController | null>>({});
+  // Cross-vault transfer: ids of the tree nodes being transferred (null = dialog closed).
+  const [transferIds, setTransferIds] = useState<string[] | null>(null);
+  const [transferBusy, setTransferBusy] = useState(false);
+  const [transferError, setTransferError] = useState<string | null>(null);
+  const [transferProgress, setTransferProgress] = useState<string | null>(null);
   const activeGroup = groups.find((g) => g.id === activeGroupId) ?? groups[0];
   const activeId = activeGroup?.activeTabId ?? null;
   useEffect(() => {
@@ -281,6 +307,19 @@ export function VaultApp() {
     setEnableMath(enable);
     saveEnableMath(enable);
   }, []);
+  const handleAiSettingsSave = useCallback(
+    async (settings: AiSettings) => {
+      const k = keysRef.current;
+      if (!k) return;
+      setAiSettings(settings);
+      await storage.setMeta(
+        META_KEYS.aiSettings,
+        packEncrypted(encryptString(k.masterKey, JSON.stringify(settings))),
+      );
+    },
+    [storage],
+  );
+  const [aiPanelOpen, setAiPanelOpen] = useState<boolean>(() => loadAiPanelOpen());
   // Sidebar multi-selection (Ctrl/Shift+click). The anchor is the row a Shift-range extends from.
   const [treeSelectedIds, setTreeSelectedIds] = useState<Set<string>>(() => new Set());
   const treeAnchorIdRef = useRef<string | null>(null);
@@ -1016,6 +1055,17 @@ export function VaultApp() {
       const sessionAtUnlock = session;
       void (async () => {
         try {
+          // AI Workbench state: cheap reads, but not needed to render notes.
+          const rawAi = await storage.getMeta(META_KEYS.aiSettings);
+          if (rawAi && keysRef.current === derived) {
+            try {
+              setAiSettings(JSON.parse(decryptString(derived.masterKey, unpackEncrypted(rawAi))) as AiSettings);
+            } catch (err) {
+              console.error('failed to decrypt AI settings', err);
+            }
+          }
+          const aiList = await storage.listAiSessions(derived.notesKey);
+          if (keysRef.current === derived) setAiSessions(aiList);
           if (sessionAtUnlock) {
             const saltB64 = await storage.getMeta(META_KEYS.salt);
             if (saltB64) {
@@ -1102,6 +1152,11 @@ export function VaultApp() {
       setExpandedSearch(false);
       setTreeSelectedIds(new Set());
       treeAnchorIdRef.current = null;
+      setAiSettings(null);
+      setAiSessions([]);
+      setActiveAiSessionId(null);
+      setFindBarGroupId(null);
+      setFormulaEdit(null);
     } finally {
       setIsLocking(false);
     }
@@ -1111,6 +1166,8 @@ export function VaultApp() {
   handleLockRef.current = handleLock;
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
+  const activeGroupIdRef = useRef(activeGroupId);
+  activeGroupIdRef.current = activeGroupId;
   const shortcutsRef = useRef(shortcuts);
   shortcutsRef.current = shortcuts;
   const modalOpenRef = useRef(false);
@@ -1143,6 +1200,15 @@ export function VaultApp() {
         if (!id) return;
         e.preventDefault();
         setRenameRequestId(id);
+        return;
+      }
+      // Find in note: works while typing in the editor too (that's where the user usually is).
+      // preventDefault stops the browser's native find; CodeMirror's own Mod-f panel is swallowed
+      // inside the editor extension.
+      if (matchesShortcut(e, bindings.findInNote)) {
+        if (appViewRef.current !== 'notes') return;
+        e.preventDefault();
+        setFindBarGroupId(activeGroupIdRef.current);
         return;
       }
       // Delete the sidebar selection — but never while the user is typing in an input or editor,
@@ -1613,6 +1679,8 @@ export function VaultApp() {
   };
 
   const openNoteInGroup = (groupId: string, id: string, opts?: { pin?: boolean }) => {
+    // Opening a note leaves the AI workbench and returns to the tab groups.
+    setActiveAiSessionId(null);
     const existingGroup = groups.find((g) => g.tabs.some((tb) => tb.id === id));
     if (existingGroup) {
       setGroups((prev) =>
@@ -1646,12 +1714,130 @@ export function VaultApp() {
   const openNote = (id: string, opts?: { pin?: boolean }) => openNoteInGroup(activeGroupId, id, opts);
 
   const selectTabInGroup = (groupId: string, tabId: string) => {
+    setActiveAiSessionId(null);
     setGroups((prev) => prev.map((g) => (g.id === groupId ? { ...g, activeTabId: tabId } : g)));
     setActiveGroupId(groupId);
     // Keep the sidebar in sync with the tab the user just picked: expand ancestors, scroll to and
     // highlight the file.
     revealNoteInTree(tabId);
   };
+
+  // --- AI Workbench session tree -------------------------------------------------------------
+
+  const persistAiSession = (node: AiSessionNode) => {
+    const k = keysRef.current;
+    if (!k) return;
+    void storage.saveAiSession(node, k.notesKey);
+  };
+
+  const handleAiPanelToggle = () => {
+    setAiPanelOpen((open) => {
+      saveAiPanelOpen(!open);
+      return !open;
+    });
+  };
+
+  // Quick toggle between the AI workbench and the note tabs (toolbar button). Remembers the
+  // last visited session so toggling back returns to where the user left off.
+  const lastAiSessionIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (activeAiSessionId) lastAiSessionIdRef.current = activeAiSessionId;
+  }, [activeAiSessionId]);
+
+  const handleAiQuickSwitch = () => {
+    if (activeAiSessionId) {
+      setActiveAiSessionId(null);
+      return;
+    }
+    const sessionsOnly = aiSessions.filter((s) => s.kind === 'session');
+    const target = sessionsOnly.find((s) => s.id === lastAiSessionIdRef.current) ?? sessionsOnly[0];
+    if (target) setActiveAiSessionId(target.id);
+    else handleAiCreate('session', null);
+  };
+
+  const handleAiCreate = (kind: 'folder' | 'session', parentId: string | null) => {
+    const node: AiSessionNode = {
+      id: crypto.randomUUID(),
+      parentId,
+      kind,
+      title: kind === 'folder' ? t('aiPanel.defaultFolderTitle') : t('aiPanel.defaultSessionTitle'),
+      messages: [],
+      sortOrder: Date.now(),
+      updatedAt: new Date().toISOString(),
+    };
+    setAiSessions((prev) => [...prev, node]);
+    persistAiSession(node);
+    if (kind === 'session') setActiveAiSessionId(node.id);
+  };
+
+  const handleAiRename = (id: string, title: string) => {
+    setAiSessions((prev) =>
+      prev.map((s) => {
+        if (s.id !== id) return s;
+        const next = { ...s, title, updatedAt: new Date().toISOString() };
+        persistAiSession(next);
+        return next;
+      }),
+    );
+  };
+
+  const handleAiMove = (id: string, newParentId: string | null) => {
+    setAiSessions((prev) =>
+      prev.map((s) => {
+        if (s.id !== id) return s;
+        const next = { ...s, parentId: newParentId, updatedAt: new Date().toISOString() };
+        persistAiSession(next);
+        return next;
+      }),
+    );
+  };
+
+  const handleAiDelete = (id: string) => {
+    // Deleting a folder removes its whole subtree.
+    const doomed = new Set<string>([id]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const s of aiSessions) {
+        if (s.parentId && doomed.has(s.parentId) && !doomed.has(s.id)) {
+          doomed.add(s.id);
+          grew = true;
+        }
+      }
+    }
+    setAiSessions((prev) => prev.filter((s) => !doomed.has(s.id)));
+    for (const doomedId of doomed) void storage.deleteAiSession(doomedId);
+    setActiveAiSessionId((cur) => (cur && doomed.has(cur) ? null : cur));
+  };
+
+  const handleAiMessagesChange = (sessionId: string, messages: AiMessage[]) => {
+    setAiSessions((prev) =>
+      prev.map((s) => {
+        if (s.id !== sessionId) return s;
+        const next = { ...s, messages, updatedAt: new Date().toISOString() };
+        persistAiSession(next);
+        return next;
+      }),
+    );
+  };
+
+  const handleAiSend = async (
+    messages: AiMessage[],
+    onDelta: (text: string) => void,
+    signal: AbortSignal,
+  ): Promise<string> => {
+    if (!aiSettings?.apiKey) throw new Error(t('aiWorkbench.notConfigured'));
+    const client = new AnthropicClient(aiSettings.apiKey);
+    return client.streamMessage({
+      model: aiSettings.model || DEFAULT_CLAUDE_MODEL,
+      messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      signal,
+      onDelta,
+    });
+  };
+
+  const activeAiSession =
+    aiSessions.find((s) => s.id === activeAiSessionId && s.kind === 'session') ?? null;
 
   const pinTabInGroup = (groupId: string, tabId: string) => {
     setGroups((prev) =>
@@ -1769,6 +1955,120 @@ export function VaultApp() {
 
   const handleDelete = async (id: string) => handleDeleteMany([id]);
   handleDeleteManyRef.current = handleDeleteMany;
+
+  // --- Cross-vault transfer ------------------------------------------------------------------
+
+  /** Opens the transfer dialog for a node (plus the multi-selection when it contains the node). */
+  const handleTransferRequest = (id: string) => {
+    const ids = treeSelectedIds.has(id) ? [...treeSelectedIds] : [id];
+    setTransferError(null);
+    setTransferProgress(null);
+    setTransferIds(ids);
+  };
+
+  /**
+   * Copies/moves the selected subtrees into another registered vault: verifies the target vault's
+   * password, re-encrypts everything with the target's keys, regenerates every UUID (avoiding
+   * collisions), remaps parent ids, and rewrites `fnattach:` references to the newly saved
+   * attachment ids. Move = copy + regular delete of the source nodes afterwards.
+   */
+  const handleTransferToVault = async (
+    targetNamespace: string,
+    password: string,
+    mode: 'copy' | 'move',
+  ) => {
+    const k = keysRef.current;
+    if (!k || !transferIds) return;
+    setTransferBusy(true);
+    setTransferError(null);
+    try {
+      const target = createStorage({ namespace: targetNamespace });
+      const saltB64 = await target.getMeta(META_KEYS.salt);
+      const verifier = await target.getMeta(META_KEYS.passwordVerifier);
+      if (!saltB64 || !verifier) throw new Error(t('vaultTransfer.targetNotInitialized'));
+      const derived = await deriveKeysFromPassword(password, fromBase64(saltB64));
+      if (toBase64(derived.passwordVerifier) !== verifier) {
+        throw new Error(t('vaultApp.wrongPassword'));
+      }
+
+      const byId = new Map(notes.map((n) => [n.id, n]));
+      const requested = transferIds.filter((id) => byId.has(id));
+      // Drop ids already contained in another selected subtree so nothing is copied twice.
+      const requestedSet = new Set(requested);
+      const isInsideSelection = (node: NoteNode): boolean => {
+        let p = node.parentId;
+        while (p) {
+          if (requestedSet.has(p)) return true;
+          p = byId.get(p)?.parentId ?? null;
+        }
+        return false;
+      };
+      const roots = requested.filter((id) => !isInsideSelection(byId.get(id)!));
+
+      const collected: NoteNode[] = [];
+      const queue = [...roots];
+      while (queue.length > 0) {
+        const id = queue.pop()!;
+        const node = byId.get(id);
+        if (!node || node.deleted) continue;
+        collected.push(node);
+        for (const n of notes) {
+          if (n.parentId === id) queue.push(n.id);
+        }
+      }
+      if (collected.length === 0) throw new Error(t('vaultTransfer.nothingToTransfer'));
+
+      const idMap = new Map(collected.map((n) => [n.id, crypto.randomUUID()]));
+      const now = new Date().toISOString();
+      let done = 0;
+      for (const node of collected) {
+        setTransferProgress(t('vaultTransfer.progress', { done, total: collected.length }));
+        let contentMd = node.contentMd;
+        if (isEditableContentNode(node)) {
+          const atts = await storage.listAttachments(node.id, k.notesKey);
+          for (const att of atts) {
+            const loaded = await storage.loadAttachmentDecrypted(att.id, k.notesKey);
+            if (!loaded) continue;
+            const saved = await target.saveAttachment(
+              idMap.get(node.id)!,
+              loaded.meta.fileName,
+              loaded.meta.description,
+              loaded.meta.mimeType,
+              loaded.data,
+              derived.notesKey,
+            );
+            // fnattach: references embed the attachment UUID; point them at the new copy.
+            contentMd = contentMd.split(att.id).join(saved.id);
+          }
+        }
+        const copied: NoteNode = {
+          ...node,
+          id: idMap.get(node.id)!,
+          parentId: node.parentId && idMap.has(node.parentId) ? idMap.get(node.parentId)! : null,
+          contentMd,
+          contentHash: hashContent(contentMd),
+          version: 1,
+          serverVersion: 0,
+          syncStatus: 'pending',
+          deleted: false,
+          updatedAt: now,
+        };
+        await target.saveNote(copied, derived.notesKey);
+        done++;
+      }
+      setTransferProgress(null);
+      if (mode === 'move') {
+        await handleDeleteMany(roots);
+      }
+      setTransferIds(null);
+      alert(t('vaultTransfer.done', { count: collected.length }));
+    } catch (err) {
+      setTransferProgress(null);
+      setTransferError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTransferBusy(false);
+    }
+  };
 
   const syncAttachmentsIfOnline = useCallback(async () => {
     if (!keys || !session) return;
@@ -2452,6 +2752,24 @@ export function VaultApp() {
                   )}
                 </div>
                 <EditorToolbar editor={groupEditor} mode={mode} enableMath={enableMath} />
+                {findBarGroupId === group.id && (
+                  <FindReplaceBar
+                    key={`${content.id}-${mode}`}
+                    getController={() => findReplaceByGroupRef.current[group.id] ?? null}
+                    onClose={() => setFindBarGroupId(null)}
+                  />
+                )}
+                {formulaEdit && formulaEdit.groupId === group.id && (
+                  <InlineInputBar
+                    label={t('noteEditor.editFormulaPrompt')}
+                    initial={formulaEdit.latex}
+                    onConfirm={(value) => {
+                      if (value.trim()) formulaEdit.apply(value.trim());
+                      setFormulaEdit(null);
+                    }}
+                    onCancel={() => setFormulaEdit(null)}
+                  />
+                )}
               </div>
             </div>
             <div className="fn-tab-group__scroll">
@@ -2477,6 +2795,10 @@ export function VaultApp() {
                   onSelectionChars={(count) =>
                     setSelCharsByGroup((prev) => (prev[group.id] === count ? prev : { ...prev, [group.id]: count }))
                   }
+                  onEditFormula={(latex, apply) => setFormulaEdit({ groupId: group.id, latex, apply })}
+                  onRegisterFindReplace={(ctrl) => {
+                    findReplaceByGroupRef.current[group.id] = ctrl;
+                  }}
                   attachments={isFocused ? attachments : []}
                   onAttachmentDownload={handleAttachmentDownload}
                   onAttachmentEdit={handleAttachmentEdit}
@@ -2602,6 +2924,14 @@ export function VaultApp() {
                   <button type="button" title={t('vaultApp.importFolderForceTitle')} onClick={() => openImportFolder(focusedTreeParentId(), true)}>{t('vaultApp.importFolderForce')}</button>
                 </DropdownMenu>
                 <input className="fn-search" placeholder={t('vaultApp.searchPlaceholder')} value={searchQuery} onChange={(e) => { setSearchQuery(e.target.value); setExpandedSearch(!!e.target.value); }} />
+                <button
+                  type="button"
+                  className={activeAiSessionId ? 'active' : ''}
+                  onClick={handleAiQuickSwitch}
+                  title={activeAiSessionId ? t('vaultApp.aiSwitchToNotes') : t('vaultApp.aiSwitchToAi')}
+                >
+                  {activeAiSessionId ? '📝' : '🤖'}
+                </button>
               </>
             )}
             <button type="button" onClick={() => setShowLogs(true)} title={t('logsModal.title')}>📋</button>
@@ -2649,33 +2979,56 @@ export function VaultApp() {
               )}
             </ul>
           ) : (
-            <>
-              <TreeToolbar
-                sortMode={treeSortMode}
-                onSortMode={handleTreeSortMode}
-                onExpandAll={handleExpandAll}
-                onCollapseAll={handleCollapseAll}
-              />
-              <NoteTree
-                notes={notes}
-                activeId={activeId}
-                selectedIds={treeSelectedIds}
-                collapsedIds={collapsedFolderIds}
-                onToggleCollapse={handleToggleFolderCollapse}
-                revealId={revealId}
-                onSelect={handleTreeSelect}
-                onOpenPinned={(id) => openNote(id, { pin: true })}
-                onCreateFolder={(pid) => void handleCreate('folder', pid)}
-                onCreateNote={(pid) => void handleCreate('note', pid)}
-                onCreateTable={(pid) => void handleCreate('table', pid)}
-                onImportFolder={(pid) => openImportFolder(pid)}
-                onRename={(id, title) => updateNoteById(id, { title })}
-                onDelete={(id) => void handleDelete(id)}
-                onMove={(dragId, targetId, position) => void handleMove(dragId, targetId, position)}
-                renameRequestId={renameRequestId}
-                onRenameRequestHandled={() => setRenameRequestId(null)}
-              />
-            </>
+            // Flex column: the AI panel is a fixed (non-scrolling) block at the top with its own
+            // internal scrolling when expanded; the note tree scrolls independently below it.
+            <div className="fn-notes-sidebar">
+              <div className="fn-ai-panel">
+                <button type="button" className="fn-ai-panel__header" onClick={handleAiPanelToggle}>
+                  <span className="fn-ai-panel__chevron">{aiPanelOpen ? '▾' : '▸'}</span>
+                  {t('aiPanel.title')}
+                </button>
+                {aiPanelOpen && (
+                  <AiSessionTree
+                    sessions={aiSessions}
+                    activeId={activeAiSessionId}
+                    onSelect={(id) => setActiveAiSessionId(id)}
+                    onCreate={handleAiCreate}
+                    onRename={handleAiRename}
+                    onDelete={handleAiDelete}
+                    onMove={handleAiMove}
+                  />
+                )}
+              </div>
+              <div className="fn-notes-sidebar__tree">
+                <TreeToolbar
+                  sortMode={treeSortMode}
+                  onSortMode={handleTreeSortMode}
+                  onExpandAll={handleExpandAll}
+                  onCollapseAll={handleCollapseAll}
+                />
+                <NoteTree
+                  notes={notes}
+                  activeId={activeId}
+                  selectedIds={treeSelectedIds}
+                  collapsedIds={collapsedFolderIds}
+                  onToggleCollapse={handleToggleFolderCollapse}
+                  revealId={revealId}
+                  onSelect={handleTreeSelect}
+                  onOpenPinned={(id) => openNote(id, { pin: true })}
+                  onCreateFolder={(pid) => void handleCreate('folder', pid)}
+                  onCreateNote={(pid) => void handleCreate('note', pid)}
+                  onCreateTable={(pid) => void handleCreate('table', pid)}
+                  onImportFolder={(pid) => openImportFolder(pid)}
+                  onRename={(id, title) => updateNoteById(id, { title })}
+                  onDelete={(id) => void handleDelete(id)}
+                  onMove={(dragId, targetId, position) => void handleMove(dragId, targetId, position)}
+                  onTransfer={handleTransferRequest}
+                  renameRequestId={renameRequestId}
+                  onRenameRequestHandled={() => setRenameRequestId(null)}
+                  showSyncStatus={!!session}
+                />
+              </div>
+            </div>
           )
         }
         main={
@@ -2690,6 +3043,14 @@ export function VaultApp() {
               onEditAttachment={handleChatAttachmentEdit}
               onRemoveAttachment={handleChatAttachmentRemove}
               onLoadAttachmentPreview={handleChatAttachmentPreview}
+            />
+          ) : activeAiSession ? (
+            <AiWorkbench
+              session={activeAiSession}
+              configured={!!aiSettings?.apiKey}
+              sendMessage={handleAiSend}
+              onMessagesChange={handleAiMessagesChange}
+              onOpenSettings={() => setShowSettings(true)}
             />
           ) : (
             <>
@@ -2730,6 +3091,9 @@ export function VaultApp() {
           onShortcutsChange={handleShortcutsChange}
           enableMath={enableMath}
           onEnableMathChange={handleEnableMathChange}
+          aiSettings={aiSettings}
+          aiModels={CLAUDE_MODELS}
+          onAiSettingsSave={(settings) => void handleAiSettingsSave(settings)}
           onLocaleChange={handleLocaleChange}
           onClose={() => setShowSettings(false)}
           onSaveServer={commitServerUrl}
@@ -2755,6 +3119,19 @@ export function VaultApp() {
         />
       )}
       {showAuth && <AuthModal onClose={() => setShowAuth(false)} onRegister={handleRegister} onLogin={handleLogin} />}
+      {transferIds && (
+        <VaultTransferModal
+          vaults={vaultRegistry
+            .filter((v) => v.id !== activeVaultId)
+            .map((v) => ({ id: v.id, namespace: v.namespace, label: v.label }))}
+          itemCount={transferIds.length}
+          busy={transferBusy}
+          error={transferError}
+          progress={transferProgress}
+          onSubmit={(ns, password, mode) => void handleTransferToVault(ns, password, mode)}
+          onClose={() => setTransferIds(null)}
+        />
+      )}
       {showAbout && <AboutModal onClose={() => setShowAbout(false)} version={__APP_VERSION__} />}
       {showLogs && (
         <LogsModal

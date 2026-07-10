@@ -1,5 +1,5 @@
 {
-  "name": "@fastnote/sync",
+  "name": "@fastnote/ai",
   "version": "0.6.0",
   "private": true,
   "type": "module",
@@ -7,12 +7,6 @@
   "types": "./src/index.ts",
   "scripts": {
     "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@fastnote/shared": "workspace:*",
-    "@fastnote/crypto": "workspace:*",
-    "@fastnote/api": "workspace:*",
-    "@fastnote/storage": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.7.2"

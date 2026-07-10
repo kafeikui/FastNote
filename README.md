@@ -30,8 +30,15 @@ Encrypted notes + 1:1 end-to-end encrypted instant messaging. Built for personal
 - Optional LaTeX math rendering (KaTeX, off by default), line numbers, JSON formatting, line-level shortcuts (Ctrl+D delete line, Alt+↑/↓ move line)
 - Customizable keyboard shortcuts (rename, lock, table repeat/undo/redo, delete) in Settings
 - Fast unlock on large vaults (1000+ notes): hardware-accelerated WebCrypto AES-GCM, batched IndexedDB reads, background search-index loading
+- Find & replace in notes (Ctrl+F, customizable): works in both rendered and source mode, with match highlighting and replace-all
 - Resizable note content width; collapsible sidebar for a wider content area
 - Multiple local vaults, switchable from the unlock screen
+- Cross-vault transfer: copy or move notes/folders (attachments included) into another local vault after verifying its password
+
+**AI Workbench (optional, off unless you configure it)**
+- Chat with Claude models directly inside the app: bring your own Anthropic API key (encrypted with your master key, stored only in this vault)
+- Collapsible session tree in the sidebar with folders, rename, and drag-to-organize; conversations are encrypted at rest like notes
+- Streaming responses with markdown rendering and a stop button; `api.anthropic.com` is the single CSP exception, and no request is ever made until you save a key and send a message
 
 **Chat (1:1 end-to-end encrypted)**
 - Chat history is kept locally forever (until manually deleted), independent of cloud login state
