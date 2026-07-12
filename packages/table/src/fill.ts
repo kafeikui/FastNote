@@ -118,23 +118,85 @@ export function applyVerticalFill(
 }
 
 /**
- * Parses clipboard text into a 2D grid. Tab is the primary delimiter (Excel/Sheets); falls back
- * to runs of whitespace, so plain space-separated text pastes into columns too. Commas are
- * deliberately NOT treated as delimiters: real-world values ("1,234.56", "Hello, world") contain
- * them far too often, so comma-splitting mangled pastes more than it helped.
- * Returns null when the text is effectively a single value (caller keeps default paste behavior).
+ * User-selectable cell delimiters for paste parsing and multi-cell copy. Checked in the
+ * DELIMITER_PRIORITY order: tab wins over semicolon/comma (structured exports), whitespace last
+ * (it matches almost anything). Comma is OFF by default — real-world values ("1,234.56",
+ * "Hello, world") contain it far too often, so comma-splitting mangles pastes more than it helps.
  */
-export function parsePasteGrid(text: string): string[][] | null {
+export type TableDelimiter = 'tab' | 'semicolon' | 'comma' | 'space';
+
+export const DELIMITER_PRIORITY: TableDelimiter[] = ['tab', 'semicolon', 'comma', 'space'];
+export const DEFAULT_DELIMITERS: TableDelimiter[] = ['tab', 'space'];
+
+/** The character used when *writing* (multi-cell copy) with this delimiter. */
+export const DELIMITER_CHAR: Record<TableDelimiter, string> = {
+  tab: '\t',
+  semicolon: ';',
+  comma: ',',
+  space: ' ',
+};
+
+const DELIMITERS_STORAGE_KEY = 'fastnote_table_delimiters';
+
+export function loadTableDelimiters(): TableDelimiter[] {
+  try {
+    const raw = localStorage.getItem(DELIMITERS_STORAGE_KEY);
+    if (!raw) return DEFAULT_DELIMITERS;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return DEFAULT_DELIMITERS;
+    return DELIMITER_PRIORITY.filter((d) => parsed.includes(d));
+  } catch {
+    return DEFAULT_DELIMITERS;
+  }
+}
+
+export function saveTableDelimiters(delims: TableDelimiter[]): void {
+  try {
+    localStorage.setItem(DELIMITERS_STORAGE_KEY, JSON.stringify(delims));
+  } catch {
+    /* storage unavailable — setting just won't persist */
+  }
+}
+
+/** The delimiter char multi-cell copy should join with (highest-priority active one; tab when
+ * nothing is active, since copied output needs *some* separator to round-trip). */
+export function copyDelimiterChar(active: TableDelimiter[]): string {
+  const first = DELIMITER_PRIORITY.find((d) => active.includes(d));
+  return DELIMITER_CHAR[first ?? 'tab'];
+}
+
+/**
+ * Parses clipboard text into a 2D grid using the active delimiters. Rows always split on
+ * newlines; cells split on the highest-priority active delimiter that actually appears in the
+ * text (so a tab-separated Excel paste is never mangled by a comma inside a value when both are
+ * active). With no active delimiters, each line stays a single cell (multi-line pastes still
+ * fill a column). Returns null when the text is effectively a single value (caller keeps the
+ * default paste behavior).
+ */
+export function parsePasteGrid(
+  text: string,
+  active: TableDelimiter[] = DEFAULT_DELIMITERS,
+): string[][] | null {
   if (!text) return null;
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
   while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
   if (lines.length === 0) return null;
 
-  let splitLine: (line: string) => string[];
-  if (lines.some((l) => l.includes('\t'))) {
-    splitLine = (l) => l.split('\t');
-  } else {
-    splitLine = (l) => (l.trim() === '' ? [''] : l.trim().split(/\s+/));
+  let splitLine: (line: string) => string[] = (l) => [l];
+  for (const d of DELIMITER_PRIORITY) {
+    if (!active.includes(d)) continue;
+    if (d === 'space') {
+      if (lines.some((l) => /\s/.test(l.trim()))) {
+        splitLine = (l) => (l.trim() === '' ? [''] : l.trim().split(/\s+/));
+        break;
+      }
+    } else {
+      const ch = DELIMITER_CHAR[d];
+      if (lines.some((l) => l.includes(ch))) {
+        splitLine = (l) => l.split(ch);
+        break;
+      }
+    }
   }
 
   const grid = lines.map((l) => splitLine(l).map((v) => v.trim()));

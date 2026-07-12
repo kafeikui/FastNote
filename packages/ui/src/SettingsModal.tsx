@@ -20,6 +20,8 @@ const SHORTCUT_ACTIONS: ShortcutAction[] = [
   'tableUndo',
   'tableRedo',
   'deleteSelected',
+  'focusPrev',
+  'focusNext',
   'findInNote',
 ];
 
@@ -29,6 +31,9 @@ const THEME_SWATCHES: Record<UiThemeId, string> = {
   business: '#2563eb',
   fresh: '#1f9d78',
 };
+
+type SettingsTab = 'general' | 'account' | 'ai' | 'shortcuts' | 'storage';
+const SETTINGS_TABS: SettingsTab[] = ['general', 'account', 'ai', 'shortcuts', 'storage'];
 
 interface SettingsModalProps {
   serverUrl: string;
@@ -101,6 +106,7 @@ export function SettingsModal({
   onAbout,
 }: SettingsModalProps) {
   const t = useT();
+  const [tab, setTab] = useState<SettingsTab>('general');
   const [pathDraft, setPathDraft] = useState(dataDirectory);
   const [vaultLabelDraft, setVaultLabelDraft] = useState(vaultLabel);
   const [recordingAction, setRecordingAction] = useState<ShortcutAction | null>(null);
@@ -122,6 +128,8 @@ export function SettingsModal({
     tableRedo: t('settingsModal.shortcuts.tableRedo'),
     deleteSelected: t('settingsModal.shortcuts.deleteSelected'),
     findInNote: t('settingsModal.shortcuts.findInNote'),
+    focusPrev: t('settingsModal.shortcuts.focusPrev'),
+    focusNext: t('settingsModal.shortcuts.focusNext'),
   };
 
   const handleShortcutKeyDown = (action: ShortcutAction, e: ReactKeyboardEvent<HTMLButtonElement>) => {
@@ -151,45 +159,17 @@ export function SettingsModal({
     setVaultLabelDraft(vaultLabel);
   }, [vaultLabel]);
 
-  return (
-    <div className="fn-modal-backdrop" onClick={onClose}>
-      <div className="fn-modal" onClick={(e) => e.stopPropagation()}>
-        <h2>{t('settingsModal.title')}</h2>
-        <label className="fn-field">
-          <span>{t('settingsModal.serverUrlLabel')}</span>
-          <input id="server-url" defaultValue={serverUrl} placeholder="http://localhost:8787" />
-        </label>
-        <div className="fn-modal__actions">
-          <button
-            type="button"
-            onClick={() => {
-              const input = document.getElementById('server-url') as HTMLInputElement;
-              onSaveServer(input.value.trim());
-            }}
-          >
-            {t('settingsModal.saveServer')}
-          </button>
-        </div>
-        <hr />
-        <label className="fn-field">
-          <span>{t('settingsModal.vaultLabelLabel')}</span>
-          <input
-            value={vaultLabelDraft}
-            onChange={(e) => setVaultLabelDraft(e.target.value)}
-            placeholder={t('settingsModal.vaultLabelPlaceholder')}
-          />
-        </label>
-        <div className="fn-modal__actions">
-          <button
-            type="button"
-            onClick={() => onSaveVaultLabel(vaultLabelDraft.trim())}
-            disabled={!vaultLabelDraft.trim()}
-          >
-            {t('settingsModal.saveVaultLabel')}
-          </button>
-        </div>
-        <hr />
-        <fieldset className="fn-field fn-field--checkboxes">
+  const TAB_LABELS: Record<SettingsTab, string> = {
+    general: t('settingsModal.tabs.general'),
+    account: t('settingsModal.tabs.account'),
+    ai: t('settingsModal.tabs.ai'),
+    shortcuts: t('settingsModal.tabs.shortcuts'),
+    storage: t('settingsModal.tabs.storage'),
+  };
+
+  const generalTab = (
+    <>
+      <fieldset className="fn-field fn-field--checkboxes">
           <legend>{t('settingsModal.notifyLegend')}</legend>
           <label className="fn-checkbox">
             <input
@@ -299,7 +279,11 @@ export function SettingsModal({
           </label>
           <p className="fn-field__hint">{t('settingsModal.enableMathHint')}</p>
         </fieldset>
-        <hr />
+    </>
+  );
+
+  const aiTab = (
+    <>
         <fieldset className="fn-field fn-field--checkboxes">
           <legend>{t('settingsModal.ai.legend')}</legend>
           <label className="fn-field">
@@ -386,7 +370,11 @@ export function SettingsModal({
             </button>
           </div>
         </fieldset>
-        <hr />
+    </>
+  );
+
+  const shortcutsTab = (
+    <>
         <fieldset className="fn-field fn-field--checkboxes">
           <legend>{t('settingsModal.shortcuts.legend')}</legend>
           <div className="fn-shortcuts-list">
@@ -415,6 +403,28 @@ export function SettingsModal({
             </button>
           </div>
         </fieldset>
+    </>
+  );
+
+  const storageTab = (
+    <>
+        <label className="fn-field">
+          <span>{t('settingsModal.vaultLabelLabel')}</span>
+          <input
+            value={vaultLabelDraft}
+            onChange={(e) => setVaultLabelDraft(e.target.value)}
+            placeholder={t('settingsModal.vaultLabelPlaceholder')}
+          />
+        </label>
+        <div className="fn-modal__actions">
+          <button
+            type="button"
+            onClick={() => onSaveVaultLabel(vaultLabelDraft.trim())}
+            disabled={!vaultLabelDraft.trim()}
+          >
+            {t('settingsModal.saveVaultLabel')}
+          </button>
+        </div>
         <hr />
         <label className="fn-field">
           <span>{t('settingsModal.dataDirLabel')}</span>
@@ -469,6 +479,26 @@ export function SettingsModal({
             <p className="fn-unlock__hint">{t('settingsModal.realStoragePathHint')}</p>
           </label>
         )}
+    </>
+  );
+
+  const accountTab = (
+    <>
+        <label className="fn-field">
+          <span>{t('settingsModal.serverUrlLabel')}</span>
+          <input id="server-url" defaultValue={serverUrl} placeholder="http://localhost:8787" />
+        </label>
+        <div className="fn-modal__actions">
+          <button
+            type="button"
+            onClick={() => {
+              const input = document.getElementById('server-url') as HTMLInputElement;
+              onSaveServer(input.value.trim());
+            }}
+          >
+            {t('settingsModal.saveServer')}
+          </button>
+        </div>
         <hr />
         <p className="fn-field">
           {t('settingsModal.accountLabel', { username: sessionUsername ?? t('settingsModal.notLoggedIn') })}
@@ -489,6 +519,36 @@ export function SettingsModal({
               </button>
             </>
           )}
+        </div>
+    </>
+  );
+
+  return (
+    <div className="fn-modal-backdrop" onClick={onClose}>
+      <div className="fn-modal fn-settings-modal" onClick={(e) => e.stopPropagation()}>
+        <h2>{t('settingsModal.title')}</h2>
+        <div className="fn-settings-tabs" role="tablist">
+          {SETTINGS_TABS.map((tb) => (
+            <button
+              key={tb}
+              type="button"
+              role="tab"
+              aria-selected={tab === tb}
+              className={`fn-settings-tabs__tab${tab === tb ? ' active' : ''}`}
+              onClick={() => setTab(tb)}
+            >
+              {TAB_LABELS[tb]}
+            </button>
+          ))}
+        </div>
+        <div className="fn-settings-body">
+          {tab === 'general' && generalTab}
+          {tab === 'account' && accountTab}
+          {tab === 'ai' && aiTab}
+          {tab === 'shortcuts' && shortcutsTab}
+          {tab === 'storage' && storageTab}
+        </div>
+        <div className="fn-modal__actions fn-settings-footer">
           <button type="button" onClick={onClose}>
             {t('settingsModal.close')}
           </button>

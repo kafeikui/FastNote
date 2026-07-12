@@ -46,6 +46,7 @@ app.on('web-contents-created', (_event, contents) => {
         { role: 'cut', enabled: params.editFlags.canCut },
         { role: 'copy', enabled: params.editFlags.canCopy },
         { role: 'paste', enabled: params.editFlags.canPaste },
+        { role: 'pasteAndMatchStyle', enabled: params.editFlags.canPaste },
         { type: 'separator' },
         { role: 'selectAll', enabled: params.editFlags.canSelectAll },
       );

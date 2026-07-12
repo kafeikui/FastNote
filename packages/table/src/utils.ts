@@ -343,6 +343,62 @@ export function promoteFirstRowToHeader(doc: TableDocument): TableDocument {
   return { ...doc, columns, rows };
 }
 
+/** Swaps the positions of two columns (by id) in the column order. */
+export function swapColumns(doc: TableDocument, colIdA: string, colIdB: string): TableDocument {
+  const a = doc.columns.findIndex((c) => c.id === colIdA);
+  const b = doc.columns.findIndex((c) => c.id === colIdB);
+  if (a === -1 || b === -1 || a === b) return doc;
+  const columns = [...doc.columns];
+  [columns[a], columns[b]] = [columns[b], columns[a]];
+  return { ...doc, columns };
+}
+
+/** Swaps the positions of two rows (by id) in the row order. */
+export function swapRows(doc: TableDocument, rowIdA: string, rowIdB: string): TableDocument {
+  const a = doc.rows.findIndex((r) => r.id === rowIdA);
+  const b = doc.rows.findIndex((r) => r.id === rowIdB);
+  if (a === -1 || b === -1 || a === b) return doc;
+  const rows = [...doc.rows];
+  [rows[a], rows[b]] = [rows[b], rows[a]];
+  return { ...doc, rows };
+}
+
+/** Swaps two cells' content and per-cell style (the cells may live in different rows/columns). */
+export function swapCells(
+  doc: TableDocument,
+  a: { rowId: string; colId: string },
+  b: { rowId: string; colId: string },
+): TableDocument {
+  const rowA = doc.rows.find((r) => r.id === a.rowId);
+  const rowB = doc.rows.find((r) => r.id === b.rowId);
+  if (!rowA || !rowB) return doc;
+  const valueA = rowA.cells[a.colId] ?? '';
+  const valueB = rowB.cells[b.colId] ?? '';
+  const styleA = rowA.styles?.[a.colId];
+  const styleB = rowB.styles?.[b.colId];
+  const applyToRow = (row: TableRow): TableRow => {
+    let next = row;
+    const patch = (colId: string, value: string, style: TableCellStyle | undefined) => {
+      const styles = { ...(next.styles ?? {}) };
+      if (style) styles[colId] = style;
+      else delete styles[colId];
+      next = {
+        ...next,
+        cells: { ...next.cells, [colId]: value },
+        ...(Object.keys(styles).length > 0 ? { styles } : {}),
+      };
+      if (Object.keys(styles).length === 0) delete next.styles;
+    };
+    if (row.id === a.rowId) patch(a.colId, valueB, styleB);
+    if (row.id === b.rowId) patch(b.colId, valueA, styleA);
+    return next;
+  };
+  return {
+    ...doc,
+    rows: doc.rows.map((r) => (r.id === a.rowId || r.id === b.rowId ? applyToRow(r) : r)),
+  };
+}
+
 export const MIN_COL_WIDTH = 48;
 export const MAX_COL_WIDTH = 1200;
 export const MIN_ROW_HEIGHT = 26;

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { AiAttachment, AiMessage, AiSessionNode } from '@fastnote/shared';
 import { useT } from '@fastnote/i18n';
-import { MarkdownView } from './MarkdownView';
+import { MarkdownView, renderMarkdownHtml } from './MarkdownView';
 
 interface AiWorkbenchProps {
   session: AiSessionNode;
@@ -24,6 +24,8 @@ interface AiWorkbenchProps {
   onDeleteMessage: (index: number) => void;
   /** Converts a picked file into an attachment record; rejects with a user-facing Error. */
   prepareAttachment: (file: File) => Promise<AiAttachment>;
+  /** Creates a note from the given messages (a Q&A range or the whole session). */
+  onConvertToNote: (messages: AiMessage[]) => void;
   onOpenSettings: () => void;
 }
 
@@ -44,13 +46,31 @@ function formatMsgTime(iso: string): string {
 }
 
 /** Blob-URL download; works in the hardened Electron renderer (no clipboard/permission APIs needed). */
-function downloadText(fileName: string, text: string) {
-  const url = URL.createObjectURL(new Blob([text], { type: 'text/markdown;charset=utf-8' }));
+function downloadText(fileName: string, text: string, mime = 'text/markdown;charset=utf-8') {
+  const url = URL.createObjectURL(new Blob([text], { type: mime }));
   const a = document.createElement('a');
   a.href = url;
   a.download = fileName;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+/**
+ * Wraps rendered HTML in a Word-compatible shell; saved as .doc it opens directly in
+ * Word/WPS/Pages (the classic HTML-with-msword-MIME trick — no native .docx dependency).
+ */
+function buildWordDocument(title: string, bodyHtml: string): string {
+  return `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word">
+<head><meta charset="utf-8"><title>${title.replace(/</g, '&lt;')}</title>
+<style>
+body { font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 12pt; line-height: 1.6; }
+pre, code { font-family: Consolas, Menlo, monospace; font-size: 10.5pt; background: #f4f4f4; }
+pre { padding: 8pt; }
+table { border-collapse: collapse; }
+th, td { border: 1pt solid #999; padding: 3pt 6pt; }
+blockquote { border-left: 3pt solid #ccc; margin-left: 0; padding-left: 8pt; color: #555; }
+</style></head>
+<body>${bodyHtml}</body></html>`;
 }
 
 export function AiWorkbench({
@@ -65,6 +85,7 @@ export function AiWorkbench({
   onStop,
   onDeleteMessage,
   prepareAttachment,
+  onConvertToNote,
   onOpenSettings,
 }: AiWorkbenchProps) {
   const t = useT();
@@ -144,7 +165,11 @@ export function AiWorkbench({
     }
   };
 
-  const exportMessage = (m: AiMessage, index: number) => {
+  /** Which message's export menu (md / Word) is open, if any. */
+  const [exportMenuIdx, setExportMenuIdx] = useState<number | null>(null);
+
+  const exportMessage = (m: AiMessage, index: number, format: 'md' | 'doc') => {
+    setExportMenuIdx(null);
     const stamp = m.ts.replace(/[:T]/g, '-').slice(0, 19);
     const role = m.role === 'user' ? 'request' : 'response';
     let body = m.content;
@@ -152,12 +177,54 @@ export function AiWorkbench({
       const names = m.attachments.map((a) => `- ${a.name}`).join('\n');
       body = `${t('aiWorkbench.attachmentsHeading')}\n${names}\n\n${body}`;
     }
-    downloadText(`${session.title || 'ai'}-${role}-${index + 1}-${stamp}.md`, body);
+    const baseName = `${session.title || 'ai'}-${role}-${index + 1}-${stamp}`;
+    if (format === 'md') {
+      downloadText(`${baseName}.md`, body);
+      return;
+    }
+    // Word export: math stays as TeX source in <code> — KaTeX HTML is unreadable without its
+    // stylesheet/fonts, which a standalone document doesn't carry.
+    const html = buildWordDocument(baseName, renderMarkdownHtml(body, { mathAsTex: true }));
+    downloadText(`${baseName}.doc`, html, 'application/msword');
   };
 
   const handleDelete = (index: number) => {
     if (!confirm(t('aiWorkbench.confirmDeleteMessage'))) return;
     onDeleteMessage(index);
+  };
+
+  // Convert-to-note dialog. A "Q&A pair" is a user message plus every assistant reply that
+  // follows it (up to the next user message); ranges are selected in those units.
+  const [convertOpen, setConvertOpen] = useState(false);
+  const [convertMode, setConvertMode] = useState<'all' | 'range'>('all');
+  const [convertFrom, setConvertFrom] = useState(1);
+  const [convertTo, setConvertTo] = useState(1);
+  const pairStartIndices = session.messages
+    .map((m, i) => (m.role === 'user' ? i : -1))
+    .filter((i) => i !== -1);
+  const pairCount = pairStartIndices.length;
+
+  const openConvert = () => {
+    setConvertMode('all');
+    setConvertFrom(1);
+    setConvertTo(Math.max(1, pairCount));
+    setConvertOpen(true);
+  };
+
+  const handleConvert = () => {
+    let messages: AiMessage[];
+    if (convertMode === 'all' || pairCount === 0) {
+      messages = session.messages;
+    } else {
+      const from = Math.max(1, Math.min(pairCount, Math.min(convertFrom, convertTo)));
+      const to = Math.max(1, Math.min(pairCount, Math.max(convertFrom, convertTo)));
+      const start = pairStartIndices[from - 1];
+      const end = to < pairCount ? pairStartIndices[to] : session.messages.length;
+      messages = session.messages.slice(start, end);
+    }
+    if (messages.length === 0) return;
+    setConvertOpen(false);
+    onConvertToNote(messages);
   };
 
   const renderAssistantBody = (content: string) =>
@@ -181,7 +248,70 @@ export function AiWorkbench({
             {t('aiWorkbench.viewSource')}
           </button>
         </div>
+        <button
+          type="button"
+          className="fn-ai-workbench__tonote"
+          title={t('aiWorkbench.toNote')}
+          disabled={session.messages.length === 0}
+          onClick={openConvert}
+        >
+          📝 {t('aiWorkbench.toNote')}
+        </button>
       </div>
+      {convertOpen && (
+        <div className="fn-modal-backdrop" onClick={() => setConvertOpen(false)}>
+          <div className="fn-modal" onClick={(e) => e.stopPropagation()}>
+            <h2>{t('aiWorkbench.toNoteTitle')}</h2>
+            <p className="fn-field__hint">{t('aiWorkbench.toNotePairs', { count: String(pairCount) })}</p>
+            <label className="fn-checkbox">
+              <input
+                type="radio"
+                name="fn-ai-tonote-mode"
+                checked={convertMode === 'all'}
+                onChange={() => setConvertMode('all')}
+              />
+              <span>{t('aiWorkbench.toNoteAll')}</span>
+            </label>
+            <label className="fn-checkbox">
+              <input
+                type="radio"
+                name="fn-ai-tonote-mode"
+                checked={convertMode === 'range'}
+                disabled={pairCount === 0}
+                onChange={() => setConvertMode('range')}
+              />
+              <span>{t('aiWorkbench.toNoteRange')}</span>
+            </label>
+            {convertMode === 'range' && (
+              <div className="fn-ai-tonote__range">
+                <input
+                  type="number"
+                  min={1}
+                  max={pairCount}
+                  value={convertFrom}
+                  onChange={(e) => setConvertFrom(Number(e.target.value) || 1)}
+                />
+                <span>—</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={pairCount}
+                  value={convertTo}
+                  onChange={(e) => setConvertTo(Number(e.target.value) || 1)}
+                />
+              </div>
+            )}
+            <div className="fn-modal__actions">
+              <button type="button" onClick={handleConvert}>
+                {t('aiWorkbench.toNoteCreate')}
+              </button>
+              <button type="button" onClick={() => setConvertOpen(false)}>
+                {t('aiWorkbench.toNoteCancel')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="fn-ai-workbench__messages" ref={messagesRef} onScroll={handleMessagesScroll}>
         {session.messages.length === 0 && !streamingHere && (
           <p className="fn-ai-workbench__empty">
@@ -212,9 +342,25 @@ export function AiWorkbench({
               )}
             </div>
             <span className="fn-ai-msg__actions">
-              <button type="button" title={t('aiWorkbench.exportMessage')} onClick={() => exportMessage(m, i)}>
-                ⇩
-              </button>
+              <span className="fn-ai-msg__export-wrap">
+                <button
+                  type="button"
+                  title={t('aiWorkbench.exportMessage')}
+                  onClick={() => setExportMenuIdx((cur) => (cur === i ? null : i))}
+                >
+                  ⇩
+                </button>
+                {exportMenuIdx === i && (
+                  <span className="fn-ai-msg__export-menu">
+                    <button type="button" onClick={() => exportMessage(m, i, 'md')}>
+                      {t('aiWorkbench.exportAsMd')}
+                    </button>
+                    <button type="button" onClick={() => exportMessage(m, i, 'doc')}>
+                      {t('aiWorkbench.exportAsDoc')}
+                    </button>
+                  </span>
+                )}
+              </span>
               <button type="button" title={t('aiWorkbench.deleteMessage')} onClick={() => handleDelete(i)}>
                 ×
               </button>

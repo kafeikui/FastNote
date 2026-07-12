@@ -10,29 +10,47 @@ interface MarkdownViewProps {
   className?: string;
 }
 
-/** Renders markdown to sanitized HTML (used for AI assistant replies). Fully local: marked
- * parses, DOMPurify strips anything executable before it touches the DOM.
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/**
+ * Renders markdown to sanitized HTML. Fully local: marked parses, DOMPurify strips anything
+ * executable.
  *
  * Math (`$$...$$`, `$...$`, and the `\[...\]`/`\(...\)` variants LLMs love) is lifted out into
  * placeholder tokens before parsing — the markdown parser would otherwise mangle `_`/`\` inside
  * expressions — and rendered with KaTeX after sanitization. KaTeX output is injected verbatim:
  * `renderToString` escapes its input, so it cannot smuggle markup through (`throwOnError: false`
- * turns bad LaTeX into escaped red text, same setting as the note editor). */
+ * turns bad LaTeX into escaped red text, same setting as the note editor).
+ *
+ * `mathAsTex` keeps formulas as escaped `<code>` TeX source instead of KaTeX markup — for export
+ * targets (e.g. Word documents) where KaTeX's HTML renders as duplicated garbled text without
+ * its stylesheet and fonts.
+ */
+export function renderMarkdownHtml(markdown: string, opts?: { mathAsTex?: boolean }): string {
+  const { text, segments } = extractMathSegments(markdown);
+  const raw = marked.parse(text, { async: false, gfm: true, breaks: true }) as string;
+  let out = DOMPurify.sanitize(raw);
+  for (const seg of segments) {
+    const rendered = opts?.mathAsTex
+      ? `<code>${escapeHtml(seg.display ? `$$${seg.expr}$$` : `$${seg.expr}$`)}</code>`
+      : katex.renderToString(seg.expr, {
+          throwOnError: false,
+          // AI replies routinely put CJK text and typographic dashes inside formulas; KaTeX
+          // renders them fine, the default 'warn' strict mode just floods the console.
+          strict: false,
+          displayMode: seg.display,
+        });
+    // Replacement-function form so `$`-sequences in KaTeX output are inserted literally.
+    out = out.replace(seg.token, () => rendered);
+  }
+  return out;
+}
+
+/** Renders markdown to sanitized HTML in the DOM (used for AI assistant replies). */
 export function MarkdownView({ markdown, className }: MarkdownViewProps) {
-  const html = useMemo(() => {
-    const { text, segments } = extractMathSegments(markdown);
-    const raw = marked.parse(text, { async: false, gfm: true, breaks: true }) as string;
-    let out = DOMPurify.sanitize(raw);
-    for (const seg of segments) {
-      const rendered = katex.renderToString(seg.expr, {
-        throwOnError: false,
-        displayMode: seg.display,
-      });
-      // Replacement-function form so `$`-sequences in KaTeX output are inserted literally.
-      out = out.replace(seg.token, () => rendered);
-    }
-    return out;
-  }, [markdown]);
+  const html = useMemo(() => renderMarkdownHtml(markdown), [markdown]);
   return (
     <div
       className={`fn-md-view${className ? ` ${className}` : ''}`}

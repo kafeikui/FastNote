@@ -52,9 +52,20 @@ import {
   setColumnWidth,
   setRowHeight,
   sortRows,
+  swapCells,
+  swapColumns,
+  swapRows,
   updateCell,
 } from './utils';
-import { applyVerticalFill, parsePasteGrid } from './fill';
+import {
+  DELIMITER_PRIORITY,
+  applyVerticalFill,
+  copyDelimiterChar,
+  loadTableDelimiters,
+  parsePasteGrid,
+  saveTableDelimiters,
+  type TableDelimiter,
+} from './fill';
 
 export interface TableEditorProps {
   document: TableDocument;
@@ -132,6 +143,16 @@ export function TableEditor({
   /** Characters selected inside the cell input currently being edited (0 = none). */
   const [cellSelChars, setCellSelChars] = useState(0);
   const [showHelp, setShowHelp] = useState(false);
+  const [showDelims, setShowDelims] = useState(false);
+  // Active cell delimiters (paste parsing + multi-cell copy); persisted app-wide in localStorage.
+  const [delims, setDelims] = useState<TableDelimiter[]>(loadTableDelimiters);
+  const toggleDelimiter = (d: TableDelimiter) => {
+    setDelims((prev) => {
+      const next = prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d];
+      saveTableDelimiters(next);
+      return next;
+    });
+  };
   const tableWrapRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const lastActionRef = useRef<LastAction | null>(null);
@@ -227,7 +248,12 @@ export function TableEditor({
     [selectionRange],
   );
 
-  const handleCellMouseDown = (rowIdx: number, colIdx: number) => {
+  // Main button only: a right-click must keep the current multi-cell selection (so the context
+  // menu's Copy targets it) and must never arm drag-select — the context menu swallows the
+  // matching mouseup, which would leave isSelecting stuck on until the next click drags out a
+  // bogus selection.
+  const handleCellMouseDown = (e: MouseEvent, rowIdx: number, colIdx: number) => {
+    if (e.button !== 0) return;
     setSelAnchor({ rowIdx, colIdx });
     setSelFocus({ rowIdx, colIdx });
     setIsSelecting(true);
@@ -437,7 +463,7 @@ export function TableEditor({
     const rowAttr = target.dataset?.rowIdx;
     const colAttr = target.dataset?.colIdx;
     if (rowAttr === undefined || colAttr === undefined) return;
-    const grid = parsePasteGrid(e.clipboardData.getData('text/plain'));
+    const grid = parsePasteGrid(e.clipboardData.getData('text/plain'), delims);
     if (!grid) return;
     e.preventDefault();
     const startRow = Number(rowAttr);
@@ -482,7 +508,7 @@ export function TableEditor({
         const raw = row.cells[col.id] ?? '';
         cells.push(isFormulaValue(raw) ? evaluateCellFormula(doc, row.id, col.id).display : raw);
       }
-      lines.push(cells.join('\t'));
+      lines.push(cells.join(copyDelimiterChar(delims)));
     }
     return lines.join('\n');
   };
@@ -675,7 +701,84 @@ export function TableEditor({
     }
   }, [handleAddRow, handleAddColumn, handleRemoveRow, handleRemoveColumn]);
 
+  /**
+   * Alt+Arrow reordering. What moves depends on the selection shape:
+   * - a whole row selected (via its row number): Alt+Up/Down swaps it with the neighbouring row;
+   * - a whole column selected (via its letter): Alt+Left/Right swaps it with the neighbour;
+   * - a single cell: Alt+Arrow swaps its content (and per-cell style) with the adjacent cell.
+   * Returns false when the selection/direction doesn't fit any of these, so the key keeps its
+   * default behaviour (e.g. Alt+Left = word jump inside a cell input with no selection).
+   * Row swaps reorder the underlying document, so with an active sort the display order (and the
+   * selection) won't visibly change — expected, same as dragging would be.
+   */
+  const handleAltArrowMove = (key: string): boolean => {
+    const range = selectionRange;
+    if (!range) return false;
+    const delta = key === 'ArrowUp' || key === 'ArrowLeft' ? -1 : 1;
+    const vertical = key === 'ArrowUp' || key === 'ArrowDown';
+    const singleRow = range.rowStart === range.rowEnd;
+    const singleCol = range.colStart === range.colEnd;
+    const wholeRow =
+      singleRow && range.colStart === 0 && range.colEnd === doc.columns.length - 1 && doc.columns.length > 1;
+    const wholeCol =
+      singleCol && range.rowStart === 0 && range.rowEnd === displayRows.length - 1 && displayRows.length > 1;
+
+    if (wholeRow && vertical) {
+      const target = range.rowStart + delta;
+      const from = displayRows[range.rowStart];
+      const to = displayRows[target];
+      if (!from || !to) return false;
+      emitChange(swapRows(docRef.current, from.id, to.id));
+      setSelAnchor({ rowIdx: target, colIdx: 0 });
+      setSelFocus({ rowIdx: target, colIdx: doc.columns.length - 1 });
+      return true;
+    }
+    if (wholeCol && !vertical) {
+      const target = range.colStart + delta;
+      const from = doc.columns[range.colStart];
+      const to = doc.columns[target];
+      if (!from || !to) return false;
+      emitChange(swapColumns(docRef.current, from.id, to.id));
+      setSelAnchor({ rowIdx: 0, colIdx: target });
+      setSelFocus({ rowIdx: displayRows.length - 1, colIdx: target });
+      return true;
+    }
+    if (singleRow && singleCol) {
+      const targetRow = range.rowStart + (vertical ? delta : 0);
+      const targetCol = range.colStart + (vertical ? 0 : delta);
+      const fromRow = displayRows[range.rowStart];
+      const toRow = displayRows[targetRow];
+      const fromCol = doc.columns[range.colStart];
+      const toCol = doc.columns[targetCol];
+      if (!fromRow || !toRow || !fromCol || !toCol) return false;
+      emitChange(
+        swapCells(
+          docRef.current,
+          { rowId: fromRow.id, colId: fromCol.id },
+          { rowId: toRow.id, colId: toCol.id },
+        ),
+      );
+      setSelAnchor({ rowIdx: targetRow, colIdx: targetCol });
+      setSelFocus({ rowIdx: targetRow, colIdx: targetCol });
+      requestAnimationFrame(() => focusCellInput(targetRow, targetCol));
+      return true;
+    }
+    return false;
+  };
+
   const handleContainerKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (
+      e.altKey &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.shiftKey &&
+      (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight')
+    ) {
+      if (handleAltArrowMove(e.key)) {
+        e.preventDefault();
+        return;
+      }
+    }
     if (repeatActionShortcut && matchesShortcut(e, repeatActionShortcut)) {
       e.preventDefault();
       repeatLastAction();
@@ -892,6 +995,27 @@ export function TableEditor({
         <div className="fn-table-palette-wrap">
           <button
             type="button"
+            className={showDelims ? 'active' : ''}
+            title={t('tableEditor.delimiters')}
+            onClick={() => setShowDelims((v) => !v)}
+          >
+            ⌗
+          </button>
+          {showDelims && (
+            <div className="fn-table-palette fn-table-delims-pop">
+              <p className="fn-table-delims-pop__hint">{t('tableEditor.delimitersHint')}</p>
+              {DELIMITER_PRIORITY.map((d) => (
+                <label key={d} className="fn-table-delims-pop__item">
+                  <input type="checkbox" checked={delims.includes(d)} onChange={() => toggleDelimiter(d)} />
+                  <span>{t(`tableEditor.delimiter_${d}`)}</span>
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="fn-table-palette-wrap">
+          <button
+            type="button"
             className={showHelp ? 'active' : ''}
             title={t('tableEditor.help')}
             onClick={() => setShowHelp((v) => !v)}
@@ -907,6 +1031,7 @@ export function TableEditor({
               <p>{t('tableEditor.fillHandleTooltip')}</p>
               <p>{t('tableEditor.helpCopy')}</p>
               <p>{t('tableEditor.helpPaste')}</p>
+              <p>{t('tableEditor.helpMove')}</p>
             </div>
           )}
         </div>
@@ -1051,7 +1176,9 @@ export function TableEditor({
                 </td>
                 <td
                   className="fn-table__rownum-col"
-                  onMouseDown={() => selectRow(rowIdx)}
+                  onMouseDown={(e) => {
+                    if (e.button === 0) selectRow(rowIdx);
+                  }}
                   title={t('tableEditor.selectRowTooltip')}
                 >
                   {rowNumberById.get(row.id) ?? rowIdx + 1}
@@ -1106,7 +1233,7 @@ export function TableEditor({
                         onDownload={(id) => onAttachmentDownload?.(id)}
                         onEdit={(id, desc) => onAttachmentEdit?.(id, desc)}
                         selected={isCellSelected(rowIdx, colIdx)}
-                        onCellMouseDown={() => handleCellMouseDown(rowIdx, colIdx)}
+                        onCellMouseDown={(e) => handleCellMouseDown(e, rowIdx, colIdx)}
                         onCellMouseEnter={() => handleCellMouseEnter(rowIdx, colIdx)}
                         rowIdx={rowIdx}
                         colIdx={colIdx}

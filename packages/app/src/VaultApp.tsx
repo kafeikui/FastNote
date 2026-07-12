@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
 import type { Editor } from '@tiptap/core';
 import {
+  ApiAuthError,
   ApiClient,
   loadServerUrl,
   loadSession,
@@ -263,6 +264,10 @@ export function VaultApp() {
   // Re-renders the logs modal after clearing (the buffer itself lives outside React).
   const [, setLogsTick] = useState(0);
   const [session, setSession] = useState<UserSession | null>(() => loadSession(loadStorageNamespace()));
+  // True after any authenticated call answered 401: the stored token is dead (7-day server TTL
+  // or JWT_SECRET rotation), so the "logged in" state it represented is a lie. We drop the
+  // session immediately and show a banner prompting a fresh login instead.
+  const [sessionExpired, setSessionExpired] = useState(false);
   const [serverUrl, setServerUrl] = useState(() => loadServerUrl());
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
   const [expandedSearch, setExpandedSearch] = useState(false);
@@ -458,6 +463,7 @@ export function VaultApp() {
     saveStorageNamespace(entry.namespace);
     setActiveVaultId(vaultId);
     setSession(loadSession(entry.namespace));
+    setSessionExpired(false);
     setStorageEpoch((n) => n + 1);
   }, [vaultRegistry]);
 
@@ -490,6 +496,7 @@ export function VaultApp() {
 
   const hydrateSession = useCallback(() => {
     setSession(loadSession(loadStorageNamespace()));
+    setSessionExpired(false);
   }, []);
 
   useEffect(() => {
@@ -975,6 +982,19 @@ export function VaultApp() {
     [serverUrl, processIncomingChat, storage, t, updateChatMessageStatus],
   );
 
+  /**
+   * The stored token was rejected with 401. Stop pretending to be logged in: drop the persisted
+   * session (per-vault localStorage), disconnect IM, and raise the re-login banner. Login /
+   * register / cloud-sync all clear the flag again via setSession + setSessionExpired(false).
+   */
+  const expireSession = useCallback(() => {
+    saveSession(null, loadStorageNamespace());
+    setSession(null);
+    imRef.current?.disconnect();
+    imRef.current = null;
+    setSessionExpired(true);
+  }, []);
+
   const ensureImReady = useCallback(async (): Promise<IMClient> => {
     const derived = keysRef.current;
     const userSession = session;
@@ -1103,10 +1123,11 @@ export function VaultApp() {
           }
         } catch (err) {
           console.error('post-unlock background init failed', err);
+          if (err instanceof ApiAuthError) expireSession();
         }
       })();
     },
-    [storage, prepareSearchIndexInBackground, session, initIM, serverUrl, loadChatHistory, restoreTabState],
+    [storage, prepareSearchIndexInBackground, session, initIM, serverUrl, loadChatHistory, restoreTabState, expireSession],
   );
 
   const handleCreateVault = async (password: string) => {
@@ -1172,6 +1193,8 @@ export function VaultApp() {
       setExpandedSearch(false);
       setTreeSelectedIds(new Set());
       treeAnchorIdRef.current = null;
+      editHistoryRef.current = [];
+      editHistoryIdxRef.current = -1;
       setAiSettings(null);
       setAiSessions([]);
       setActiveAiSessionId(null);
@@ -1202,6 +1225,26 @@ export function VaultApp() {
   const handleDeleteManyRef = useRef<(ids: string[]) => Promise<void>>(async () => {});
   const formatJsonByGroupRef = useRef<Record<string, (() => boolean) | null>>({});
 
+  // Focus history: content/title edits, tab clicks, and cursor clicks inside a page all record
+  // the note id (consecutive duplicates collapsed); the focusPrev/focusNext shortcuts (default
+  // Ctrl+Alt+Left/Right) walk the trail. Kept in refs — recording happens on every keystroke and
+  // must not re-render.
+  const editHistoryRef = useRef<string[]>([]);
+  const editHistoryIdxRef = useRef(-1);
+  const notesRef = useRef<NoteNode[]>([]);
+  notesRef.current = notes;
+  const navigateEditFocusRef = useRef<(dir: -1 | 1) => void>(() => {});
+
+  const recordEditFocus = useCallback((id: string) => {
+    const h = editHistoryRef.current;
+    if (h[editHistoryIdxRef.current] === id) return;
+    // Editing after walking back forks the trail: drop the forward entries, like undo history.
+    h.splice(editHistoryIdxRef.current + 1);
+    h.push(id);
+    if (h.length > 100) h.shift();
+    editHistoryIdxRef.current = h.length - 1;
+  }, []);
+
   useEffect(() => {
     const isTypingTarget = (target: EventTarget | null): boolean => {
       if (!(target instanceof HTMLElement)) return false;
@@ -1215,6 +1258,18 @@ export function VaultApp() {
     const onKeyDown = (e: KeyboardEvent) => {
       if (modalOpenRef.current) return;
       const bindings = shortcutsRef.current;
+      // Focus-history navigation (customizable, default Ctrl+Alt+Left/Right); works while typing
+      // in editors (that's where the user is).
+      if (matchesShortcut(e, bindings.focusPrev)) {
+        e.preventDefault();
+        navigateEditFocusRef.current(-1);
+        return;
+      }
+      if (matchesShortcut(e, bindings.focusNext)) {
+        e.preventDefault();
+        navigateEditFocusRef.current(1);
+        return;
+      }
       if (matchesShortcut(e, bindings.lockVault)) {
         e.preventDefault();
         void handleLockRef.current();
@@ -1284,6 +1339,7 @@ export function VaultApp() {
   const updateNoteById = useCallback(
     (id: string, patch: Partial<NoteNode>) => {
       if (!keys) return;
+      recordEditFocus(id);
       setNotes((prev) => {
         const current = prev.find((n) => n.id === id);
         if (!current) return prev;
@@ -1292,7 +1348,7 @@ export function VaultApp() {
         return prev.map((n) => (n.id === updated.id ? updated : n));
       });
     },
-    [keys, schedulePersist],
+    [keys, schedulePersist, recordEditFocus],
   );
 
   const handleCreate = async (nodeType: NodeType, parentId: string | null) => {
@@ -1706,6 +1762,10 @@ export function VaultApp() {
   const openNoteInGroup = (groupId: string, id: string, opts?: { pin?: boolean }) => {
     // Opening a note leaves the AI workbench and returns to the tab groups.
     setActiveAiSessionId(null);
+    // Opening a tab counts as a focus switch. During focus-history navigation this is a no-op:
+    // navigateEditFocus points the history index at the target id before opening, so the
+    // consecutive-duplicate guard skips it (no forward-branch truncation).
+    recordEditFocus(id);
     const existingGroup = groups.find((g) => g.tabs.some((tb) => tb.id === id));
     if (existingGroup) {
       setGroups((prev) =>
@@ -1738,8 +1798,31 @@ export function VaultApp() {
 
   const openNote = (id: string, opts?: { pin?: boolean }) => openNoteInGroup(activeGroupId, id, opts);
 
+  /**
+   * Ctrl+Alt+Left/Right: jump to the previous/next edit focus. The target tab becomes active and
+   * pinned; if it was closed in the meantime, openNote reopens it. Entries whose note has been
+   * deleted since are skipped.
+   */
+  navigateEditFocusRef.current = (dir: -1 | 1) => {
+    const h = editHistoryRef.current;
+    let idx = editHistoryIdxRef.current + dir;
+    while (idx >= 0 && idx < h.length) {
+      const id = h[idx];
+      const node = notesRef.current.find((n) => n.id === id);
+      if (node && !node.deleted && isEditableContentNode(node)) {
+        editHistoryIdxRef.current = idx;
+        openNote(id, { pin: true });
+        setAppView('notes');
+        revealNoteInTree(id);
+        return;
+      }
+      idx += dir;
+    }
+  };
+
   const selectTabInGroup = (groupId: string, tabId: string) => {
     setActiveAiSessionId(null);
+    recordEditFocus(tabId);
     setGroups((prev) => prev.map((g) => (g.id === groupId ? { ...g, activeTabId: tabId } : g)));
     setActiveGroupId(groupId);
     // Keep the sidebar in sync with the tab the user just picked: expand ancestors, scroll to and
@@ -1981,6 +2064,34 @@ export function VaultApp() {
       sessionId,
       session.messages.filter((_, i) => i !== index),
     );
+  };
+
+  /** Creates a root-level note from an AI session's messages (a Q&A range or all of them). */
+  const handleAiConvertToNote = async (sessionId: string, messages: AiMessage[]) => {
+    if (!keys || messages.length === 0) return;
+    const session = aiSessions.find((s) => s.id === sessionId);
+    if (!session) return;
+    const fmtTs = (iso: string) => {
+      const d = new Date(iso);
+      return isNaN(d.getTime()) ? iso : d.toLocaleString();
+    };
+    const md = messages
+      .map((m) => {
+        const heading = m.role === 'user' ? t('aiWorkbench.roleUser') : t('aiWorkbench.roleAssistant');
+        const attach = m.attachments?.length
+          ? `\n\n${m.attachments.map((a) => `> 📎 ${a.name}`).join('\n')}`
+          : '';
+        return `## ${heading} · ${fmtTs(m.ts)}${attach}\n\n${m.content}`;
+      })
+      .join('\n\n---\n\n');
+    const sortOrder = notes.filter((n) => n.parentId === null && !n.deleted).length;
+    const node = newNode('note', null, sortOrder, locale);
+    node.title = t('aiWorkbench.noteTitle', { title: session.title });
+    node.contentMd = md;
+    node.contentHash = hashContent(md);
+    await saveNoteNow(node);
+    openNote(node.id, { pin: true });
+    setAppView('notes');
   };
 
   /** Wraps prepareAiAttachment to surface localized error messages in the workbench UI. */
@@ -2246,10 +2357,11 @@ export function VaultApp() {
         );
         if (node) await refreshAttachments(node.id);
       }
-    } catch {
-      /* server offline */
+    } catch (err) {
+      if (err instanceof ApiAuthError) expireSession();
+      /* otherwise: server offline, retried on next occasion */
     }
-  }, [keys, session, serverUrl, storage, activeId, notes, refreshAttachments]);
+  }, [keys, session, serverUrl, storage, activeId, notes, refreshAttachments, expireSession]);
 
   const handleInsertAttachment = useCallback(
     (att: NoteAttachment) => {
@@ -2434,6 +2546,7 @@ export function VaultApp() {
       await bindVaultUsername(username);
       saveSession(userSession, loadStorageNamespace());
       setSession(userSession);
+      setSessionExpired(false);
       setVaultListItems((prev) =>
         prev.map((v) =>
           v.id === activeVaultId
@@ -2463,6 +2576,7 @@ export function VaultApp() {
     await bindVaultUsername(username);
     saveSession(userSession, loadStorageNamespace());
     setSession(userSession);
+    setSessionExpired(false);
     setVaultListItems((prev) =>
       prev.map((v) =>
         v.id === activeVaultId ? { ...v, boundUsername: username.trim() } : v,
@@ -2498,6 +2612,7 @@ export function VaultApp() {
     await bindVaultUsername(username);
     saveSession(s, loadStorageNamespace());
     setSession(s);
+    setSessionExpired(false);
     setVaultListItems((prev) =>
       prev.map((v) =>
         v.id === activeVaultId ? { ...v, boundUsername: username.trim() } : v,
@@ -2515,6 +2630,7 @@ export function VaultApp() {
     await bindVaultUsername(username);
     saveSession(s, loadStorageNamespace());
     setSession(s);
+    setSessionExpired(false);
     setVaultListItems((prev) =>
       prev.map((v) =>
         v.id === activeVaultId ? { ...v, boundUsername: username.trim() } : v,
@@ -2559,6 +2675,10 @@ export function VaultApp() {
         if (node) await refreshAttachments(node.id);
       }
     } catch (err) {
+      if (err instanceof ApiAuthError) {
+        expireSession();
+        setShowAuth(true);
+      }
       setSyncStatus(err instanceof Error ? err.message : t('vaultApp.syncFailed'));
     }
   };
@@ -2757,8 +2877,14 @@ export function VaultApp() {
         key={group.id}
         className={`fn-tab-group${isFocused ? ' fn-tab-group--focused' : ''}`}
         style={{ flex: `${flexGrow} 1 0%` }}
-        onMouseDownCapture={() => {
+        onMouseDownCapture={(e) => {
           if (activeGroupId !== group.id) setActiveGroupId(group.id);
+          // Placing the cursor inside the page content counts as a focus switch for the
+          // focus-history trail. Tab-bar clicks are excluded here — selectTabInGroup records the
+          // *target* tab itself (recording here would log the group's outgoing tab instead).
+          if (content && !(e.target instanceof Element && e.target.closest('.fn-tabbar'))) {
+            recordEditFocus(content.id);
+          }
         }}
       >
         <TabBar
@@ -3072,6 +3198,22 @@ export function VaultApp() {
           e.target.value = '';
         }}
       />
+      {sessionExpired && (
+        <div className="fn-session-expired-banner" role="alert">
+          <span>{t('vaultApp.sessionExpiredBanner')}</span>
+          <button type="button" onClick={() => { setSessionExpired(false); setShowAuth(true); }}>
+            {t('vaultApp.sessionExpiredLogin')}
+          </button>
+          <button
+            type="button"
+            className="fn-session-expired-banner__dismiss"
+            title={t('vaultApp.sessionExpiredDismiss')}
+            onClick={() => setSessionExpired(false)}
+          >
+            ×
+          </button>
+        </div>
+      )}
       <AppShell
         sidebarCollapsed={sidebarCollapsed}
         onToggleSidebar={handleSidebarToggleClick}
@@ -3244,6 +3386,7 @@ export function VaultApp() {
               onStop={handleAiStop}
               onDeleteMessage={(index) => handleAiDeleteMessage(activeAiSession.id, index)}
               prepareAttachment={handlePrepareAiAttachment}
+              onConvertToNote={(messages) => void handleAiConvertToNote(activeAiSession.id, messages)}
               onOpenSettings={() => setShowSettings(true)}
             />
           ) : (
@@ -3306,6 +3449,7 @@ export function VaultApp() {
           onLogout={() => {
             saveSession(null, loadStorageNamespace());
             setSession(null);
+            setSessionExpired(false);
             imRef.current?.disconnect();
           }}
           onSync={() => void handleSync()}

@@ -1,4 +1,11 @@
-import { useMemo, useState, type CSSProperties, type DragEvent, type KeyboardEvent } from 'react';
+import {
+  useMemo,
+  useState,
+  type CSSProperties,
+  type DragEvent,
+  type KeyboardEvent,
+  type MouseEvent,
+} from 'react';
 import type { NoteAttachment } from '@fastnote/shared';
 import {
   attachmentDisplayLabel,
@@ -29,7 +36,7 @@ interface TableCellContentProps {
   onDownload: (id: string) => void;
   onEdit: (id: string, description: string) => void | Promise<void>;
   selected?: boolean;
-  onCellMouseDown?: () => void;
+  onCellMouseDown?: (e: MouseEvent) => void;
   onCellMouseEnter?: () => void;
   rowIdx?: number;
   colIdx?: number;

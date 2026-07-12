@@ -4,6 +4,7 @@ import Link from '@tiptap/extension-link';
 import Placeholder from '@tiptap/extension-placeholder';
 import { Mathematics } from '@tiptap/extension-mathematics';
 import { Markdown } from '@tiptap/markdown';
+import { Marked, marked as markedGlobal } from 'marked';
 import { EditorView, keymap } from '@codemirror/view';
 import { Prec } from '@codemirror/state';
 import { deleteLine } from '@codemirror/commands';
@@ -144,7 +145,9 @@ export function NoteEditor({
   if (enableMath) {
     extensions.push(
       Mathematics.configure({
-        katexOptions: { throwOnError: false },
+        // strict: false — notes legitimately mix CJK text and typographic dashes into formulas;
+        // KaTeX renders them fine, the default 'warn' mode just floods the console.
+        katexOptions: { throwOnError: false, strict: false },
         inlineOptions: {
           onClick: (node, pos) => {
             onEditFormulaRef.current?.((node.attrs.latex as string) ?? '', (latex) => {
@@ -165,7 +168,17 @@ export function NoteEditor({
   extensions.push(
     // `breaks: true`: a single newline in the source is a real line break (GFM behavior), so
     // users don't have to leave a blank line between lines for them to render separately.
-    Markdown.configure({ markedOptions: { breaks: true } }),
+    //
+    // `marked: new Marked()` — CRITICAL data-loss guard. Without an injected instance,
+    // @tiptap/markdown registers extension tokenizers (e.g. Mathematics' `$$`) on the marked
+    // *global singleton* via marked.use(), which is irreversible. After a math-enabled editor
+    // had been created once, an editor built with math *disabled* would still tokenize
+    // `$$...$$` into blockMath tokens, find no registered node handler, and silently DROP the
+    // formulas — the next autosave then persisted the mutilated note. A per-editor instance
+    // keeps tokenizers scoped to the editor that registered them.
+    // The option is typed as the global singleton, but the manager only calls instance methods
+    // (`use`/`setOptions`/`lexer`/`Lexer`/`defaults`) that `Marked` instances share — hence the cast.
+    Markdown.configure({ marked: new Marked() as unknown as typeof markedGlobal, markedOptions: { breaks: true } }),
     Placeholder.configure({ placeholder: effectivePlaceholder }),
   );
 

@@ -23,12 +23,13 @@ Encrypted notes + 1:1 end-to-end encrypted instant messaging. Built for personal
 **Notes**
 - Tree-structured explorer (folders/notes/tables), drag-to-reorder, nested directories
 - Editor: Tiptap WYSIWYG (default) ↔ CodeMirror source mode, autosave
-- Table documents: column sort/filter, add/remove rows & columns; a selection stats bar (count/sum/average) for any dragged range, whole row, or whole column; spreadsheet-style formulas (`=SUM(A1:A3)`, `AVERAGE`, `COUNT`, `MIN`, `MAX`, `+ - * / ^`); export to CSV (plaintext) / `.fnxt` (encrypted), with matching import
+- Table documents: column sort/filter, add/remove rows & columns; a selection stats bar (count/sum/average) for any dragged range, whole row, or whole column; spreadsheet-style formulas (`=SUM(A1:A3)`, `AVERAGE`, `COUNT`, `MIN`, `MAX`, `+ - * / ^`); per-column number formats (number/currency/decimals) and one-click insert of the current time; multi-cell copy and smart paste-splitting with customizable delimiters (tab/semicolon/comma/whitespace, multi-select); Alt+Arrow to reorder rows/columns or swap adjacent cells; frozen header/first column, resizable rows/columns, per-cell bold/size/color/fill; export to CSV (plaintext) / `.fnxt` (encrypted), with matching import
 - Bulk folder import: preserves directory structure, extension-less files import as notes, `.csv` files import as tables
 - Local full-text search (encrypted index snapshot, never uploaded)
 - Two-group tab system with split view: drag-to-reorder tabs, preview (italic) vs. pinned tabs, persisted across restarts and lock/unlock
 - Optional LaTeX math rendering (KaTeX, off by default), line numbers, JSON formatting, line-level shortcuts (Ctrl+D delete line, Alt+↑/↓ move line)
-- Customizable keyboard shortcuts (rename, lock, table repeat/undo/redo, delete) in Settings
+- Customizable keyboard shortcuts (rename, lock, table repeat/undo/redo, delete, focus jumps) in Settings
+- Edit-focus history: edits, opening/selecting tabs, and cursor clicks are all recorded; Ctrl+Alt+←/→ (customizable) jumps to the previous/next focus — the target tab is activated and pinned, and reopened if it was closed
 - Fast unlock on large vaults (1000+ notes): hardware-accelerated WebCrypto AES-GCM, batched IndexedDB reads, background search-index loading
 - Find & replace in notes (Ctrl+F, customizable): works in both rendered and source mode, with match highlighting and replace-all
 - Resizable note content width; collapsible sidebar for a wider content area
@@ -38,7 +39,11 @@ Encrypted notes + 1:1 end-to-end encrypted instant messaging. Built for personal
 **AI Workbench (optional, off unless you configure it)**
 - Chat with Claude models directly inside the app: bring your own Anthropic API key (encrypted with your master key, stored only in this vault)
 - Collapsible session tree in the sidebar with folders, rename, and drag-to-organize; conversations are encrypted at rest like notes
-- Streaming responses with markdown rendering and a stop button; `api.anthropic.com` is the single CSP exception, and no request is ever made until you save a key and send a message
+- Streaming responses with markdown rendering (LaTeX formulas included) and a stop button; switching sessions or back to notes keeps the reply streaming in the background
+- Attachments on requests: images / PDF / doc / docx / text files (all parsed locally, 8MB cap)
+- Per-message management: delete, export as Markdown or a Word document; convert Q&A (a selected range or the whole session) into a note; send/receive timestamps on every message
+- Configurable `max_tokens` (up to 128k) in Settings; long generations show thinking progress and a patience hint
+- `api.anthropic.com` is the single CSP exception, and no request is ever made until you save a key and send a message
 
 **Chat (1:1 end-to-end encrypted)**
 - Chat history is kept locally forever (until manually deleted), independent of cloud login state
@@ -49,7 +54,9 @@ Encrypted notes + 1:1 end-to-end encrypted instant messaging. Built for personal
 **Interface**
 - Four built-in UI themes (warm/elegant/business/fresh), with a consistent selected(dark)/unselected(light) visual language across the main UI and unlock screen
 - i18n: Chinese and English, switchable anytime in Settings, persisted locally
-- Settings modal scrolls when content overflows
+- Tabbed Settings: General / Account & Sync / AI Assistant / Shortcuts / Storage
+- Expired logins (401) are detected automatically: the local session is cleared and a banner prompts you to log in again, instead of showing a stale logged-in state
+- Native desktop context menu: cut / copy / paste / paste-and-match-style / select all
 - Built-in log viewer (📋 button next to Settings): captures console output in memory so you can inspect/copy/export it even in the packaged desktop app where DevTools aren't available — nothing is written to disk unless you export it yourself
 
 **Security**

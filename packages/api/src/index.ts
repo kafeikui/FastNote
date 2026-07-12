@@ -43,6 +43,19 @@ export interface SyncChatMessageItem {
   ciphertext: string;
 }
 
+/**
+ * Thrown when an authenticated endpoint answers 401 — the stored JWT is expired (7-day server
+ * TTL) or was invalidated by a JWT_SECRET change. Callers treat this as "session expired": drop
+ * the stored session and prompt the user to log in again, instead of surfacing the endpoint's
+ * generic error message.
+ */
+export class ApiAuthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ApiAuthError";
+  }
+}
+
 export class ApiClient {
   constructor(private baseUrl: string, private locale: Locale = "zh") {}
 
@@ -52,6 +65,11 @@ export class ApiClient {
 
   private url(path: string): string {
     return `${this.baseUrl.replace(/\/$/, "")}${path}`;
+  }
+
+  /** Guard for authenticated endpoints: turn a 401 into a typed session-expired error. */
+  private assertAuthed(res: Response): void {
+    if (res.status === 401) throw new ApiAuthError(this.t("apiClient.sessionExpired"));
   }
 
   async register(
@@ -138,6 +156,7 @@ export class ApiClient {
       },
       body: JSON.stringify({ vault_salt: vaultSalt }),
     });
+    this.assertAuthed(res);
     if (!res.ok) throw new Error(this.t("apiClient.vaultSaltUploadFailed"));
   }
 
@@ -157,6 +176,7 @@ export class ApiClient {
         exchange_pubkey: exchangePub,
       }),
     });
+    this.assertAuthed(res);
     if (!res.ok) throw new Error(this.t("apiClient.keysUploadFailed"));
   }
 
@@ -167,6 +187,7 @@ export class ApiClient {
         headers: { Authorization: `Bearer ${token}` },
       },
     );
+    this.assertAuthed(res);
     if (!res.ok) throw new Error(this.t("apiClient.userNotFound"));
     const data = (await res.json()) as {
       user_id: string;
@@ -187,6 +208,7 @@ export class ApiClient {
         headers: { Authorization: `Bearer ${token}` },
       },
     );
+    this.assertAuthed(res);
     if (!res.ok) throw new Error(this.t("apiClient.userNotFound"));
     const data = (await res.json()) as {
       user_id: string;
@@ -213,6 +235,7 @@ export class ApiClient {
       },
       body: JSON.stringify(body),
     });
+    this.assertAuthed(res);
     if (res.status === 409) {
       const data = (await res.json()) as { server_version: number };
       return { conflict: true, serverVersion: data.server_version };
@@ -225,6 +248,7 @@ export class ApiClient {
     const res = await fetch(this.url("/api/v1/sync/notes"), {
       headers: { Authorization: `Bearer ${token}` },
     });
+    this.assertAuthed(res);
     if (!res.ok) throw new Error(this.t("apiClient.syncPullFailed"));
     const data = (await res.json()) as { items: SyncNoteItem[] };
     return data.items;
@@ -252,6 +276,7 @@ export class ApiClient {
         body: JSON.stringify(body),
       },
     );
+    this.assertAuthed(res);
     if (res.status === 409) {
       const data = (await res.json()) as { server_version: number };
       return { conflict: true, serverVersion: data.server_version };
@@ -264,6 +289,7 @@ export class ApiClient {
     const res = await fetch(this.url("/api/v1/sync/attachments"), {
       headers: { Authorization: `Bearer ${token}` },
     });
+    this.assertAuthed(res);
     if (!res.ok) throw new Error(this.t("apiClient.attachmentPullFailed"));
     const data = (await res.json()) as { items: SyncAttachmentItem[] };
     return data.items;
@@ -282,6 +308,7 @@ export class ApiClient {
       },
       body: JSON.stringify(body),
     });
+    this.assertAuthed(res);
     if (!res.ok) throw new Error(this.t("apiClient.syncPushFailed"));
   }
 
@@ -289,6 +316,7 @@ export class ApiClient {
     const res = await fetch(this.url("/api/v1/sync/chat"), {
       headers: { Authorization: `Bearer ${token}` },
     });
+    this.assertAuthed(res);
     if (!res.ok) throw new Error(this.t("apiClient.syncPullFailed"));
     const data = (await res.json()) as { items: SyncChatMessageItem[] };
     return data.items;

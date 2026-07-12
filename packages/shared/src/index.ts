@@ -458,7 +458,9 @@ export type ShortcutAction =
   | 'tableUndo'
   | 'tableRedo'
   | 'deleteSelected'
-  | 'findInNote';
+  | 'findInNote'
+  | 'focusPrev'
+  | 'focusNext';
 
 export interface ShortcutBinding {
   key: string;
@@ -477,6 +479,8 @@ export const DEFAULT_SHORTCUTS: ShortcutBindings = {
   tableRedo: { key: 'y', ctrl: true },
   deleteSelected: { key: 'Delete' },
   findInNote: { key: 'f', ctrl: true },
+  focusPrev: { key: 'ArrowLeft', ctrl: true, alt: true },
+  focusNext: { key: 'ArrowRight', ctrl: true, alt: true },
 };
 
 interface ShortcutKeyEventLike {

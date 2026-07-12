@@ -1763,6 +1763,92 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   font-size: 0.9rem;
 }
 
+/* Settings: wider than regular modals, tabbed layout with a fixed header/footer and a
+   scrollable body so switching tabs never moves the tab bar or the footer buttons. */
+.fn-modal.fn-settings-modal {
+  width: min(760px, 94vw);
+  display: flex;
+  flex-direction: column;
+  max-height: 85vh;
+  overflow: hidden;
+}
+
+.fn-settings-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 1rem;
+}
+
+.fn-settings-tabs__tab {
+  padding: 0.45rem 0.9rem;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--text-muted);
+  font-size: 0.92rem;
+  cursor: pointer;
+}
+
+.fn-settings-tabs__tab:hover {
+  color: var(--text);
+}
+
+.fn-settings-tabs__tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+.fn-settings-body {
+  flex: 1 1 auto;
+  min-height: 300px;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+}
+
+.fn-settings-footer {
+  border-top: 1px solid var(--border);
+  padding-top: 0.75rem;
+}
+
+/* Session-expired notice: fixed at the top so it is visible from any view. */
+.fn-session-expired-banner {
+  position: fixed;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  max-width: min(92vw, 640px);
+  padding: 0.5rem 0.9rem;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  font-size: 0.9rem;
+}
+
+.fn-session-expired-banner button {
+  padding: 0.25rem 0.7rem;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.fn-session-expired-banner .fn-session-expired-banner__dismiss {
+  background: none;
+  border-color: var(--border);
+  color: var(--text-muted);
+  padding: 0.25rem 0.5rem;
+}
+
 /* Log viewer: wider than regular modals, monospace scrollable body. */
 .fn-modal.fn-logs {
   width: min(720px, 94vw);
@@ -2272,6 +2358,29 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   font-size: 0.82rem;
   color: var(--text);
   line-height: 1.5;
+}
+
+/* Delimiter picker popover (paste auto-split / multi-cell copy separators). */
+.fn-table-delims-pop {
+  width: 16rem;
+  max-width: 80vw;
+  white-space: normal;
+}
+
+.fn-table-delims-pop__hint {
+  margin: 0.2rem 0 0.5rem;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.fn-table-delims-pop__item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.15rem 0;
+  font-size: 0.84rem;
+  cursor: pointer;
 }
 
 /* Attachment manager modal for tables (inline panel moved here to save vertical space). */
@@ -3314,6 +3423,37 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   font-weight: 600;
 }
 
+.fn-ai-workbench__tonote {
+  padding: 0.15rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.fn-ai-workbench__tonote:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.fn-ai-tonote__range {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.5rem 0 0.25rem 1.6rem;
+}
+
+.fn-ai-tonote__range input {
+  width: 5rem;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: inherit;
+}
+
 .fn-ai-workbench__title {
   font-weight: 600;
   font-size: 0.95rem;
@@ -3374,6 +3514,44 @@ body.fn-resizing-note .fn-note-resize-handle::after {
 
 .fn-ai-msg__actions button:hover {
   color: var(--text);
+}
+
+/* Keep the actions visible while an export menu is open, even if the pointer wanders. */
+.fn-ai-msg__actions:has(.fn-ai-msg__export-menu) {
+  opacity: 1;
+}
+
+.fn-ai-msg__export-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.fn-ai-msg__export-menu {
+  position: absolute;
+  top: calc(100% + 2px);
+  right: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  min-width: 9rem;
+  padding: 0.25rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
+}
+
+.fn-ai-msg__export-menu button {
+  border: none;
+  background: none;
+  text-align: left;
+  padding: 0.3rem 0.5rem;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.fn-ai-msg__export-menu button:hover {
+  background: var(--accent-soft);
 }
 
 .fn-ai-msg__attachments {
