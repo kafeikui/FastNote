@@ -61,3 +61,44 @@ export function normalizeLatexDelimiters(markdown: string): string {
   if (!markdown) return markdown;
   return mapOutsideCode(markdown, convertDelimiters).replace(/\n{3,}/g, '\n\n');
 }
+
+// Looser than looksLikeLatex (which guards bare-bracket *blocks*): text already wrapped in
+// `$...$` just needs a hint of math — a command, or a bare `_`/`^` script like `E=mc^2` — to be
+// treated as such, while `$5 and $10` style prose (digits/words only) stays plain text.
+const INLINE_MATH_HINT = /\\[a-zA-Z]+|[_^]\{|[_^][a-zA-Z0-9]/;
+
+export interface MathSegment {
+  /** Unique placeholder left in the returned text where this expression sat. */
+  token: string;
+  /** The LaTeX source, without delimiters. */
+  expr: string;
+  /** True for `$$...$$` display math, false for inline `$...$`. */
+  display: boolean;
+}
+
+/**
+ * Normalizes delimiters, then lifts every math expression out of the markdown and replaces it
+ * with an inert alphanumeric placeholder that survives markdown parsing and HTML sanitization
+ * untouched. The caller renders each segment (e.g. with KaTeX) and substitutes it back into the
+ * final HTML — this keeps the math source away from the markdown parser, which would otherwise
+ * mangle `_`/`\` inside expressions. Inline `$...$` is only treated as math when it plausibly
+ * contains LaTeX, so prose like "$5 and $10" is left alone.
+ */
+export function extractMathSegments(markdown: string): { text: string; segments: MathSegment[] } {
+  const segments: MathSegment[] = [];
+  if (!markdown) return { text: markdown, segments };
+  const takeToken = (expr: string, display: boolean): string => {
+    const token = `FNMATH${segments.length}MARK`;
+    segments.push({ token, expr, display });
+    return token;
+  };
+  const text = mapOutsideCode(normalizeLatexDelimiters(markdown), (chunk) => {
+    // Blank lines around block placeholders make marked emit them as standalone paragraphs.
+    let out = chunk.replace(DOLLAR_BLOCK, (_m, expr: string) => `\n\n${takeToken(expr.trim(), true)}\n\n`);
+    out = out.replace(DOLLAR_INLINE, (match, expr: string) =>
+      INLINE_MATH_HINT.test(expr) ? takeToken(expr, false) : match,
+    );
+    return out;
+  });
+  return { text: text.replace(/\n{3,}/g, '\n\n'), segments };
+}

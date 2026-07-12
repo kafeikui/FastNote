@@ -413,6 +413,9 @@ importers:
       dompurify:
         specifier: ^3.4.11
         version: 3.4.11
+      katex:
+        specifier: ^0.16.11
+        version: 0.16.47
       marked:
         specifier: ^18.0.6
         version: 18.0.6
@@ -435,6 +438,9 @@ importers:
       '@tiptap/starter-kit':
         specifier: ^3.27.1
         version: 3.27.1
+      '@types/katex':
+        specifier: ^0.16.7
+        version: 0.16.8
       '@types/react':
         specifier: ^19.0.2
         version: 19.2.17

@@ -458,22 +458,16 @@ export function TableEditor({
     emitChange({ ...next, rows });
   };
 
-  // Multi-cell copy: a selection spanning more than one cell is written to the clipboard as
-  // tab-separated values (rows newline-separated) — pasteable into Excel/Sheets and back into
-  // this table (handleGridPaste splits on tabs first). Formula cells copy their computed value.
-  const handleGridCopy = (e: ClipboardEvent<HTMLDivElement>) => {
+  // Multi-cell copy: a selection spanning more than one cell is copied as tab-separated values
+  // (rows newline-separated) — pasteable into Excel/Sheets and back into this table
+  // (handleGridPaste splits on tabs first). Formula cells copy their computed value.
+  // Copying part of one cell's text still works naturally: clicking into a cell collapses the
+  // range to that single cell, so buildRangeTsv() returns null and native copy takes over.
+  /** TSV of the current multi-cell selection, or null when the selection is a single cell/empty. */
+  const buildRangeTsv = (): string | null => {
     const range = selectionRange;
-    if (!range) return;
-    if (range.rowStart === range.rowEnd && range.colStart === range.colEnd) return;
-    // Respect an in-cell text selection: copying part of a cell's text wins over the range.
-    const active = document.activeElement;
-    if (
-      active instanceof HTMLInputElement &&
-      active.selectionStart !== null &&
-      active.selectionStart !== active.selectionEnd
-    ) {
-      return;
-    }
+    if (!range) return null;
+    if (range.rowStart === range.rowEnd && range.colStart === range.colEnd) return null;
     const lines: string[] = [];
     for (let r = range.rowStart; r <= range.rowEnd; r++) {
       const row = displayRows[r];
@@ -490,8 +484,36 @@ export function TableEditor({
       }
       lines.push(cells.join('\t'));
     }
+    return lines.join('\n');
+  };
+
+  /** Copy-event path (Ctrl+C inside a cell input, or Copy from a context menu). */
+  const handleGridCopy = (e: ClipboardEvent<HTMLDivElement>) => {
+    const tsv = buildRangeTsv();
+    if (tsv === null) return;
     e.preventDefault();
-    e.clipboardData.setData('text/plain', lines.join('\n'));
+    e.clipboardData.setData('text/plain', tsv);
+  };
+
+  /**
+   * Keydown fallback for when no cell input is focused (e.g. a whole row/column was selected via
+   * its header) — pressing Mod+C then fires no copy event at all, so we copy through a hidden
+   * textarea + execCommand('copy') (the app's permissionless clipboard-write path).
+   */
+  const copyRangeViaExecCommand = (): boolean => {
+    const tsv = buildRangeTsv();
+    if (tsv === null) return false;
+    const prevFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const ta = document.createElement('textarea');
+    ta.value = tsv;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    prevFocus?.focus();
+    return true;
   };
 
   const selectColumn = (colIdx: number) => {
@@ -669,6 +691,19 @@ export function TableEditor({
     if (redoShortcut && matchesShortcut(e, redoShortcut)) {
       e.preventDefault();
       redo();
+      return;
+    }
+    // Mod+C with focus outside any text field (row/column selected via header) never produces a
+    // copy event, so handle it here. When a cell input is focused, handleGridCopy takes over.
+    if (
+      (e.ctrlKey || e.metaKey) &&
+      !e.altKey &&
+      !e.shiftKey &&
+      e.key.toLowerCase() === 'c' &&
+      !(document.activeElement instanceof HTMLInputElement) &&
+      !(document.activeElement instanceof HTMLTextAreaElement)
+    ) {
+      if (copyRangeViaExecCommand()) e.preventDefault();
     }
   };
 

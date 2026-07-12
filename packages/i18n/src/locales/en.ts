@@ -168,6 +168,12 @@ export const en: Dictionary = {
       'Timed out connecting to the Anthropic server (no response in 30s). Check that api.anthropic.com is reachable from your network (a proxy is required in some regions) and that the model ID is spelled correctly (e.g. claude-sonnet-5).',
     timeoutStream: 'The reply stream stalled (no data for 90s); the request was stopped — you can retry.',
     thinkingDeep: 'Thinking deeply… ({chars} chars of reasoning so far, no visible text yet)',
+    sentAt: 'Sent',
+    recvStartAt: 'First received',
+    recvEndAt: 'Completed',
+    patience: 'Still working — complex prompts can take a few minutes, please hang tight… (Stop is always available)',
+    patienceThinking:
+      'Still thinking deeply ({chars} chars of reasoning so far) — complex prompts can take a few minutes, please hang tight… (Stop is always available)',
     emptyMaxTokens:
       'The reply produced no visible text: the whole token budget was consumed by internal thinking (stop_reason=max_tokens). The default limit is now 16384 — retry, or simplify/split the prompt if it recurs.',
     truncatedMaxTokens: 'The reply was cut off at the token limit (stop_reason=max_tokens); it may be incomplete — reply "continue" to resume.',

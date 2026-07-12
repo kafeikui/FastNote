@@ -3431,6 +3431,23 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   margin-bottom: 0.3rem;
 }
 
+.fn-ai-msg__meta {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  margin-bottom: 0.3rem;
+}
+
+.fn-ai-msg__meta .fn-ai-msg__role {
+  margin-bottom: 0;
+}
+
+.fn-ai-msg__time {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 .fn-ai-msg__body--plain {
   white-space: pre-wrap;
   word-break: break-word;
@@ -3564,6 +3581,13 @@ body.fn-resizing-note .fn-note-resize-handle::after {
 .fn-md-view td {
   border: 1px solid var(--border);
   padding: 0.25rem 0.55rem;
+}
+
+/* Wide formulas scroll inside their own block instead of stretching the chat bubble. */
+.fn-md-view .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.15rem 0;
 }
 
 .fn-md-view blockquote {

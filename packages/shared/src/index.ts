@@ -181,8 +181,10 @@ export interface AiAttachment {
 export interface AiMessage {
   role: 'user' | 'assistant';
   content: string;
-  /** ISO timestamp. */
+  /** ISO timestamp: send time for user messages, receive-complete time for assistant ones. */
   ts: string;
+  /** Assistant messages only: when the first streamed content (text or thinking) arrived. */
+  startedTs?: string;
   /** Attachments (user messages only). */
   attachments?: AiAttachment[];
 }
@@ -289,6 +291,9 @@ export {
   formatCapturedLogs,
 } from './logBuffer';
 export type { LogEntry, LogLevel } from './logBuffer';
+
+export { normalizeLatexDelimiters, extractMathSegments } from './latexDelimiters';
+export type { MathSegment } from './latexDelimiters';
 
 export function buildTree(notes: NoteNode[], parentId: string | null = null): TreeItem[] {
   return notes

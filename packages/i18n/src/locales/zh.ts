@@ -166,6 +166,12 @@ export const zh = {
       '连接 Anthropic 服务器超时（30 秒无响应）。请检查网络能否访问 api.anthropic.com——中国大陆直连不可达，需要可用的代理；也请确认模型 ID 拼写正确（如 claude-sonnet-5）。',
     timeoutStream: '回复流中断（90 秒未收到新内容），请求已停止，可重试。',
     thinkingDeep: '深度思考中…（模型已思考 {chars} 字，正文尚未开始输出）',
+    sentAt: '发送',
+    recvStartAt: '开始接收',
+    recvEndAt: '接收完毕',
+    patience: '仍在生成中，复杂问题可能需要几分钟，请耐心等待…（可随时点击"停止"）',
+    patienceThinking:
+      '仍在深度思考中（已思考 {chars} 字），复杂问题可能需要几分钟，请耐心等待…（可随时点击"停止"）',
     emptyMaxTokens:
       '本次回复没有产出正文：token 预算全部被模型的内部思考消耗完（stop_reason=max_tokens）。已将默认上限提高到 16384，请重试；若仍出现，可精简提示词或拆分为多轮提问。',
     truncatedMaxTokens: '回复因达到 token 上限被截断（stop_reason=max_tokens），以上内容可能不完整，可回复"继续"接着生成。',

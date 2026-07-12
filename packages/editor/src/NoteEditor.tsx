@@ -28,7 +28,7 @@ import { EnhancedCodeBlock } from './CodeBlockExtension';
 import { LineEditing } from './LineEditingExtension';
 import { FindReplace, findReplacePluginKey } from './FindReplaceExtension';
 import { serializeDocJsonToMarkdown } from './markdownSerialize';
-import { normalizeLatexDelimiters } from './latexDelimiters';
+import { normalizeLatexDelimiters } from '@fastnote/shared';
 import { preserveBlankLines } from './blankLines';
 import 'katex/dist/katex.min.css';
 

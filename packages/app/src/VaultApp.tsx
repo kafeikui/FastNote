@@ -219,9 +219,12 @@ export function VaultApp() {
   const [aiSessions, setAiSessions] = useState<AiSessionNode[]>([]);
   const [activeAiSessionId, setActiveAiSessionId] = useState<string | null>(null);
   // In-flight AI reply: streamed here (app level) so switching sessions/views never interrupts it.
-  const [aiRun, setAiRun] = useState<{ sessionId: string; text: string; thinkingChars?: number } | null>(
-    null,
-  );
+  const [aiRun, setAiRun] = useState<{
+    sessionId: string;
+    text: string;
+    thinkingChars?: number;
+    startedAt: number;
+  } | null>(null);
   const [aiRunError, setAiRunError] = useState<{ sessionId: string; message: string } | null>(null);
   const aiAbortRef = useRef<AbortController | null>(null);
   // Find/replace bar: id of the tab group it is open in (null = closed).
@@ -1890,11 +1893,18 @@ export function VaultApp() {
     const base = [...session.messages, userMsg];
     handleAiMessagesChange(sessionId, base);
     setAiRunError(null);
-    setAiRun({ sessionId, text: '' });
+    const startedAt = Date.now();
+    setAiRun({ sessionId, text: '', startedAt });
     const ac = new AbortController();
     aiAbortRef.current = ac;
     let acc = '';
     let thinking = 0;
+    // When the first streamed content (text or hidden thinking) arrived — shown in the reply's
+    // timestamp line alongside the completion time.
+    let receiveStartTs: string | null = null;
+    const markReceiveStart = () => {
+      if (!receiveStartTs) receiveStartTs = new Date().toISOString();
+    };
     try {
       const client = new AnthropicClient(aiSettings.apiKey);
       const result = await client.streamMessage({
@@ -1903,17 +1913,24 @@ export function VaultApp() {
         messages: base.map(aiMessageToApi),
         signal: ac.signal,
         onDelta: (delta) => {
+          markReceiveStart();
           acc += delta;
-          setAiRun({ sessionId, text: acc, thinkingChars: thinking });
+          setAiRun({ sessionId, text: acc, thinkingChars: thinking, startedAt });
         },
         onThinking: (total) => {
+          markReceiveStart();
           thinking = total;
-          setAiRun({ sessionId, text: acc, thinkingChars: total });
+          setAiRun({ sessionId, text: acc, thinkingChars: total, startedAt });
         },
       });
       const finalText = result.text || acc;
       if (finalText) {
-        appendAiMessage(sessionId, { role: 'assistant', content: finalText, ts: new Date().toISOString() });
+        appendAiMessage(sessionId, {
+          role: 'assistant',
+          content: finalText,
+          ts: new Date().toISOString(),
+          ...(receiveStartTs ? { startedTs: receiveStartTs } : {}),
+        });
         if (result.stopReason === 'max_tokens') {
           setAiRunError({ sessionId, message: t('aiWorkbench.truncatedMaxTokens') });
         }
@@ -1931,7 +1948,12 @@ export function VaultApp() {
     } catch (err) {
       // A user-initiated stop keeps whatever partial text already streamed in.
       if (acc) {
-        appendAiMessage(sessionId, { role: 'assistant', content: acc, ts: new Date().toISOString() });
+        appendAiMessage(sessionId, {
+          role: 'assistant',
+          content: acc,
+          ts: new Date().toISOString(),
+          ...(receiveStartTs ? { startedTs: receiveStartTs } : {}),
+        });
       }
       if (!(err instanceof DOMException && err.name === 'AbortError')) {
         const message =
@@ -3212,6 +3234,9 @@ export function VaultApp() {
               streamingText={aiRun && aiRun.sessionId === activeAiSession.id ? aiRun.text : null}
               streamingThinkingChars={
                 aiRun && aiRun.sessionId === activeAiSession.id ? (aiRun.thinkingChars ?? 0) : 0
+              }
+              streamingStartedAt={
+                aiRun && aiRun.sessionId === activeAiSession.id ? aiRun.startedAt : null
               }
               busy={aiRun !== null}
               error={aiRunError && aiRunError.sessionId === activeAiSession.id ? aiRunError.message : null}

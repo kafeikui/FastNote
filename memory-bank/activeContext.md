@@ -1,6 +1,6 @@
 # Active Context — FastNote
 
-## 当前工作焦点（最新会话，2026-07-12：表格数字格式/时间插入 + AI 附件/后台流式/消息管理，v0.6.1）
+## 当前工作焦点（最新会话，2026-07-12：表格数字格式/时间插入 + AI 附件/后台流式/消息管理 + 多格复制修复/桌面右键菜单 + AI 滚动/耐心提示/公式渲染/消息时间戳，当前 v0.8.0）
 
 用户一次性提出 7 项需求，全部完成（全仓 `pnpm -r typecheck` + `pnpm build` 通过，版本按约定 patch bump 到 **0.6.1**，未提交）：
 
@@ -16,6 +16,17 @@
 7. **消息删除/导出**：每条消息 hover 显示 ⇩（导出为 md，Blob 下载，文件名 `会话名-request/response-序号-时间戳.md`，含附件清单）和 ×（confirm 后删除，`handleAiDeleteMessage` 按 index 过滤并持久化）。
 
 **顺手修复**：`apps/desktop/tsconfig.json` 补上 `paths: { "@web/*": ["../web/src/*"] }`（对齐 vite.config 的 alias），解决 `pnpm -r typecheck` 里 desktop 唯一的 `@web/App` 报错——现在全仓 typecheck 全绿。
+
+**追加（同日第十一轮，AI 消息时间戳，v0.8.0 提交）**：request/response 都显示时间——shared 的 `AiMessage` 新增可选 `startedTs`（仅 assistant：首个流式内容——text 或 thinking——到达时刻；老数据无此字段自动只显示完成时间，向后兼容）。`VaultApp.runAiRequest` 用 `markReceiveStart()` 在 onDelta/onThinking 首次触发时记录，正常完成和中止保留部分文本两条 append 路径都带上。`AiWorkbench` 消息头改为 `.fn-ai-msg__meta`（角色 + `.fn-ai-msg__time`）：用户消息显示"发送 HH:mm:ss"，AI 消息显示"开始接收 X · 接收完毕 Y"（`formatMsgTime`：当天只显示时间，跨天显示完整日期时间，tooltip 是完整 ISO）。i18n：`aiWorkbench.sentAt/recvStartAt/recvEndAt`。版本按约定 git 提交 bump minor 至 **0.8.0**。
+
+**追加（同日第十轮，AI Workbench 3 项体验改进，v0.7.2）**：
+1. **消息流滚动不再强制吸底**：`AiWorkbench` 的自动滚动改为"粘性吸底"——`messagesRef` + `onScroll` 维护 `stickToBottomRef`（距底 <48px 视为在底部），流式更新只在用户本就在底部时才 `scrollIntoView`；往上翻阅历史时不再被拽回底部，滚回底部即重新吸附；切换 session（`session.id` 变化）时重置为吸底并滚到最新消息。
+2. **响应超 30s 显示耐心提示**：`aiRun` state 增加 `startedAt: number`（请求发出时刻，onDelta/onThinking 时保留），经 `streamingStartedAt` prop 传给 AiWorkbench；组件内 `patienceDue` state 由 setTimeout（按 `startedAt+30s-now` 计算剩余，中途进入 session 也能立即显示正确状态）驱动——正文迟迟不出时，"思考中…/深度思考中…" 替换为耐心文案（i18n `aiWorkbench.patience` / `patienceThinking`，后者带已思考字数），正文一旦开始输出即复位。
+3. **AI 回复渲染 LaTeX 公式**：`latexDelimiters.ts` 从 `packages/editor` **移到 `packages/shared`**（editor 依赖 ui，ui 不能反向依赖 editor；editor 的 NoteEditor 改从 shared 导入，无循环）。shared 新增导出 `extractMathSegments(markdown)`：先 `normalizeLatexDelimiters`（复用 \[..\]/\(..\)/裸括号/`%` 转义全套逻辑），再把代码块外的 `$$...$$`（display）和 `$...$`（inline，需命中 `INLINE_MATH_HINT`——含 LaTeX 命令或 `_`/`^` 上下标才算数学，"$5 and $10" 不受影响）抽成纯字母数字占位符 `FNMATH{n}MARK`（block 占位符前后加空行独立成段）。`MarkdownView`（ui 包，新增 katex 依赖 + katex.min.css 导入）流程改为：抽取 → marked 解析 → DOMPurify 消毒 → 占位符替换为 `katex.renderToString`（throwOnError:false，与编辑器同配置；katex 输出自身转义安全，替换用函数形式防 `$&` 模式误解释）。新 CSS `.fn-md-view .katex-display { overflow-x: auto }` 让超宽公式在气泡内水平滚动。已用 node 冒烟测试验证抽取正确（rNPV 求和公式、行内/货币混排均正确区分）。
+
+**追加（同日第九轮，多格复制修复 + 桌面右键菜单，v0.7.1）**：用户反馈多格复制仍只复制第一格、Mac 桌面版没有右键菜单。两个根因：
+1. **多格复制失效根因**：拖选跨格时焦点仍在起点格的 input 且其文本处于选中态，`handleGridCopy` 里"单元格内有文字选区则让位原生复制"的 guard 恰好命中 → 每次都走原生复制（只复制第一格）。修复：**删掉该 guard**——点击进入某格本来就会把选区收缩为单格（`buildRangeTsv` 返回 null 自动走原生），guard 纯属多余且有害。重构为 `buildRangeTsv()`（多格才返回 TSV）+ `handleGridCopy`（copy 事件路径）。另补 **keydown 兜底** `copyRangeViaExecCommand()`：通过行号/列头选中整行整列时焦点不在任何 input，Mod+C 根本不产生 copy 事件——容器 `handleContainerKeyDown` 检测 Mod+C 且 activeElement 非 input/textarea 时，用隐藏 textarea + `execCommand('copy')`（项目约定的免权限剪贴板写入路径）复制 TSV 并恢复焦点。
+2. **Mac 右键菜单**：Electron 窗口默认无右键菜单。`apps/desktop/electron/main.ts` 在 `web-contents-created` 里挂 `context-menu` 事件：可编辑元素弹 cut/copy/paste/selectAll（按 `editFlags` 置灰），非编辑区有选中文本时弹 copy。**role 型菜单项走 Electron 原生剪贴板，不经过渲染进程的 Clipboard API，因此不受"全拒权限"策略影响**；右键 copy 触发的 DOM copy 事件同样会被 `handleGridCopy` 拦截，多格选区下右键复制也得到 TSV。
 
 **追加（同日第八轮）**：表格**多格复制**——`.fn-table-wrap` 挂 `onCopy`（`handleGridCopy`）：选区跨多格时拦截复制，按制表符分列、换行分行写入 `e.clipboardData`（copy 事件内 setData 无需任何剪贴板权限，符合 Electron 全拒权限约定）；公式格复制为计算结果；单元格内有文字选区时让位于原生复制；与 `handleGridPaste` 的 tab 优先解析闭环（表内/Excel 双向往返）。帮助弹层加 `helpCopy` 说明。随 v0.7.0 提交（amend）。
 

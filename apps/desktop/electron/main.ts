@@ -1,4 +1,5 @@
-import { app, BrowserWindow, ipcMain, session, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, session, shell } from 'electron';
+import type { MenuItemConstructorOptions } from 'electron';
 import path from 'node:path';
 import { desktopSettings } from './settings';
 
@@ -33,6 +34,27 @@ app.on('web-contents-created', (_event, contents) => {
   });
 
   contents.on('will-attach-webview', (navEvent) => navEvent.preventDefault());
+
+  // Electron windows have no right-click menu by default. Build a standard edit
+  // menu from the context: cut/paste only in editable fields, copy whenever text
+  // is selected. Role-based items use Electron's native clipboard handling, so
+  // they work despite the renderer's clipboard permissions being denied above.
+  contents.on('context-menu', (_e, params) => {
+    const items: MenuItemConstructorOptions[] = [];
+    if (params.isEditable) {
+      items.push(
+        { role: 'cut', enabled: params.editFlags.canCut },
+        { role: 'copy', enabled: params.editFlags.canCopy },
+        { role: 'paste', enabled: params.editFlags.canPaste },
+        { type: 'separator' },
+        { role: 'selectAll', enabled: params.editFlags.canSelectAll },
+      );
+    } else if (params.selectionText.trim()) {
+      items.push({ role: 'copy', enabled: params.editFlags.canCopy });
+    }
+    if (items.length === 0) return;
+    Menu.buildFromTemplate(items).popup();
+  });
 });
 
 function fixMacOsHitTest(win: BrowserWindow) {
