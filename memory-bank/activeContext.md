@@ -1,6 +1,43 @@
 # Active Context — FastNote
 
-## 当前工作焦点（最新会话，2026-07-10：AI Workbench + 跨库传输 + 查找替换 + prompt 修复）
+## 当前工作焦点（最新会话，2026-07-12：表格数字格式/时间插入 + AI 附件/后台流式/消息管理，v0.6.1）
+
+用户一次性提出 7 项需求，全部完成（全仓 `pnpm -r typecheck` + `pnpm build` 通过，版本按约定 patch bump 到 **0.6.1**，未提交）：
+
+**表格 4 项：**
+1. **粘贴不再按逗号分列**：`fill.ts` 的 `parsePasteGrid` 删除逗号分支——现实数据（"1,234.56"、含逗号的句子）被逗号切碎的伤害远大于收益。现在只认 tab（Excel/Sheets）→ 连续空白 两级回退。
+2. **公式支持千分位逗号数字**：`formula.ts` 新增导出 `parseNumericValue(raw)`——普通 `Number()` 失败后，用严格 3 位分组正则 `^-?\d{1,3}(,\d{3})+(\.\d+)?$` 识别 "1,000" 形式（防止 "1,2" 这类文本被误判），`resolveCellOrNull` 改用它，所以单元格引用、SUM/AVERAGE 等聚合、选区统计栏全部自动受益。注意**公式源码内**的逗号仍是函数参数分隔符，不受影响。
+3. **列数字格式**：shared 新增 `TableColumnFormat { kind: 'number'|'currency'; decimals: 0-6; symbol? }`，挂在 `TableColumn.format`（可选，向后兼容）。utils 新增 `setColumnFormat`；formula 新增 `formatColumnNumber`（en-US 千分位 + 固定小数位，currency 加符号前缀，默认 `$`）。工具栏新增"数字格式"下拉（原始值/数字/货币）+ 小数位下拉 + 货币符号输入框（仅 currency 时显示），作用于**选区覆盖的列**（复用 `formatTargets` 推导 `formatColIds`）。显示层：原始值不变，仅显示时格式化——`TableCellContent` 新增 `formattedIdle` prop，非编辑态显示格式化值、聚焦编辑时切回原始值（与公式单元格同一套 editing 机制）；公式结果同样按列格式显示。
+4. **一键插入本地时间**：工具栏 🕒 按钮，`formatLocalTime()` 生成 `YYYY-MM-DD HH:mm:ss`（本地时区），追加到焦点单元格现有内容后（与插入附件同套 focusCell 逻辑，无焦点时 alert 提示）。
+
+**AI Workbench 3 项：**
+5. **请求附件（图片/PDF/doc/docx/文本）**：shared 新增 `AiAttachment { kind: 'image'|'pdf'|'text', dataBase64?/text? }`，`AiMessage.attachments?`。`packages/ai` 新增 `attachments.ts`（新依赖 **fflate**，纯本地解压）：图片(png/jpeg/gif/webp)/PDF 转 base64 原样发 API 的 image/document content block；**docx** 用 fflate 解 zip 后从 `word/document.xml` 提取 `<w:t>` 文本（按 `</w:p>` 分段、处理 tab/br/实体）；**旧版 .doc** 用 UTF-16LE 可打印字符 run 扫描的启发式提取（ASCII+CJK，run≥16 才保留，尽力而为）；其余按 UTF-8 严格解码当文本。8MB 上限，`AiAttachmentError(code)` 映射为本地化报错。`AnthropicClient` 的 `AiChatMessage.content` 扩展为 `string | AiContentBlock[]`（text/image/document）。附件随消息加密持久化，重发历史时 `aiMessageToApi` 重建 content blocks（文本附件内联为 `[Attachment: name]` 前缀的 text block）。composer 加 📎 + 隐藏 file input + 待发附件 chips（可移除）；消息气泡显示附件 chips。
+6. **切 session 流式不中断**：整个 in-flight 请求从 AiWorkbench **上提到 VaultApp**——`aiRun: {sessionId, text}` state + `aiAbortRef`，`runAiRequest` 在 app 层跑完整个 stream，切换会话/切回笔记视图组件卸载都不 abort；回复完成后 `appendAiMessage`（函数式 set，按 sessionId 追加到**当前**消息列表，避免覆盖流式期间的其它编辑）落到所属会话。AiWorkbench 变成纯展示组件：接收 `streamingText`（仅本会话）/`busy`（全局）/`error`（按会话过滤），同一时间只允许一个 in-flight run（其它会话 composer 禁用 + "其它会话正在生成回复"提示）。上锁时 abort + 清空。错误状态 `aiRunError` 也带 sessionId，显示在对应会话里。
+7. **消息删除/导出**：每条消息 hover 显示 ⇩（导出为 md，Blob 下载，文件名 `会话名-request/response-序号-时间戳.md`，含附件清单）和 ×（confirm 后删除，`handleAiDeleteMessage` 按 index 过滤并持久化）。
+
+**顺手修复**：`apps/desktop/tsconfig.json` 补上 `paths: { "@web/*": ["../web/src/*"] }`（对齐 vite.config 的 alias），解决 `pnpm -r typecheck` 里 desktop 唯一的 `@web/App` 报错——现在全仓 typecheck 全绿。
+
+**追加（同日第八轮）**：表格**多格复制**——`.fn-table-wrap` 挂 `onCopy`（`handleGridCopy`）：选区跨多格时拦截复制，按制表符分列、换行分行写入 `e.clipboardData`（copy 事件内 setData 无需任何剪贴板权限，符合 Electron 全拒权限约定）；公式格复制为计算结果；单元格内有文字选区时让位于原生复制；与 `handleGridPaste` 的 tab 优先解析闭环（表内/Excel 双向往返）。帮助弹层加 `helpCopy` 说明。随 v0.7.0 提交（amend）。
+
+**追加（同日第七轮）**：AI `max_tokens` 设置化——shared 新增 `AI_MAX_TOKENS_MIN/LIMIT/DEFAULT`（1024 / **128000** / 16384），`AiSettings` 加可选 `maxTokens`；SettingsModal AI 区新增 number 输入（保存时钳制到范围内，非法值回落默认）；`VaultApp.runAiRequest` 把 `aiSettings.maxTokens` 传给 `streamMessage`（未设置时 ai 包内回落 `AI_MAX_TOKENS_DEFAULT`）。hint 明确说明"内部思考也计入预算"。老库已存的 AiSettings 无 maxTokens 字段，自动走默认，向后兼容。
+
+**追加（同日第六轮，2 个小调整）**：① 笔记/表格内容区最大可调宽度 `NOTE_WIDTH_MAX` 1400 → **2400**（`packages/api`，min/default 不变，已存的超范围值由 load/save 的 clamp 自动处理）；② 表格统计栏文字垂直位置：加 `align-items: center` + `line-height: 1.4`，padding 改为上 0.25rem/下 0.5rem 让文字略偏上，不再挤在底部。
+
+**追加（同日第五轮，AI 空回复根因确认 + 思考流支持）**：用户贴回日志：HTTP 200、1.1s 首字节、流跑 46s 正常结束但 **0 chars**——不是网络，是**推理模型的隐藏思考（thinking_delta）耗尽了 4096 的 max_tokens，正文一个字没输出（stop_reason=max_tokens），而客户端只解析 text_delta、静默结束**。复杂提示词思考长必触发，简单提示词正常，与用户现象完全吻合。修复（`packages/ai` + `VaultApp` + `AiWorkbench`）：① `DEFAULT_MAX_TOKENS` 4096 → **16384**；② 流解析新增 `thinking_delta`（`onThinking(totalChars)` 回调）和 `message_delta.stop_reason` 捕获；③ `streamMessage` 返回值从 string 改为 **`StreamMessageResult { text, stopReason, thinkingChars }`**（破坏性签名变更，唯一调用方 VaultApp 已同步）；④ UI：思考期间显示"深度思考中…（已思考 N 字）"（`aiRun.thinkingChars` → `streamingThinkingChars` prop）替代静态"思考中…"；⑤ 空正文时按 stop_reason 显示明确报错（`aiWorkbench.emptyMaxTokens/emptyReply`），正文被截断时提示可回复"继续"（`truncatedMaxTokens`）；⑥ done 日志追加 thinking 字数和 stop_reason。**内置模型列表按用户指定更新**：claude-sonnet-5（默认）/ claude-fable-5 / claude-opus-4-8 / claude-haiku-4-5-20251001。
+
+**追加（同日第四轮，AI 请求"卡住"诊断与加固）**：用户报告用长中文提示词请求 "claude-sonnet-5" 时一直卡住，怀疑转义字符。结论：**不是转义问题**——请求体走 `JSON.stringify`，任何字符都被标准转义；SSE 解析按真实 `\n` 切分，也无问题。真因有二：① 模型 ID `claude-sonnet-5` 不存在（正确为 `claude-sonnet-4-5`），但这只会得到 404 报错不会挂起；② **fetch 无超时**——`api.anthropic.com` 从中国大陆直连不可达，TCP 挂起期间界面永远停在"思考中…"。加固：`AnthropicClient.streamMessage` 加 watchdog（自建 AbortController 与外部 signal 联动）：**连接超时 30s**（未收到响应头）+ **流空闲超时 90s**（回复中断），超时抛类型化 `AnthropicTimeoutError(phase)`，`VaultApp` 映射为本地化提示（`aiWorkbench.timeoutConnect/timeoutStream`，中文文案明确提示大陆需代理 + 检查模型 ID）；请求全生命周期打 `[FastNote] ai: ...` console 日志（start/headers/首字节/完成/超时），配合内置日志查看器可直接定位卡在哪个阶段。
+
+**追加（同日第三轮，用户反馈 2 项）**：
+1. **表格外部垂直滚动条取消 + 附件栏改弹窗**：表格分支的 `.fn-tab-group__scroll` 加修饰类 `--table`（`overflow-y: hidden` + flex 列），`.fn-note`/`.fn-table-editor` 链式 flex，`.fn-table-wrap` 改 `flex: 0 1 auto; min-height: 0; max-height: none`——小表格保持自然高度、高表格在 wrap 内部滚动（**唯一垂直滚动容器仍是 wrap**，sticky 表头/固定首列/固定水平滚动条全部不受影响且更稳）。表格下方的内联 `NoteAttachments` 面板移除，表头工具区新增"📎 附件 (n)"按钮 → `fn-modal-backdrop` 弹窗（`.fn-attach-modal`，640px）内渲染同一个 `renderAttachmentsPanel`（上传/下载/编辑/删除/插入单元格全保留）；`showTableAttachments` state，上锁时复位。
+2. **表格帮助信息收进 ? 按钮**：工具栏原来平铺的公式提示 + F4 重复提示两个 span 移除，改为 `?` 按钮（复用 `fn-table-palette-wrap` 下拉容器模式）弹出 `.fn-table-help-pop`：公式（=开头）、F4 重复行列操作、填充柄、智能粘贴四条提示；新 i18n `tableEditor.help/helpPaste`，`fillHandleTooltip` 文案顺带改得更自明。
+
+**追加（同日第二轮，用户反馈 2 项）**：
+1. **表格统计栏固定显示**：统计栏（计数/求和/平均值）此前按需渲染，出现/消失会把 `.fn-table-wrap` 上下顶动，导致本应固定位置的水平滚动条跳动。改为**始终渲染**（无选区时显示灰色 placeholder 提示 `tableEditor.stats.placeholder`），CSS 改 `flex-wrap: nowrap + white-space: nowrap + overflow: hidden` 保证恒定单行高度——布局从此不随选区变化。
+2. **`dist:mac` 打包失败修复**：electron-builder 25 在打包前默认跑 `@electron/rebuild`，它会遍历 pnpm 的 hoisted 目录 `node_modules/.pnpm/node_modules/`，那里残留着约 20 个**悬空 symlink**（`@types/better-sqlite3`、`better-sqlite3`、`electron-rebuild`、`prebuild-install` 等——某次依赖变更后 pnpm 留下的陈旧链接，指向已不存在的 `.pnpm/xxx@ver` 目录），`stat` 悬空链接直接 ENOENT 中断打包。修复：`apps/desktop` 的 build 配置加 **`"npmRebuild": false`**——桌面端 production 依赖零原生模块（React + workspace 包全是纯 JS），rebuild 步骤本来就是空转，关掉后既绕开悬空链接又加快打包。已实际跑通 `pack` 和 `dist:mac`（产出 `FastNote-0.6.1-arm64.dmg`）。彻底清理悬空链接可另行 `rm -rf node_modules && pnpm install`，但非必需。
+
+新 i18n key：`tableEditor.insertNow/numberFormat*/decimals*/currencySymbol`、`aiWorkbench.attach*/removeAttachment/attachmentsHeading/busyElsewhere/exportMessage/deleteMessage/confirmDeleteMessage`（中英双语）。新样式：`.fn-table-fmt__numfmt/decimals/symbol`、`.fn-ai-msg__actions/attachments`、`.fn-ai-attachment-chip`、`.fn-ai-composer__attachments/buttons`、`.fn-ai-workbench__busy-hint`。
+
+## 上一轮工作焦点（2026-07-10：AI Workbench + 跨库传输 + 查找替换 + prompt 修复）
 
 按用户确认的实施计划一次性完成四大功能（全部通过全仓 `pnpm build`；顺手修掉了 `packages/ui` 长期存在的 Tiptap `ChainedCommands` typecheck 失败——`EditorToolbar.tsx` 加三行 `import type {} from '@tiptap/starter-kit'/'@tiptap/extension-link'/'@tiptap/extension-mathematics'`（并加为 ui 的 devDependencies），把各扩展包里 `declare module '@tiptap/core'` 的命令类型增强拉进编译单元；注意必须写在源文件里而不是独立 .d.ts，因为 `packages/table` typecheck 会跨包编译 ui 源码、不读 ui 的 tsconfig include。`pnpm -r typecheck` 现在仅剩 `apps/desktop` 的 `@web/App` 别名既有问题）：
 

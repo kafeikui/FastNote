@@ -19,6 +19,8 @@ export const ATTACHMENT_DRAG_MIME = 'application/x-fastnote-table-attachment';
 interface TableCellContentProps {
   value: string;
   displayValue: string;
+  /** When true, show `displayValue` (e.g. a number-formatted value) while the cell is not being edited. */
+  formattedIdle?: boolean;
   isFormula: boolean;
   hasError?: boolean;
   attachments: NoteAttachment[];
@@ -44,6 +46,7 @@ interface TableCellContentProps {
 function TableCellContent({
   value,
   displayValue,
+  formattedIdle,
   isFormula,
   hasError,
   attachments,
@@ -178,7 +181,7 @@ function TableCellContent({
             key={`text-${index}`}
             className={isFormula ? 'fn-table-cell__text fn-table-cell__formula-input' : 'fn-table-cell__text'}
             style={textStyle}
-            value={isFormula && !editing ? displayValue : seg.text}
+            value={(isFormula || formattedIdle) && !editing ? displayValue : seg.text}
             onFocus={() => {
               setEditing(true);
               onFocus();

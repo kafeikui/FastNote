@@ -1,4 +1,4 @@
-import type { TableCellStyle, TableColumn, TableDocument, TableRow } from '@fastnote/shared';
+import type { TableCellStyle, TableColumn, TableColumnFormat, TableDocument, TableRow } from '@fastnote/shared';
 import { TABLE_FILE_MAGIC, TABLE_FILE_VERSION, expandAttachmentRefsForExport } from '@fastnote/shared';
 import {
   decryptString,
@@ -347,6 +347,25 @@ export const MIN_COL_WIDTH = 48;
 export const MAX_COL_WIDTH = 1200;
 export const MIN_ROW_HEIGHT = 26;
 export const MAX_ROW_HEIGHT = 600;
+
+/** Sets (or clears with undefined) a column's numeric display format. */
+export function setColumnFormat(
+  doc: TableDocument,
+  columnId: string,
+  format: TableColumnFormat | undefined,
+): TableDocument {
+  return {
+    ...doc,
+    columns: doc.columns.map((c) => {
+      if (c.id !== columnId) return c;
+      if (!format) {
+        const { format: _omit, ...rest } = c;
+        return rest;
+      }
+      return { ...c, format };
+    }),
+  };
+}
 
 export function setColumnWidth(doc: TableDocument, columnId: string, width: number): TableDocument {
   const clamped = Math.round(Math.min(MAX_COL_WIDTH, Math.max(MIN_COL_WIDTH, width)));

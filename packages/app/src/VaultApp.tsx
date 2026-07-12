@@ -74,10 +74,19 @@ import {
   unwrapKey,
 } from '@fastnote/crypto';
 import { NoteEditor, flushEditorMarkdown } from '@fastnote/editor';
-import { AnthropicClient, CLAUDE_MODELS, DEFAULT_CLAUDE_MODEL } from '@fastnote/ai';
+import {
+  AnthropicClient,
+  AnthropicTimeoutError,
+  CLAUDE_MODELS,
+  DEFAULT_CLAUDE_MODEL,
+  AiAttachmentError,
+  prepareAiAttachment,
+  type AiChatMessage,
+  type AiContentBlock,
+} from '@fastnote/ai';
 import { IMClient, verifyExchangeKeypair } from '@fastnote/im';
 import { NoteSearchIndex } from '@fastnote/search';
-import type { ChatMessage, EditorMode, NodeType, NoteAttachment, NoteNode, UserSession, TreeDropPosition, ChatAttachmentRef, ChatWireAttachment, TabGroupState, ShortcutBindings, AiSettings, AiSessionNode, AiMessage, FindReplaceController } from '@fastnote/shared';
+import type { ChatMessage, EditorMode, NodeType, NoteAttachment, NoteNode, UserSession, TreeDropPosition, ChatAttachmentRef, ChatWireAttachment, TabGroupState, ShortcutBindings, AiSettings, AiSessionNode, AiMessage, AiAttachment, FindReplaceController } from '@fastnote/shared';
 import { META_KEYS, downloadBlob, isEditableContentNode, computeTreeMove, applySortMode, buildAttachmentMarkdownRef, buildTree, decodeChatWire, toStoredPayload, storedToChatMessage, serverUrlNeedsReload, matchesShortcut, expandAttachmentRefsForExport, installConsoleCapture, getCapturedLogs, clearCapturedLogs, formatCapturedLogs } from '@fastnote/shared';
 import type { TreeItem } from '@fastnote/shared';
 import type { TreeSortMode } from '@fastnote/shared';
@@ -209,8 +218,16 @@ export function VaultApp() {
   const [aiSettings, setAiSettings] = useState<AiSettings | null>(null);
   const [aiSessions, setAiSessions] = useState<AiSessionNode[]>([]);
   const [activeAiSessionId, setActiveAiSessionId] = useState<string | null>(null);
+  // In-flight AI reply: streamed here (app level) so switching sessions/views never interrupts it.
+  const [aiRun, setAiRun] = useState<{ sessionId: string; text: string; thinkingChars?: number } | null>(
+    null,
+  );
+  const [aiRunError, setAiRunError] = useState<{ sessionId: string; message: string } | null>(null);
+  const aiAbortRef = useRef<AbortController | null>(null);
   // Find/replace bar: id of the tab group it is open in (null = closed).
   const [findBarGroupId, setFindBarGroupId] = useState<string | null>(null);
+  // Attachment manager modal for the focused table (notes keep their inline panel).
+  const [showTableAttachments, setShowTableAttachments] = useState(false);
   const findReplaceByGroupRef = useRef<Record<string, FindReplaceController | null>>({});
   // Cross-vault transfer: ids of the tree nodes being transferred (null = dialog closed).
   const [transferIds, setTransferIds] = useState<string[] | null>(null);
@@ -1155,7 +1172,12 @@ export function VaultApp() {
       setAiSettings(null);
       setAiSessions([]);
       setActiveAiSessionId(null);
+      // Locking must not leave an AI stream running against a wiped session list.
+      aiAbortRef.current?.abort();
+      setAiRun(null);
+      setAiRunError(null);
       setFindBarGroupId(null);
+      setShowTableAttachments(false);
       setFormulaEdit(null);
     } finally {
       setIsLocking(false);
@@ -1821,19 +1843,140 @@ export function VaultApp() {
     );
   };
 
-  const handleAiSend = async (
-    messages: AiMessage[],
-    onDelta: (text: string) => void,
-    signal: AbortSignal,
-  ): Promise<string> => {
-    if (!aiSettings?.apiKey) throw new Error(t('aiWorkbench.notConfigured'));
-    const client = new AnthropicClient(aiSettings.apiKey);
-    return client.streamMessage({
-      model: aiSettings.model || DEFAULT_CLAUDE_MODEL,
-      messages: messages.map((m) => ({ role: m.role, content: m.content })),
-      signal,
-      onDelta,
-    });
+  /** Appends against the *current* session state so edits made while streaming aren't clobbered. */
+  const appendAiMessage = (sessionId: string, msg: AiMessage) => {
+    setAiSessions((prev) =>
+      prev.map((s) => {
+        if (s.id !== sessionId) return s;
+        const next = { ...s, messages: [...s.messages, msg], updatedAt: new Date().toISOString() };
+        persistAiSession(next);
+        return next;
+      }),
+    );
+  };
+
+  /** Turns a stored AiMessage into API content blocks (attachments become image/document/text blocks). */
+  const aiMessageToApi = (m: AiMessage): AiChatMessage => {
+    if (!m.attachments || m.attachments.length === 0) return { role: m.role, content: m.content };
+    const blocks: AiContentBlock[] = [];
+    for (const a of m.attachments) {
+      if (a.kind === 'image' && a.dataBase64) {
+        blocks.push({ type: 'image', source: { type: 'base64', media_type: a.mediaType, data: a.dataBase64 } });
+      } else if (a.kind === 'pdf' && a.dataBase64) {
+        blocks.push({
+          type: 'document',
+          source: { type: 'base64', media_type: 'application/pdf', data: a.dataBase64 },
+        });
+      } else if (a.text) {
+        blocks.push({ type: 'text', text: `[Attachment: ${a.name}]\n${a.text}` });
+      }
+    }
+    if (m.content) blocks.push({ type: 'text', text: m.content });
+    return { role: m.role, content: blocks };
+  };
+
+  // The in-flight AI run lives here (not in AiWorkbench) so that switching sessions or views
+  // never aborts a streaming reply — it finishes in the background and lands in its session.
+  const runAiRequest = async (sessionId: string, text: string, attachments: AiAttachment[]) => {
+    if (!aiSettings?.apiKey || aiAbortRef.current) return;
+    const session = aiSessions.find((s) => s.id === sessionId && s.kind === 'session');
+    if (!session) return;
+    const userMsg: AiMessage = {
+      role: 'user',
+      content: text,
+      ts: new Date().toISOString(),
+      ...(attachments.length > 0 ? { attachments } : {}),
+    };
+    const base = [...session.messages, userMsg];
+    handleAiMessagesChange(sessionId, base);
+    setAiRunError(null);
+    setAiRun({ sessionId, text: '' });
+    const ac = new AbortController();
+    aiAbortRef.current = ac;
+    let acc = '';
+    let thinking = 0;
+    try {
+      const client = new AnthropicClient(aiSettings.apiKey);
+      const result = await client.streamMessage({
+        model: aiSettings.model || DEFAULT_CLAUDE_MODEL,
+        maxTokens: aiSettings.maxTokens,
+        messages: base.map(aiMessageToApi),
+        signal: ac.signal,
+        onDelta: (delta) => {
+          acc += delta;
+          setAiRun({ sessionId, text: acc, thinkingChars: thinking });
+        },
+        onThinking: (total) => {
+          thinking = total;
+          setAiRun({ sessionId, text: acc, thinkingChars: total });
+        },
+      });
+      const finalText = result.text || acc;
+      if (finalText) {
+        appendAiMessage(sessionId, { role: 'assistant', content: finalText, ts: new Date().toISOString() });
+        if (result.stopReason === 'max_tokens') {
+          setAiRunError({ sessionId, message: t('aiWorkbench.truncatedMaxTokens') });
+        }
+      } else {
+        // Stream finished but produced no visible text — typically the whole token budget was
+        // consumed by hidden thinking (stop_reason=max_tokens). Surface it instead of silence.
+        setAiRunError({
+          sessionId,
+          message:
+            result.stopReason === 'max_tokens'
+              ? t('aiWorkbench.emptyMaxTokens')
+              : t('aiWorkbench.emptyReply', { reason: result.stopReason ?? 'unknown' }),
+        });
+      }
+    } catch (err) {
+      // A user-initiated stop keeps whatever partial text already streamed in.
+      if (acc) {
+        appendAiMessage(sessionId, { role: 'assistant', content: acc, ts: new Date().toISOString() });
+      }
+      if (!(err instanceof DOMException && err.name === 'AbortError')) {
+        const message =
+          err instanceof AnthropicTimeoutError
+            ? t(err.phase === 'connect' ? 'aiWorkbench.timeoutConnect' : 'aiWorkbench.timeoutStream')
+            : err instanceof Error
+              ? err.message
+              : String(err);
+        setAiRunError({ sessionId, message });
+      }
+    } finally {
+      setAiRun(null);
+      aiAbortRef.current = null;
+    }
+  };
+
+  const handleAiStop = () => {
+    aiAbortRef.current?.abort();
+  };
+
+  const handleAiDeleteMessage = (sessionId: string, index: number) => {
+    const session = aiSessions.find((s) => s.id === sessionId);
+    if (!session) return;
+    handleAiMessagesChange(
+      sessionId,
+      session.messages.filter((_, i) => i !== index),
+    );
+  };
+
+  /** Wraps prepareAiAttachment to surface localized error messages in the workbench UI. */
+  const handlePrepareAiAttachment = async (file: File): Promise<AiAttachment> => {
+    try {
+      return await prepareAiAttachment(file);
+    } catch (err) {
+      if (err instanceof AiAttachmentError) {
+        const key =
+          err.code === 'tooLarge'
+            ? 'aiWorkbench.attachTooLarge'
+            : err.code === 'emptyDoc'
+              ? 'aiWorkbench.attachEmpty'
+              : 'aiWorkbench.attachUnsupported';
+        throw new Error(t(key, { name: err.fileName }));
+      }
+      throw err;
+    }
   };
 
   const activeAiSession =
@@ -2671,10 +2814,29 @@ export function VaultApp() {
                   }}
                 />
               </label>
+              {isFocused && (
+                <button type="button" onClick={() => setShowTableAttachments(true)}>
+                  📎 {t('vaultApp.attachmentsBtn')}
+                  {attachments.length > 0 ? ` (${attachments.length})` : ''}
+                </button>
+              )}
                 </div>
               </div>
             </div>
-            <div className="fn-tab-group__scroll">
+            {isFocused && showTableAttachments && (
+              <div className="fn-modal-backdrop" onClick={() => setShowTableAttachments(false)}>
+                <div className="fn-modal fn-attach-modal" onClick={(e) => e.stopPropagation()}>
+                  <h2>{t('vaultApp.attachmentsBtn')}</h2>
+                  {renderAttachmentsPanel(content.id, true)}
+                  <div className="fn-modal__actions">
+                    <button type="button" onClick={() => setShowTableAttachments(false)}>
+                      {t('common.close')}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+            <div className="fn-tab-group__scroll fn-tab-group__scroll--table">
               <div className="fn-note" style={{ maxWidth: noteWidth }}>
                 {renderNoteResizeHandle()}
                 <TableEditor
@@ -2695,7 +2857,6 @@ export function VaultApp() {
                   undoShortcut={shortcuts.tableUndo}
                   redoShortcut={shortcuts.tableRedo}
                 />
-                {isFocused && renderAttachmentsPanel(content.id, true)}
               </div>
             </div>
           </>
@@ -3048,8 +3209,16 @@ export function VaultApp() {
             <AiWorkbench
               session={activeAiSession}
               configured={!!aiSettings?.apiKey}
-              sendMessage={handleAiSend}
-              onMessagesChange={handleAiMessagesChange}
+              streamingText={aiRun && aiRun.sessionId === activeAiSession.id ? aiRun.text : null}
+              streamingThinkingChars={
+                aiRun && aiRun.sessionId === activeAiSession.id ? (aiRun.thinkingChars ?? 0) : 0
+              }
+              busy={aiRun !== null}
+              error={aiRunError && aiRunError.sessionId === activeAiSession.id ? aiRunError.message : null}
+              onSend={(text, attachments) => void runAiRequest(activeAiSession.id, text, attachments)}
+              onStop={handleAiStop}
+              onDeleteMessage={(index) => handleAiDeleteMessage(activeAiSession.id, index)}
+              prepareAttachment={handlePrepareAiAttachment}
               onOpenSettings={() => setShowSettings(true)}
             />
           ) : (

@@ -8,7 +8,10 @@
     "skipLibCheck": true,
     "jsx": "react-jsx",
     "noEmit": true,
-    "isolatedModules": true
+    "isolatedModules": true,
+    "paths": {
+      "@web/*": ["../web/src/*"]
+    }
   },
   "include": ["src"]
 }

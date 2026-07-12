@@ -2,7 +2,14 @@ import { useState, useEffect, type KeyboardEvent as ReactKeyboardEvent } from 'r
 import type { ChatNotificationSettings, ChatSoundId, UiThemeId } from '@fastnote/api';
 import { CHAT_SOUND_IDS, UI_THEMES } from '@fastnote/api';
 import type { AiSettings, ShortcutAction, ShortcutBindings } from '@fastnote/shared';
-import { DEFAULT_SHORTCUTS, formatShortcutBinding, shortcutBindingFromEvent } from '@fastnote/shared';
+import {
+  AI_MAX_TOKENS_DEFAULT,
+  AI_MAX_TOKENS_LIMIT,
+  AI_MAX_TOKENS_MIN,
+  DEFAULT_SHORTCUTS,
+  formatShortcutBinding,
+  shortcutBindingFromEvent,
+} from '@fastnote/shared';
 import { LOCALES, LOCALE_LABELS, useT, type Locale } from '@fastnote/i18n';
 import { chatSoundLabel, playChatNotificationSound } from './chatNotification';
 
@@ -102,6 +109,9 @@ export function SettingsModal({
   const isCustomModel = !!initialModel && !aiModels.some((m) => m.id === initialModel);
   const [aiModelDraft, setAiModelDraft] = useState(isCustomModel ? 'custom' : initialModel);
   const [aiCustomModelDraft, setAiCustomModelDraft] = useState(isCustomModel ? initialModel : '');
+  const [aiMaxTokensDraft, setAiMaxTokensDraft] = useState(
+    String(aiSettings?.maxTokens ?? AI_MAX_TOKENS_DEFAULT),
+  );
   const [aiSaved, setAiSaved] = useState(false);
 
   const SHORTCUT_LABELS: Record<ShortcutAction, string> = {
@@ -335,6 +345,27 @@ export function SettingsModal({
               />
             </label>
           )}
+          <label className="fn-field">
+            <span>{t('settingsModal.ai.maxTokensLabel')}</span>
+            <input
+              type="number"
+              min={AI_MAX_TOKENS_MIN}
+              max={AI_MAX_TOKENS_LIMIT}
+              step={1024}
+              value={aiMaxTokensDraft}
+              onChange={(e) => {
+                setAiMaxTokensDraft(e.target.value);
+                setAiSaved(false);
+              }}
+            />
+          </label>
+          <p className="fn-field__hint">
+            {t('settingsModal.ai.maxTokensHint', {
+              min: String(AI_MAX_TOKENS_MIN),
+              max: String(AI_MAX_TOKENS_LIMIT),
+              def: String(AI_MAX_TOKENS_DEFAULT),
+            })}
+          </p>
           <p className="fn-field__hint">{t('settingsModal.ai.hint')}</p>
           <div className="fn-modal__actions">
             <button
@@ -342,7 +373,12 @@ export function SettingsModal({
               disabled={aiModelDraft === 'custom' && !aiCustomModelDraft.trim()}
               onClick={() => {
                 const model = aiModelDraft === 'custom' ? aiCustomModelDraft.trim() : aiModelDraft;
-                onAiSettingsSave({ apiKey: aiKeyDraft.trim(), model });
+                const parsed = Math.round(Number(aiMaxTokensDraft));
+                const maxTokens = Number.isFinite(parsed)
+                  ? Math.min(AI_MAX_TOKENS_LIMIT, Math.max(AI_MAX_TOKENS_MIN, parsed))
+                  : AI_MAX_TOKENS_DEFAULT;
+                setAiMaxTokensDraft(String(maxTokens));
+                onAiSettingsSave({ apiKey: aiKeyDraft.trim(), model, maxTokens });
                 setAiSaved(true);
               }}
             >

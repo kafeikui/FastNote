@@ -119,7 +119,9 @@ export function applyVerticalFill(
 
 /**
  * Parses clipboard text into a 2D grid. Tab is the primary delimiter (Excel/Sheets); falls back
- * to comma, then to runs of whitespace, so plain space-separated text pastes into columns too.
+ * to runs of whitespace, so plain space-separated text pastes into columns too. Commas are
+ * deliberately NOT treated as delimiters: real-world values ("1,234.56", "Hello, world") contain
+ * them far too often, so comma-splitting mangled pastes more than it helped.
  * Returns null when the text is effectively a single value (caller keeps default paste behavior).
  */
 export function parsePasteGrid(text: string): string[][] | null {
@@ -131,8 +133,6 @@ export function parsePasteGrid(text: string): string[][] | null {
   let splitLine: (line: string) => string[];
   if (lines.some((l) => l.includes('\t'))) {
     splitLine = (l) => l.split('\t');
-  } else if (lines.some((l) => l.includes(','))) {
-    splitLine = (l) => l.split(',');
   } else {
     splitLine = (l) => (l.trim() === '' ? [''] : l.trim().split(/\s+/));
   }

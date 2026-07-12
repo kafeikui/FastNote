@@ -543,7 +543,8 @@ export function saveUiTheme(theme: UiThemeId): void {
 }
 
 export const NOTE_WIDTH_MIN = 480;
-export const NOTE_WIDTH_MAX = 1400;
+// Generous cap so wide tables / split-view on large monitors can use the full pane width.
+export const NOTE_WIDTH_MAX = 2400;
 export const NOTE_WIDTH_DEFAULT = 820;
 
 const NOTE_WIDTH_KEY = "fastnote_note_width";

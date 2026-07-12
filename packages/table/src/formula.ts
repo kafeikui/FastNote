@@ -1,6 +1,32 @@
-import type { TableDocument } from '@fastnote/shared';
+import type { TableColumnFormat, TableDocument } from '@fastnote/shared';
 
 export const FORMULA_PREFIX = '=';
+
+/**
+ * Parses a cell value as a number, accepting comma thousand separators ("1,234.56"). The comma
+ * form is only accepted with strict 3-digit grouping so that genuinely textual values like
+ * "1,2" or "a,b" don't silently become numbers.
+ */
+export function parseNumericValue(raw: string): number | null {
+  const s = raw.trim();
+  if (!s) return null;
+  const plain = Number(s);
+  if (!Number.isNaN(plain)) return plain;
+  if (/^-?\d{1,3}(,\d{3})+(\.\d+)?$/.test(s)) {
+    return Number(s.replace(/,/g, ''));
+  }
+  return null;
+}
+
+/** Formats a numeric value according to a column's number format (thousand separators + fixed decimals). */
+export function formatColumnNumber(n: number, format: TableColumnFormat): string {
+  const decimals = Math.min(Math.max(format.decimals ?? 2, 0), 6);
+  const formatted = n.toLocaleString('en-US', {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
+  return format.kind === 'currency' ? `${format.symbol ?? '$'}${formatted}` : formatted;
+}
 
 const SUPPORTED_FUNCTIONS = ['SUM', 'AVERAGE', 'COUNT', 'MIN', 'MAX'] as const;
 type FunctionName = (typeof SUPPORTED_FUNCTIONS)[number];
@@ -124,8 +150,7 @@ function resolveCellOrNull(ctx: EvalContext, col: number, row: number): number |
       ctx.visiting.delete(key);
     }
   }
-  const num = Number(raw);
-  return Number.isNaN(num) ? null : num;
+  return parseNumericValue(raw);
 }
 
 function resolveCellStrict(ctx: EvalContext, col: number, row: number): number {

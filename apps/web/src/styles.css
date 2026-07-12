@@ -633,6 +633,35 @@ body.fn-resizing-sidebar .fn-sidebar {
   padding: 1rem 2rem 1.5rem;
 }
 
+/* Table panes have no outer vertical scrollbar: the table wrap is the only vertical scroller,
+   which keeps its sticky header / frozen first column working while the toolbar stays put. */
+.fn-tab-group__scroll--table {
+  overflow-y: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.fn-tab-group__scroll--table .fn-note {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.fn-tab-group__scroll--table .fn-table-editor {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Shrink-to-fit: small tables keep their natural height, tall tables scroll internally. */
+.fn-tab-group__scroll--table .fn-table-wrap {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: none;
+}
+
 .fn-tab-group--focused {
   background: linear-gradient(180deg, var(--bg) 0%, color-mix(in srgb, var(--accent) 3%, var(--bg-soft)) 100%);
 }
@@ -2184,6 +2213,25 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   font-size: 0.85rem;
 }
 
+.fn-table-fmt__numfmt,
+.fn-table-fmt__decimals {
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 0.85rem;
+}
+
+.fn-table-fmt__symbol {
+  width: 3.2rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 0.85rem;
+  text-align: center;
+}
+
 .fn-table-fmt__fill-swatch {
   display: inline-block;
   width: 0.9rem;
@@ -2210,6 +2258,25 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   background: var(--surface-elevated, var(--surface));
   box-shadow: 0 6px 20px rgb(0 0 0 / 0.12);
   min-width: 9.5rem;
+}
+
+/* Help popover listing formula / F4-repeat / fill / paste tips. */
+.fn-table-help-pop {
+  width: 22rem;
+  max-width: 80vw;
+  white-space: normal;
+}
+
+.fn-table-help-pop p {
+  margin: 0.3rem 0;
+  font-size: 0.82rem;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+/* Attachment manager modal for tables (inline panel moved here to save vertical space). */
+.fn-modal.fn-attach-modal {
+  width: min(640px, 94vw);
 }
 
 .fn-table-palette__default {
@@ -2282,19 +2349,29 @@ body.fn-resizing-note .fn-note-resize-handle::after {
 }
 
 /* Sits between the toolbar and the table so it stays visible with tall tables. */
+/* Always rendered with a constant single-line height so toggling between placeholder and real
+   stats never resizes the table wrap (whose horizontal scrollbar must stay in a fixed spot). */
 .fn-table-editor__stats {
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  overflow: hidden;
   gap: 1rem;
   margin-bottom: 0.5rem;
-  padding: 0.4rem 0.75rem;
+  /* Slightly more bottom padding biases the text a touch upward within the bar. */
+  padding: 0.25rem 0.75rem 0.5rem;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--accent-soft);
   color: var(--text);
   font-size: 0.82rem;
+  line-height: 1.4;
   font-variant-numeric: tabular-nums;
-  flex-wrap: wrap;
+}
+
+.fn-table-editor__stats-placeholder {
+  color: var(--muted);
 }
 
 
@@ -3259,6 +3336,7 @@ body.fn-resizing-note .fn-note-resize-handle::after {
 }
 
 .fn-ai-msg {
+  position: relative;
   max-width: 52rem;
   width: 100%;
   margin: 0 auto;
@@ -3266,6 +3344,73 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   border-radius: 10px;
   padding: 0.6rem 0.9rem;
   background: var(--surface);
+}
+
+/* Per-message hover actions: export / delete. */
+.fn-ai-msg__actions {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.5rem;
+  display: flex;
+  gap: 0.25rem;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.fn-ai-msg:hover .fn-ai-msg__actions {
+  opacity: 1;
+}
+
+.fn-ai-msg__actions button {
+  padding: 0 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.fn-ai-msg__actions button:hover {
+  color: var(--text);
+}
+
+.fn-ai-msg__attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.4rem;
+}
+
+/* Attachment chip (in messages and in the composer). */
+.fn-ai-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  max-width: 16rem;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  font-size: 0.78rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fn-ai-attachment-chip button {
+  padding: 0 0.15rem;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1;
+}
+
+.fn-ai-attachment-chip button:hover {
+  color: var(--text);
 }
 
 .fn-ai-msg--user {
@@ -3313,11 +3458,33 @@ body.fn-resizing-note .fn-note-resize-handle::after {
 .fn-ai-workbench__composer {
   flex: 0 0 auto;
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
   align-items: flex-end;
   padding: 0.75rem 1rem;
   border-top: 1px solid var(--border);
   background: var(--surface);
+}
+
+/* Pending attachment chips above the input (full composer width). */
+.fn-ai-composer__attachments {
+  flex: 1 1 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.fn-ai-workbench__busy-hint {
+  flex: 1 1 100%;
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.fn-ai-composer__buttons {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-end;
 }
 
 .fn-ai-workbench__composer textarea {

@@ -43,11 +43,22 @@ export interface SyncNotePayload {
   updated_at: string;
 }
 
+/** Column-level numeric display format; raw cell values stay untouched. */
+export interface TableColumnFormat {
+  kind: 'number' | 'currency';
+  /** Fixed number of decimal places (0-6). */
+  decimals: number;
+  /** Currency prefix symbol (only used when kind is 'currency'). */
+  symbol?: string;
+}
+
 export interface TableColumn {
   id: string;
   name: string;
   /** Column width in px; unset means auto. */
   width?: number;
+  /** Numeric display format; unset means show raw values. */
+  format?: TableColumnFormat;
 }
 
 /** Per-cell presentation overrides; absent keys mean "default". */
@@ -136,10 +147,35 @@ export const META_KEYS = {
 // AI Workbench
 // ---------------------------------------------------------------------------
 
+export const AI_MAX_TOKENS_MIN = 1024;
+export const AI_MAX_TOKENS_LIMIT = 128000;
+/** Roomy default: reasoning models spend part of the budget on hidden thinking. */
+export const AI_MAX_TOKENS_DEFAULT = 16384;
+
 /** Per-vault AI Workbench settings, stored encrypted in vault_meta. */
 export interface AiSettings {
   apiKey: string;
   model: string;
+  /** Per-reply output token budget; unset falls back to AI_MAX_TOKENS_DEFAULT. */
+  maxTokens?: number;
+}
+
+/**
+ * An attachment on an AI request message. Images and PDFs are sent to the API as native
+ * base64 content blocks; everything else (txt/md/csv/doc/docx/...) is converted to extracted
+ * plain text at attach time and inlined as a text block.
+ */
+export interface AiAttachment {
+  id: string;
+  name: string;
+  mediaType: string;
+  kind: 'image' | 'pdf' | 'text';
+  /** Base64 payload for image/pdf kinds. */
+  dataBase64?: string;
+  /** Extracted plain text for the text kind. */
+  text?: string;
+  /** Original file size in bytes. */
+  size: number;
 }
 
 export interface AiMessage {
@@ -147,6 +183,8 @@ export interface AiMessage {
   content: string;
   /** ISO timestamp. */
   ts: string;
+  /** Attachments (user messages only). */
+  attachments?: AiAttachment[];
 }
 
 export type AiSessionKind = 'folder' | 'session';

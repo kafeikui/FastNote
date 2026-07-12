@@ -9,7 +9,13 @@ import {
   type KeyboardEvent,
   type MouseEvent,
 } from 'react';
-import type { NoteAttachment, ShortcutBinding, TableCellStyle, TableDocument } from '@fastnote/shared';
+import type {
+  NoteAttachment,
+  ShortcutBinding,
+  TableCellStyle,
+  TableColumnFormat,
+  TableDocument,
+} from '@fastnote/shared';
 import {
   attachmentDisplayLabel,
   buildAttachmentMarkdownRef,
@@ -24,8 +30,10 @@ import {
   columnLetter,
   computeRangeStats,
   evaluateCellFormula,
+  formatColumnNumber,
   formatFormulaNumber,
   isFormulaValue,
+  parseNumericValue,
 } from './formula';
 import {
   MAX_COL_WIDTH,
@@ -40,6 +48,7 @@ import {
   removeColumn,
   removeRow,
   renameColumn,
+  setColumnFormat,
   setColumnWidth,
   setRowHeight,
   sortRows,
@@ -71,6 +80,12 @@ const FONT_SIZES = [12, 13, 14, 16, 18, 20, 24, 28];
  * columns to fit (the wrap stretches narrow tables back to full width via min-width: 100%).
  */
 const DEFAULT_COL_WIDTH = 180;
+
+/** Formats a Date as a local "YYYY-MM-DD HH:mm:ss" string for the insert-time toolbar button. */
+function formatLocalTime(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
 
 type SortDir = 'asc' | 'desc' | null;
 
@@ -116,6 +131,7 @@ export function TableEditor({
   const [renamingCol, setRenamingCol] = useState<{ colId: string; draft: string } | null>(null);
   /** Characters selected inside the cell input currently being edited (0 = none). */
   const [cellSelChars, setCellSelChars] = useState(0);
+  const [showHelp, setShowHelp] = useState(false);
   const tableWrapRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const lastActionRef = useRef<LastAction | null>(null);
@@ -297,6 +313,51 @@ export function TableEditor({
     emitChange(applyCellStyle(docRef.current, formatTargets, patch));
   };
 
+  // ---- Column number format -----------------------------------------------------------------
+
+  /** Columns the number-format controls act on (derived from the same targets as cell styles). */
+  const formatColIds = useMemo(() => {
+    const ids: string[] = [];
+    for (const cell of formatTargets) {
+      if (!ids.includes(cell.colId)) ids.push(cell.colId);
+    }
+    return ids;
+  }, [formatTargets]);
+
+  /** Format of the first target column — drives the toolbar's current-value indicators. */
+  const anchorColFormat: TableColumnFormat | undefined = useMemo(() => {
+    const first = formatColIds[0];
+    return first ? doc.columns.find((c) => c.id === first)?.format : undefined;
+  }, [formatColIds, doc.columns]);
+
+  const applyColumnFormat = (
+    mutate: (cur: TableColumnFormat | undefined) => TableColumnFormat | undefined,
+  ) => {
+    if (formatColIds.length === 0) {
+      alert(t('tableEditor.formatNeedTarget'));
+      return;
+    }
+    let next = docRef.current;
+    for (const colId of formatColIds) {
+      const cur = next.columns.find((c) => c.id === colId)?.format;
+      next = setColumnFormat(next, colId, mutate(cur));
+    }
+    emitChange(next);
+  };
+
+  const insertLocalTime = () => {
+    if (!focusCell) {
+      alert(t('tableEditor.selectCellFirst'));
+      return;
+    }
+    const row = docRef.current.rows.find((r) => r.id === focusCell.rowId);
+    const cur = row?.cells[focusCell.colId] ?? '';
+    if (isFormulaValue(cur)) return;
+    const now = formatLocalTime(new Date());
+    const next = cur.trim() ? `${cur.trim()} ${now}` : now;
+    emitChange(updateCell(docRef.current, focusCell.rowId, focusCell.colId, next));
+  };
+
   const textStyleFor = (style: TableCellStyle | undefined): CSSProperties | undefined => {
     if (!style) return undefined;
     const out: CSSProperties = {};
@@ -395,6 +456,42 @@ export function TableEditor({
       });
     });
     emitChange({ ...next, rows });
+  };
+
+  // Multi-cell copy: a selection spanning more than one cell is written to the clipboard as
+  // tab-separated values (rows newline-separated) — pasteable into Excel/Sheets and back into
+  // this table (handleGridPaste splits on tabs first). Formula cells copy their computed value.
+  const handleGridCopy = (e: ClipboardEvent<HTMLDivElement>) => {
+    const range = selectionRange;
+    if (!range) return;
+    if (range.rowStart === range.rowEnd && range.colStart === range.colEnd) return;
+    // Respect an in-cell text selection: copying part of a cell's text wins over the range.
+    const active = document.activeElement;
+    if (
+      active instanceof HTMLInputElement &&
+      active.selectionStart !== null &&
+      active.selectionStart !== active.selectionEnd
+    ) {
+      return;
+    }
+    const lines: string[] = [];
+    for (let r = range.rowStart; r <= range.rowEnd; r++) {
+      const row = displayRows[r];
+      if (!row) continue;
+      const cells: string[] = [];
+      for (let c = range.colStart; c <= range.colEnd; c++) {
+        const col = doc.columns[c];
+        if (!col) {
+          cells.push('');
+          continue;
+        }
+        const raw = row.cells[col.id] ?? '';
+        cells.push(isFormulaValue(raw) ? evaluateCellFormula(doc, row.id, col.id).display : raw);
+      }
+      lines.push(cells.join('\t'));
+    }
+    e.preventDefault();
+    e.clipboardData.setData('text/plain', lines.join('\n'));
   };
 
   const selectColumn = (colIdx: number) => {
@@ -714,12 +811,70 @@ export function TableEditor({
         >
           {t('tableEditor.useFirstRowAsHeader')}
         </button>
-        <span className="fn-table-editor__formula-hint">{t('tableEditor.formulaHint')}</span>
-        {repeatActionShortcut && (
-          <span className="fn-table-editor__formula-hint">
-            {t('tableEditor.repeatActionHint', { key: formatShortcutBinding(repeatActionShortcut) })}
-          </span>
+        <button type="button" title={t('tableEditor.insertNow')} onClick={insertLocalTime}>
+          🕒
+        </button>
+        <select
+          className="fn-table-fmt__numfmt"
+          title={t('tableEditor.numberFormat')}
+          value={anchorColFormat?.kind ?? ''}
+          onChange={(e) => {
+            const kind = e.target.value as '' | 'number' | 'currency';
+            applyColumnFormat((cur) =>
+              kind === '' ? undefined : { kind, decimals: cur?.decimals ?? 2, symbol: cur?.symbol ?? '$' },
+            );
+          }}
+        >
+          <option value="">{t('tableEditor.numberFormatNone')}</option>
+          <option value="number">{t('tableEditor.numberFormatNumber')}</option>
+          <option value="currency">{t('tableEditor.numberFormatCurrency')}</option>
+        </select>
+        {anchorColFormat && (
+          <select
+            className="fn-table-fmt__decimals"
+            title={t('tableEditor.decimals')}
+            value={anchorColFormat.decimals}
+            onChange={(e) =>
+              applyColumnFormat((cur) => (cur ? { ...cur, decimals: Number(e.target.value) } : cur))
+            }
+          >
+            {[0, 1, 2, 3, 4, 5, 6].map((d) => (
+              <option key={d} value={d}>
+                {t('tableEditor.decimalsOption', { n: String(d) })}
+              </option>
+            ))}
+          </select>
         )}
+        {anchorColFormat?.kind === 'currency' && (
+          <input
+            className="fn-table-fmt__symbol"
+            title={t('tableEditor.currencySymbol')}
+            value={anchorColFormat.symbol ?? '$'}
+            maxLength={4}
+            onChange={(e) => applyColumnFormat((cur) => (cur ? { ...cur, symbol: e.target.value } : cur))}
+          />
+        )}
+        <div className="fn-table-palette-wrap">
+          <button
+            type="button"
+            className={showHelp ? 'active' : ''}
+            title={t('tableEditor.help')}
+            onClick={() => setShowHelp((v) => !v)}
+          >
+            ?
+          </button>
+          {showHelp && (
+            <div className="fn-table-palette fn-table-help-pop">
+              <p>{t('tableEditor.formulaHint')}</p>
+              {repeatActionShortcut && (
+                <p>{t('tableEditor.repeatActionHint', { key: formatShortcutBinding(repeatActionShortcut) })}</p>
+              )}
+              <p>{t('tableEditor.fillHandleTooltip')}</p>
+              <p>{t('tableEditor.helpCopy')}</p>
+              <p>{t('tableEditor.helpPaste')}</p>
+            </div>
+          )}
+        </div>
         {attachments.length > 0 && (
           <select
             className="fn-table-editor__attach-select"
@@ -741,23 +896,26 @@ export function TableEditor({
           </select>
         )}
       </div>
-      {(selectionStats || cellSelChars > 0) && (
-        <div className="fn-table-editor__stats">
-          {cellSelChars > 0 && <span>{t('vaultApp.selectedChars', { count: String(cellSelChars) })}</span>}
-          {selectionStats && (
-            <>
-              <span>{t('tableEditor.stats.count', { count: selectionStats.count })}</span>
-              <span>{t('tableEditor.stats.sum', { sum: formatFormulaNumber(selectionStats.sum) })}</span>
-              <span>
-                {t('tableEditor.stats.average', {
-                  average: selectionStats.average === null ? '—' : formatFormulaNumber(selectionStats.average),
-                })}
-              </span>
-            </>
-          )}
-        </div>
-      )}
-      <div className="fn-table-wrap" ref={tableWrapRef} onPaste={handleGridPaste}>
+      {/* Always rendered (placeholder when idle) so its appearance never shifts the table wrap —
+          otherwise the always-visible horizontal scrollbar would jump when a selection is made. */}
+      <div className="fn-table-editor__stats">
+        {cellSelChars > 0 && <span>{t('vaultApp.selectedChars', { count: String(cellSelChars) })}</span>}
+        {selectionStats && (
+          <>
+            <span>{t('tableEditor.stats.count', { count: selectionStats.count })}</span>
+            <span>{t('tableEditor.stats.sum', { sum: formatFormulaNumber(selectionStats.sum) })}</span>
+            <span>
+              {t('tableEditor.stats.average', {
+                average: selectionStats.average === null ? '—' : formatFormulaNumber(selectionStats.average),
+              })}
+            </span>
+          </>
+        )}
+        {!selectionStats && cellSelChars === 0 && (
+          <span className="fn-table-editor__stats-placeholder">{t('tableEditor.stats.placeholder')}</span>
+        )}
+      </div>
+      <div className="fn-table-wrap" ref={tableWrapRef} onPaste={handleGridPaste} onCopy={handleGridCopy}>
         <table className="fn-table">
           <thead>
             <tr>
@@ -872,6 +1030,15 @@ export function TableEditor({
                   const raw = row.cells[col.id] ?? '';
                   const formula = isFormulaValue(raw);
                   const result = formula ? evaluateCellFormula(doc, row.id, col.id) : null;
+                  // Column number format: applies to numeric raw values and formula results alike.
+                  const numericForFormat =
+                    col.format && !result?.error ? (formula ? result!.value : parseNumericValue(raw)) : null;
+                  const displayValue =
+                    col.format && numericForFormat !== null
+                      ? formatColumnNumber(numericForFormat, col.format)
+                      : formula
+                        ? result!.display
+                        : raw;
                   const cellStyle = row.styles?.[col.id];
                   const isFillOrigin =
                     isPlainView &&
@@ -894,7 +1061,8 @@ export function TableEditor({
                     >
                       <TableCellContent
                         value={raw}
-                        displayValue={formula ? result!.display : raw}
+                        displayValue={displayValue}
+                        formattedIdle={!formula && col.format !== undefined && numericForFormat !== null}
                         isFormula={formula}
                         hasError={!!result?.error}
                         attachments={attachments}
