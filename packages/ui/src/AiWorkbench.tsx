@@ -1,7 +1,30 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { AiAttachment, AiMessage, AiSessionNode } from '@fastnote/shared';
 import { useT } from '@fastnote/i18n';
 import { MarkdownView, renderMarkdownHtml } from './MarkdownView';
+
+/** Splits plain text into React nodes with query occurrences wrapped in find-marks. */
+function renderHighlightedText(text: string, query: string): ReactNode {
+  const q = query.trim().toLowerCase();
+  if (!q) return text;
+  const lower = text.toLowerCase();
+  const parts: ReactNode[] = [];
+  let pos = 0;
+  let i = lower.indexOf(q);
+  let key = 0;
+  while (i !== -1) {
+    if (i > pos) parts.push(text.slice(pos, i));
+    parts.push(
+      <mark key={key++} className="fn-ai-find-mark">
+        {text.slice(i, i + q.length)}
+      </mark>,
+    );
+    pos = i + q.length;
+    i = lower.indexOf(q, pos);
+  }
+  parts.push(text.slice(pos));
+  return parts;
+}
 
 interface AiWorkbenchProps {
   session: AiSessionNode;
@@ -182,73 +205,62 @@ export function AiWorkbench({
     lastFindQueryRef.current = '';
   }, [session.id]);
 
+  /** Visible find-marks in DOM (= chronological) order. */
+  const collectFindMarks = (): HTMLElement[] => {
+    const root = messagesRef.current;
+    if (!root) return [];
+    return Array.from(root.querySelectorAll<HTMLElement>('mark.fn-ai-find-mark')).filter(
+      (m) => m.getClientRects().length > 0,
+    );
+  };
+
+  /** Centers a mark by scrolling the messages container directly (scrollIntoView proved
+   *  unreliable here — it silently did nothing in the rendered-markdown view). */
+  const scrollFindMarkIntoView = (mark: HTMLElement) => {
+    const container = messagesRef.current;
+    if (!container) return;
+    const cRect = container.getBoundingClientRect();
+    const mRect = mark.getBoundingClientRect();
+    container.scrollTop += mRect.top - cRect.top - (container.clientHeight - mRect.height) / 2;
+  };
+
   const applyCurrentFindMark = (idx: number, scroll: boolean) => {
     const marks = findMarksRef.current;
     marks.forEach((m, i) => m.classList.toggle('fn-ai-find-mark--current', i === idx));
-    if (scroll) marks[idx]?.scrollIntoView({ block: 'center' });
+    if (scroll && marks[idx]) scrollFindMarkIntoView(marks[idx]);
   };
 
   const stepFind = (dir: 1 | -1) => {
-    const total = findMarksRef.current.length;
-    if (total === 0) return;
-    const idx = (findIdxRef.current + dir + total) % total;
+    // Re-collect on every step: a re-render since the last collection may have replaced the
+    // mark elements, leaving the cached list pointing at detached nodes.
+    const marks = collectFindMarks();
+    findMarksRef.current = marks;
+    setFindTotal(marks.length);
+    if (marks.length === 0) return;
+    const idx = (Math.min(findIdxRef.current, marks.length - 1) + dir + marks.length) % marks.length;
     findIdxRef.current = idx;
     setFindIdx(idx);
     applyCurrentFindMark(idx, true);
   };
 
-  // Text-level highlighting: wrap query occurrences in <mark> by walking the rendered DOM.
-  // The markdown HTML is opaque to React (dangerouslySetInnerHTML), so mutating inside it is
-  // safe; previous marks are unwrapped first so re-runs stay idempotent. Queries spanning
-  // element boundaries (e.g. across paragraphs) aren't marked (and thus not navigable).
-  // Runs again when messages/streaming re-render (marks are rebuilt); it only auto-scrolls
-  // when the query itself changed, so streaming updates don't yank the viewport around.
+  // The marks themselves are rendered by React (highlightQuery / renderHighlightedText below) —
+  // mutating the DOM after render proved unreliable against reconciliation. This effect only
+  // collects the rendered marks in DOM (= chronological) order for navigation, filtering out
+  // invisible ones (scrollIntoView on them is a no-op). It only auto-scrolls when the query
+  // itself changed, so streaming re-renders don't yank the viewport around.
   useEffect(() => {
     const root = messagesRef.current;
-    if (!root) return;
-    root.querySelectorAll('mark.fn-ai-find-mark').forEach((m) => {
-      const parent = m.parentNode;
-      if (!parent) return;
-      parent.replaceChild(document.createTextNode(m.textContent ?? ''), m);
-      parent.normalize();
-    });
-    const q = findOpen ? findQuery.trim().toLowerCase() : '';
+    const q = findOpen ? findQuery.trim() : '';
     const isNewQuery = q !== lastFindQueryRef.current;
     lastFindQueryRef.current = q;
     if (isNewQuery) findIdxRef.current = 0;
-    if (!q) {
+    if (!root || !q) {
       findMarksRef.current = [];
       setFindTotal(0);
       setFindIdx(0);
       return;
     }
-    root.querySelectorAll('.fn-ai-msg__body').forEach((body) => {
-      const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
-      const textNodes: Text[] = [];
-      let n: Node | null;
-      while ((n = walker.nextNode())) textNodes.push(n as Text);
-      for (const node of textNodes) {
-        const text = node.nodeValue ?? '';
-        const lower = text.toLowerCase();
-        let i = lower.indexOf(q);
-        if (i === -1) continue;
-        const frag = document.createDocumentFragment();
-        let pos = 0;
-        while (i !== -1) {
-          if (i > pos) frag.appendChild(document.createTextNode(text.slice(pos, i)));
-          const mark = document.createElement('mark');
-          mark.className = 'fn-ai-find-mark';
-          mark.textContent = text.slice(i, i + q.length);
-          frag.appendChild(mark);
-          pos = i + q.length;
-          i = lower.indexOf(q, pos);
-        }
-        if (pos < text.length) frag.appendChild(document.createTextNode(text.slice(pos)));
-        node.parentNode?.replaceChild(frag, node);
-      }
-    });
-    // Marks appear in DOM order, i.e. chronological message order.
-    const marks = Array.from(root.querySelectorAll<HTMLElement>('mark.fn-ai-find-mark'));
+    const marks = collectFindMarks();
     findMarksRef.current = marks;
     const idx = Math.min(findIdxRef.current, Math.max(marks.length - 1, 0));
     findIdxRef.current = idx;
@@ -345,11 +357,20 @@ export function AiWorkbench({
     onConvertToNote(messages);
   };
 
+  // Query currently being highlighted in message bodies (empty when the find bar is closed).
+  const findActiveQuery = findOpen ? findQuery.trim() : '';
+
   const renderAssistantBody = (content: string) =>
     showSource ? (
-      <pre className="fn-ai-msg__body fn-ai-msg__body--source">{content}</pre>
+      <pre className="fn-ai-msg__body fn-ai-msg__body--source">
+        {findActiveQuery ? renderHighlightedText(content, findActiveQuery) : content}
+      </pre>
     ) : (
-      <MarkdownView markdown={content} className="fn-ai-msg__body" />
+      <MarkdownView
+        markdown={content}
+        className="fn-ai-msg__body"
+        highlightQuery={findActiveQuery || undefined}
+      />
     );
 
   return (
@@ -533,7 +554,9 @@ export function AiWorkbench({
             {m.role === 'assistant' ? (
               renderAssistantBody(m.content)
             ) : (
-              <div className="fn-ai-msg__body fn-ai-msg__body--plain">{m.content}</div>
+              <div className="fn-ai-msg__body fn-ai-msg__body--plain">
+                {findActiveQuery ? renderHighlightedText(m.content, findActiveQuery) : m.content}
+              </div>
             )}
           </div>
         ))}

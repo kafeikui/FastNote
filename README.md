@@ -23,7 +23,7 @@ Encrypted notes + 1:1 end-to-end encrypted instant messaging. Built for personal
 **Notes**
 - Tree-structured explorer (folders/notes/tables), drag-to-reorder, nested directories
 - Editor: Tiptap WYSIWYG (default) ↔ CodeMirror source mode, autosave
-- Table documents: column sort/filter, add/remove rows & columns; a selection stats bar (count/sum/average) for any dragged range, whole row, or whole column; spreadsheet-style formulas (`=SUM(A1:A3)`, `AVERAGE`, `COUNT`, `MIN`, `MAX`, `+ - * / ^`); per-column number formats (number/currency/decimals) and one-click insert of the current time; multi-cell copy and smart paste-splitting with customizable delimiters (tab/semicolon/comma/whitespace, multi-select); Alt+Arrow to reorder rows/columns or swap adjacent cells; frozen header/first column, resizable rows/columns, per-cell bold/size/color/fill; export to CSV (plaintext) / `.fnxt` (encrypted), with matching import
+- Table documents: column sort/filter, add/remove rows & columns; a selection stats bar (count/sum/average) for any dragged range, whole row, or whole column; spreadsheet-style formulas (`=SUM(A1:A3)`, `AVERAGE`, `COUNT`, `MIN`, `MAX`, `+ - * / ^`); per-column number formats (number/currency/decimals) and one-click insert of the current time; multi-cell copy and smart paste-splitting with customizable delimiters (tab/semicolon/comma/whitespace, multi-select); Shift+Enter for in-cell line breaks — multi-line cells round-trip through copy/paste with Excel-style quoting; Alt+Arrow to reorder rows/columns or swap adjacent cells; frozen header/first column, resizable rows/columns, per-cell bold/size/color/fill; export to CSV (plaintext) / `.fnxt` (encrypted), with matching import
 - Bulk folder import: preserves directory structure, extension-less files import as notes, `.csv` files import as tables
 - Local full-text search (encrypted index snapshot, never uploaded)
 - Two-group tab system with split view: drag-to-reorder tabs, preview (italic) vs. pinned tabs, persisted across restarts and lock/unlock
@@ -31,7 +31,7 @@ Encrypted notes + 1:1 end-to-end encrypted instant messaging. Built for personal
 - Customizable keyboard shortcuts (rename, lock, table repeat/undo/redo, delete, focus jumps) in Settings
 - Edit-focus history: edits, opening/selecting tabs, and cursor clicks are all recorded; Ctrl+Alt+←/→ (customizable) jumps to the previous/next focus — the target tab is activated and pinned, and reopened if it was closed
 - Fast unlock on large vaults (1000+ notes): hardware-accelerated WebCrypto AES-GCM, batched IndexedDB reads, background search-index loading
-- Find & replace in notes (Ctrl+F, customizable): works in both rendered and source mode, with match highlighting and replace-all
+- Find & replace everywhere (Ctrl+F, customizable): notes (rendered & source mode), tables (matching cells highlighted, replace supported), and AI sessions (occurrence-level highlight & jump); the current selection pre-fills the query, multi-line queries are supported (Ctrl/⌘+Enter inserts a line break in the find bar), and global-search results open the note in source mode with the keyword located
 - Resizable note content width; collapsible sidebar for a wider content area
 - Multiple local vaults, switchable from the unlock screen
 - Cross-vault transfer: copy or move notes/folders (attachments included) into another local vault after verifying its password
@@ -41,6 +41,7 @@ Encrypted notes + 1:1 end-to-end encrypted instant messaging. Built for personal
 - Collapsible session tree in the sidebar with folders, rename, and drag-to-organize; conversations are encrypted at rest like notes
 - Streaming responses with markdown rendering (LaTeX formulas included) and a stop button; switching sessions or back to notes keeps the reply streaming in the background
 - Attachments on requests: images / PDF / doc / docx / text files (all parsed locally, 8MB cap)
+- Optional web search during replies (Anthropic's server-side `web_search` tool — no extra client-side connections): live "searching the web" status, configurable per-reply search cap in Settings
 - Per-message management: delete, export as Markdown or a Word document; convert Q&A (a selected range or the whole session) into a note; send/receive timestamps on every message
 - Configurable `max_tokens` (up to 128k) in Settings; long generations show thinking progress and a patience hint
 - `api.anthropic.com` is the single CSP exception, and no request is ever made until you save a key and send a message
