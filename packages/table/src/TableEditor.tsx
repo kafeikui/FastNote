@@ -10,6 +10,8 @@ import {
   type MouseEvent,
 } from 'react';
 import type {
+  FindReplaceController,
+  FindReplaceStatus,
   NoteAttachment,
   ShortcutBinding,
   TableCellStyle,
@@ -61,6 +63,7 @@ import {
   DELIMITER_PRIORITY,
   applyVerticalFill,
   copyDelimiterChar,
+  encodeCellForCopy,
   loadTableDelimiters,
   parsePasteGrid,
   saveTableDelimiters,
@@ -78,6 +81,8 @@ export interface TableEditorProps {
   repeatActionShortcut?: ShortcutBinding;
   undoShortcut?: ShortcutBinding;
   redoShortcut?: ShortcutBinding;
+  /** Registers the find/replace driver for this table (searches cell contents). */
+  onRegisterFindReplace?: (controller: FindReplaceController | null) => void;
 }
 
 /** Curated palettes: single-click swatches avoid flooding the undo history the way a live color picker would. */
@@ -121,6 +126,7 @@ export function TableEditor({
   repeatActionShortcut,
   undoShortcut,
   redoShortcut,
+  onRegisterFindReplace,
 }: TableEditorProps) {
   const t = useT();
   const locale = useLocale();
@@ -195,6 +201,154 @@ export function TableEditor({
     const filtered = filterRows(doc, doc.rows, filters);
     return sortRows(doc, filtered, sortCol, sortDir);
   }, [doc, filters, sortCol, sortDir]);
+  const displayRowsRef = useRef(displayRows);
+  displayRowsRef.current = displayRows;
+
+  // Active find query for render-time highlighting: every cell whose raw value contains the
+  // query gets a tint, the current match gets an outline (text-level marks are impossible
+  // inside a textarea, so highlighting is cell-level).
+  const [findMark, setFindMark] = useState<{
+    query: string;
+    current: { rowIdx: number; colIdx: number } | null;
+  } | null>(null);
+
+  // Find & replace over cell contents, driven by the shared FindReplaceBar. Matches are
+  // occurrence-level across the visible (sorted/filtered) rows in display order; formula cells
+  // match on their raw source. The current match is shown via the cell-selection highlight.
+  const onRegisterFindReplaceRef = useRef(onRegisterFindReplace);
+  onRegisterFindReplaceRef.current = onRegisterFindReplace;
+  useEffect(() => {
+    if (!onRegisterFindReplaceRef.current) return;
+    interface TableFindMatch {
+      rowIdx: number;
+      colIdx: number;
+      offset: number;
+    }
+    const state = { query: '', index: 0 };
+
+    // Values are read from the given doc by row id (displayRowsRef can hold pre-edit row
+    // snapshots right after a replace, before the next render lands).
+    const cellValue = (d: TableDocument, rowId: string, colId: string) =>
+      d.rows.find((r) => r.id === rowId)?.cells[colId] ?? '';
+
+    const computeMatches = (d: TableDocument): TableFindMatch[] => {
+      const q = state.query.toLowerCase();
+      if (!q) return [];
+      const matches: TableFindMatch[] = [];
+      displayRowsRef.current.forEach((dr, rowIdx) => {
+        d.columns.forEach((col, colIdx) => {
+          const lower = cellValue(d, dr.id, col.id).toLowerCase();
+          let i = lower.indexOf(q);
+          while (i !== -1) {
+            matches.push({ rowIdx, colIdx, offset: i });
+            i = lower.indexOf(q, i + q.length);
+          }
+        });
+      });
+      return matches;
+    };
+
+    const statusOf = (matches: TableFindMatch[]): FindReplaceStatus => ({
+      total: matches.length,
+      current: matches.length > 0 ? Math.min(state.index, matches.length - 1) + 1 : 0,
+    });
+
+    const highlight = (m: TableFindMatch | undefined) => {
+      setFindMark(
+        state.query
+          ? { query: state.query, current: m ? { rowIdx: m.rowIdx, colIdx: m.colIdx } : null }
+          : null,
+      );
+      if (!m) return;
+      setSelAnchor({ rowIdx: m.rowIdx, colIdx: m.colIdx });
+      setSelFocus({ rowIdx: m.rowIdx, colIdx: m.colIdx });
+      requestAnimationFrame(() => {
+        tableWrapRef.current
+          ?.querySelector(`textarea[data-row-idx="${m.rowIdx}"][data-col-idx="${m.colIdx}"]`)
+          ?.scrollIntoView({ block: 'center', inline: 'nearest' });
+      });
+    };
+
+    const step = (dir: 1 | -1): FindReplaceStatus => {
+      const matches = computeMatches(docRef.current);
+      if (matches.length === 0) return statusOf(matches);
+      state.index = (Math.min(state.index, matches.length - 1) + dir + matches.length) % matches.length;
+      highlight(matches[state.index]);
+      return statusOf(matches);
+    };
+
+    onRegisterFindReplaceRef.current({
+      search: (query) => {
+        state.query = query;
+        state.index = 0;
+        const matches = computeMatches(docRef.current);
+        highlight(matches[0]);
+        return statusOf(matches);
+      },
+      next: () => step(1),
+      prev: () => step(-1),
+      replace: (replacement) => {
+        const matches = computeMatches(docRef.current);
+        const m = matches[Math.min(state.index, matches.length - 1)];
+        if (!m) return statusOf(matches);
+        const row = displayRowsRef.current[m.rowIdx];
+        const col = docRef.current.columns[m.colIdx];
+        if (!row || !col) return statusOf(matches);
+        const raw = cellValue(docRef.current, row.id, col.id);
+        const next = updateCell(
+          docRef.current,
+          row.id,
+          col.id,
+          raw.slice(0, m.offset) + replacement + raw.slice(m.offset + state.query.length),
+        );
+        emitChange(next);
+        // docRef only refreshes on the next render — compute the post-replace status directly.
+        const after = computeMatches(next);
+        if (after.length > 0) {
+          state.index = Math.min(state.index, after.length - 1);
+          highlight(after[state.index]);
+        }
+        return statusOf(after);
+      },
+      replaceAll: (replacement) => {
+        const matches = computeMatches(docRef.current);
+        if (matches.length === 0) return 0;
+        const q = state.query.toLowerCase();
+        let next = docRef.current;
+        const seen = new Set<string>();
+        for (const m of matches) {
+          const row = displayRowsRef.current[m.rowIdx];
+          const col = next.columns[m.colIdx];
+          if (!row || !col) continue;
+          const key = `${row.id}:${col.id}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          // Case-insensitive replace of every occurrence in this cell, done in one pass.
+          const raw = cellValue(next, row.id, col.id);
+          const lower = raw.toLowerCase();
+          let out = '';
+          let pos = 0;
+          let i = lower.indexOf(q);
+          while (i !== -1) {
+            out += raw.slice(pos, i) + replacement;
+            pos = i + q.length;
+            i = lower.indexOf(q, pos);
+          }
+          out += raw.slice(pos);
+          next = updateCell(next, row.id, col.id, out);
+        }
+        emitChange(next);
+        return matches.length;
+      },
+      close: () => {
+        state.query = '';
+        state.index = 0;
+        setFindMark(null);
+      },
+    });
+    return () => onRegisterFindReplaceRef.current?.(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- all lookups go through refs
+  }, []);
 
   // Autofill and grid-paste act on row indices, which only line up with the underlying document
   // when no sort/filter is active.
@@ -494,6 +648,7 @@ export function TableEditor({
     const range = selectionRange;
     if (!range) return null;
     if (range.rowStart === range.rowEnd && range.colStart === range.colEnd) return null;
+    const delimChar = copyDelimiterChar(delims);
     const lines: string[] = [];
     for (let r = range.rowStart; r <= range.rowEnd; r++) {
       const row = displayRows[r];
@@ -506,9 +661,11 @@ export function TableEditor({
           continue;
         }
         const raw = row.cells[col.id] ?? '';
-        cells.push(isFormulaValue(raw) ? evaluateCellFormula(doc, row.id, col.id).display : raw);
+        const value = isFormulaValue(raw) ? evaluateCellFormula(doc, row.id, col.id).display : raw;
+        // Quote cells containing line breaks/delimiters so they round-trip as one cell.
+        cells.push(encodeCellForCopy(value, delimChar));
       }
-      lines.push(cells.join(copyDelimiterChar(delims)));
+      lines.push(cells.join(delimChar));
     }
     return lines.join('\n');
   };
@@ -516,9 +673,25 @@ export function TableEditor({
   /** Copy-event path (Ctrl+C inside a cell input, or Copy from a context menu). */
   const handleGridCopy = (e: ClipboardEvent<HTMLDivElement>) => {
     const tsv = buildRangeTsv();
-    if (tsv === null) return;
-    e.preventDefault();
-    e.clipboardData.setData('text/plain', tsv);
+    if (tsv !== null) {
+      e.preventDefault();
+      e.clipboardData.setData('text/plain', tsv);
+      return;
+    }
+    // Single cell: when the whole multi-line value is selected (focusing a cell selects all),
+    // copy it quoted so pasting into another cell keeps it one cell instead of fanning out
+    // into multiple rows. Partial selections keep the native copy (plain text fragment).
+    const el = document.activeElement;
+    if (
+      el instanceof HTMLTextAreaElement &&
+      el.dataset.rowIdx !== undefined &&
+      el.value.includes('\n') &&
+      (el.selectionStart ?? 0) === 0 &&
+      (el.selectionEnd ?? 0) === el.value.length
+    ) {
+      e.preventDefault();
+      e.clipboardData.setData('text/plain', encodeCellForCopy(el.value, copyDelimiterChar(delims)));
+    }
   };
 
   /**
@@ -555,8 +728,8 @@ export function TableEditor({
   };
 
   const focusCellInput = useCallback((rowIdx: number, colIdx: number) => {
-    const el = tableWrapRef.current?.querySelector<HTMLInputElement>(
-      `input[data-row-idx="${rowIdx}"][data-col-idx="${colIdx}"]`,
+    const el = tableWrapRef.current?.querySelector<HTMLTextAreaElement>(
+      `textarea[data-row-idx="${rowIdx}"][data-col-idx="${colIdx}"]`,
     );
     if (!el) return;
     el.focus();
@@ -564,14 +737,19 @@ export function TableEditor({
   }, []);
 
   const handleCellKeyDown = useCallback(
-    (e: KeyboardEvent<HTMLInputElement>, rowIdx: number, colIdx: number) => {
+    (e: KeyboardEvent<HTMLTextAreaElement>, rowIdx: number, colIdx: number) => {
       if (e.key !== 'Enter') return;
+      // Shift+Enter inserts an in-cell line break (the textarea's default behavior).
+      if (e.shiftKey) return;
       e.preventDefault();
-      // Move to the same column on the next visible row, spreadsheet-style.
+      // Move to the same column on the next visible row, spreadsheet-style. The selection
+      // outline follows along — focusCellInput alone only moves the text caret.
       if (rowIdx + 1 < displayRows.length) {
+        setSelAnchor({ rowIdx: rowIdx + 1, colIdx });
+        setSelFocus({ rowIdx: rowIdx + 1, colIdx });
         focusCellInput(rowIdx + 1, colIdx);
       } else {
-        (e.target as HTMLInputElement).blur();
+        (e.target as HTMLTextAreaElement).blur();
       }
     },
     [displayRows.length, focusCellInput],
@@ -1207,10 +1385,18 @@ export function TableEditor({
                     !!selectionRange &&
                     rowIdx === selectionRange.rowEnd &&
                     colIdx === selectionRange.colEnd;
+                  const findHit =
+                    !!findMark && raw.toLowerCase().includes(findMark.query.toLowerCase());
+                  const findCurrent =
+                    !!findMark?.current &&
+                    findMark.current.rowIdx === rowIdx &&
+                    findMark.current.colIdx === colIdx;
                   const tdClass = [
                     'fn-table__cell',
                     isFillPreviewCell(rowIdx, colIdx) && 'fn-table__cell--fill-preview',
                     doc.freezeFirstColumn && colIdx === 0 && 'fn-table__col--frozen',
+                    findHit && 'fn-table__cell--find',
+                    findCurrent && 'fn-table__cell--find-current',
                   ]
                     .filter(Boolean)
                     .join(' ');

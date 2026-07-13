@@ -14,6 +14,8 @@ interface AiWorkbenchProps {
   streamingText: string | null;
   /** Characters of hidden model thinking so far for this session's in-flight reply. */
   streamingThinkingChars?: number;
+  /** Server-side web searches performed so far for this session's in-flight reply. */
+  streamingWebSearches?: number;
   /** Date.now() when this session's in-flight request was sent, or null when none. */
   streamingStartedAt?: number | null;
   /** True while any session (this one or another) has a reply in flight. */
@@ -27,6 +29,11 @@ interface AiWorkbenchProps {
   /** Creates a note from the given messages (a Q&A range or the whole session). */
   onConvertToNote: (messages: AiMessage[]) => void;
   onOpenSettings: () => void;
+  /**
+   * Ctrl+F forwarded from the app layer: each nonce bump opens/refocuses the in-session find
+   * bar, pre-filled with `query` (the current text selection) when non-empty.
+   */
+  findRequest?: { nonce: number; query: string } | null;
 }
 
 /** How long a reply may stay text-less before "thinking…" turns into a patience message. */
@@ -78,6 +85,7 @@ export function AiWorkbench({
   configured,
   streamingText,
   streamingThinkingChars = 0,
+  streamingWebSearches = 0,
   streamingStartedAt = null,
   busy,
   error,
@@ -87,6 +95,7 @@ export function AiWorkbench({
   prepareAttachment,
   onConvertToNote,
   onOpenSettings,
+  findRequest = null,
 }: AiWorkbenchProps) {
   const t = useT();
   const [draft, setDraft] = useState('');
@@ -138,6 +147,115 @@ export function AiWorkbench({
     const timer = setTimeout(() => setPatienceDue(true), remaining);
     return () => clearTimeout(timer);
   }, [streamingHere, streamingText, streamingStartedAt]);
+
+  // In-session find. Navigation is occurrence-level over the <mark> elements injected below —
+  // navigating by message and centering the (possibly very tall) message element made "next"
+  // appear to jump to unrelated places.
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState('');
+  // Mirrors of the current occurrence for the counter display; findIdxRef is the source of
+  // truth (the mark list lives outside React state).
+  const [findIdx, setFindIdx] = useState(0);
+  const [findTotal, setFindTotal] = useState(0);
+  const findIdxRef = useRef(0);
+  const findMarksRef = useRef<HTMLElement[]>([]);
+  const lastFindQueryRef = useRef('');
+  const findInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!findRequest) return;
+    setFindOpen(true);
+    if (findRequest.query) setFindQuery(findRequest.query);
+    requestAnimationFrame(() => {
+      findInputRef.current?.focus();
+      findInputRef.current?.select();
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- each Ctrl+F bumps the nonce
+  }, [findRequest?.nonce]);
+
+  useEffect(() => {
+    setFindOpen(false);
+    setFindQuery('');
+    setFindIdx(0);
+    setFindTotal(0);
+    findIdxRef.current = 0;
+    lastFindQueryRef.current = '';
+  }, [session.id]);
+
+  const applyCurrentFindMark = (idx: number, scroll: boolean) => {
+    const marks = findMarksRef.current;
+    marks.forEach((m, i) => m.classList.toggle('fn-ai-find-mark--current', i === idx));
+    if (scroll) marks[idx]?.scrollIntoView({ block: 'center' });
+  };
+
+  const stepFind = (dir: 1 | -1) => {
+    const total = findMarksRef.current.length;
+    if (total === 0) return;
+    const idx = (findIdxRef.current + dir + total) % total;
+    findIdxRef.current = idx;
+    setFindIdx(idx);
+    applyCurrentFindMark(idx, true);
+  };
+
+  // Text-level highlighting: wrap query occurrences in <mark> by walking the rendered DOM.
+  // The markdown HTML is opaque to React (dangerouslySetInnerHTML), so mutating inside it is
+  // safe; previous marks are unwrapped first so re-runs stay idempotent. Queries spanning
+  // element boundaries (e.g. across paragraphs) aren't marked (and thus not navigable).
+  // Runs again when messages/streaming re-render (marks are rebuilt); it only auto-scrolls
+  // when the query itself changed, so streaming updates don't yank the viewport around.
+  useEffect(() => {
+    const root = messagesRef.current;
+    if (!root) return;
+    root.querySelectorAll('mark.fn-ai-find-mark').forEach((m) => {
+      const parent = m.parentNode;
+      if (!parent) return;
+      parent.replaceChild(document.createTextNode(m.textContent ?? ''), m);
+      parent.normalize();
+    });
+    const q = findOpen ? findQuery.trim().toLowerCase() : '';
+    const isNewQuery = q !== lastFindQueryRef.current;
+    lastFindQueryRef.current = q;
+    if (isNewQuery) findIdxRef.current = 0;
+    if (!q) {
+      findMarksRef.current = [];
+      setFindTotal(0);
+      setFindIdx(0);
+      return;
+    }
+    root.querySelectorAll('.fn-ai-msg__body').forEach((body) => {
+      const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+      const textNodes: Text[] = [];
+      let n: Node | null;
+      while ((n = walker.nextNode())) textNodes.push(n as Text);
+      for (const node of textNodes) {
+        const text = node.nodeValue ?? '';
+        const lower = text.toLowerCase();
+        let i = lower.indexOf(q);
+        if (i === -1) continue;
+        const frag = document.createDocumentFragment();
+        let pos = 0;
+        while (i !== -1) {
+          if (i > pos) frag.appendChild(document.createTextNode(text.slice(pos, i)));
+          const mark = document.createElement('mark');
+          mark.className = 'fn-ai-find-mark';
+          mark.textContent = text.slice(i, i + q.length);
+          frag.appendChild(mark);
+          pos = i + q.length;
+          i = lower.indexOf(q, pos);
+        }
+        if (pos < text.length) frag.appendChild(document.createTextNode(text.slice(pos)));
+        node.parentNode?.replaceChild(frag, node);
+      }
+    });
+    // Marks appear in DOM order, i.e. chronological message order.
+    const marks = Array.from(root.querySelectorAll<HTMLElement>('mark.fn-ai-find-mark'));
+    findMarksRef.current = marks;
+    const idx = Math.min(findIdxRef.current, Math.max(marks.length - 1, 0));
+    findIdxRef.current = idx;
+    setFindTotal(marks.length);
+    setFindIdx(idx);
+    applyCurrentFindMark(idx, isNewQuery && marks.length > 0);
+  }, [findOpen, findQuery, session.messages, showSource, streamingText]);
 
   const handleSend = () => {
     const text = draft.trim();
@@ -258,6 +376,44 @@ export function AiWorkbench({
           📝 {t('aiWorkbench.toNote')}
         </button>
       </div>
+      {findOpen && (
+        <div className="fn-ai-findbar">
+          <input
+            ref={findInputRef}
+            value={findQuery}
+            placeholder={t('findReplace.findPlaceholder')}
+            onChange={(e) => {
+              setFindQuery(e.target.value);
+              setFindIdx(0);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                stepFind(e.shiftKey ? -1 : 1);
+              } else if (e.key === 'Escape') {
+                e.preventDefault();
+                setFindOpen(false);
+              }
+            }}
+          />
+          <span className="fn-ai-findbar__count">
+            {findQuery.trim()
+              ? findTotal > 0
+                ? `${findIdx + 1}/${findTotal}`
+                : t('findReplace.noMatches')
+              : ''}
+          </span>
+          <button type="button" title={t('findReplace.prev')} disabled={findTotal === 0} onClick={() => stepFind(-1)}>
+            ↑
+          </button>
+          <button type="button" title={t('findReplace.next')} disabled={findTotal === 0} onClick={() => stepFind(1)}>
+            ↓
+          </button>
+          <button type="button" title={t('findReplace.close')} onClick={() => setFindOpen(false)}>
+            ×
+          </button>
+        </div>
+      )}
       {convertOpen && (
         <div className="fn-modal-backdrop" onClick={() => setConvertOpen(false)}>
           <div className="fn-modal" onClick={(e) => e.stopPropagation()}>
@@ -385,16 +541,25 @@ export function AiWorkbench({
           <div className="fn-ai-msg fn-ai-msg--assistant fn-ai-msg--streaming">
             <span className="fn-ai-msg__role">{t('aiWorkbench.roleAssistant')}</span>
             {streamingText ? (
-              renderAssistantBody(streamingText)
+              <>
+                {renderAssistantBody(streamingText)}
+                {streamingWebSearches > 0 && (
+                  <div className="fn-ai-msg__websearch">
+                    {t('aiWorkbench.webSearched', { count: String(streamingWebSearches) })}
+                  </div>
+                )}
+              </>
             ) : (
               <div className="fn-ai-msg__body fn-ai-msg__body--plain">
-                {patienceDue
-                  ? streamingThinkingChars > 0
-                    ? t('aiWorkbench.patienceThinking', { chars: String(streamingThinkingChars) })
-                    : t('aiWorkbench.patience')
-                  : streamingThinkingChars > 0
-                    ? t('aiWorkbench.thinkingDeep', { chars: String(streamingThinkingChars) })
-                    : t('aiWorkbench.thinking')}
+                {streamingWebSearches > 0
+                  ? t('aiWorkbench.webSearching', { count: String(streamingWebSearches) })
+                  : patienceDue
+                    ? streamingThinkingChars > 0
+                      ? t('aiWorkbench.patienceThinking', { chars: String(streamingThinkingChars) })
+                      : t('aiWorkbench.patience')
+                    : streamingThinkingChars > 0
+                      ? t('aiWorkbench.thinkingDeep', { chars: String(streamingThinkingChars) })
+                      : t('aiWorkbench.thinking')}
               </div>
             )}
           </div>

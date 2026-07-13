@@ -69,7 +69,30 @@ export class ApiClient {
 
   /** Guard for authenticated endpoints: turn a 401 into a typed session-expired error. */
   private assertAuthed(res: Response): void {
-    if (res.status === 401) throw new ApiAuthError(this.t("apiClient.sessionExpired"));
+    if (res.status === 401) {
+      console.warn(`[FastNote] api: ${res.url} answered 401 (token expired or invalidated)`);
+      throw new ApiAuthError(this.t("apiClient.sessionExpired"));
+    }
+  }
+
+  /**
+   * Builds the localized user-facing error for a failed response, after logging the real
+   * reason (endpoint, HTTP status, response body) to the console — which the in-app log
+   * viewer captures. The generic UI messages ("同步上传失败") otherwise hide the server's
+   * actual complaint.
+   */
+  private async httpError(res: Response, op: string, messageKey: string): Promise<Error> {
+    let body = "";
+    try {
+      body = (await res.text()).slice(0, 500);
+    } catch {
+      // Body already consumed or unreadable; the status line alone still helps.
+    }
+    console.error(`[FastNote] api: ${op} failed HTTP ${res.status}${body ? ` — ${body}` : ""}`);
+    // 413 gets a dedicated message: the fix is a server upgrade (raised bodyLimit) or
+    // splitting the offending note, which the generic "sync failed" text doesn't convey.
+    if (res.status === 413) return new Error(this.t("apiClient.payloadTooLarge"));
+    return new Error(this.t(messageKey));
   }
 
   async register(
@@ -157,7 +180,7 @@ export class ApiClient {
       body: JSON.stringify({ vault_salt: vaultSalt }),
     });
     this.assertAuthed(res);
-    if (!res.ok) throw new Error(this.t("apiClient.vaultSaltUploadFailed"));
+    if (!res.ok) throw await this.httpError(res, "PUT /vault-salt", "apiClient.vaultSaltUploadFailed");
   }
 
   async updateKeys(
@@ -177,7 +200,7 @@ export class ApiClient {
       }),
     });
     this.assertAuthed(res);
-    if (!res.ok) throw new Error(this.t("apiClient.keysUploadFailed"));
+    if (!res.ok) throw await this.httpError(res, "PUT /keys", "apiClient.keysUploadFailed");
   }
 
   async lookupUser(token: string, username: string): Promise<ChatPeer> {
@@ -240,7 +263,7 @@ export class ApiClient {
       const data = (await res.json()) as { server_version: number };
       return { conflict: true, serverVersion: data.server_version };
     }
-    if (!res.ok) throw new Error(this.t("apiClient.syncPushFailed"));
+    if (!res.ok) throw await this.httpError(res, `PUT /sync/notes/${noteId}`, "apiClient.syncPushFailed");
     return {};
   }
 
@@ -249,7 +272,7 @@ export class ApiClient {
       headers: { Authorization: `Bearer ${token}` },
     });
     this.assertAuthed(res);
-    if (!res.ok) throw new Error(this.t("apiClient.syncPullFailed"));
+    if (!res.ok) throw await this.httpError(res, "GET /sync/notes", "apiClient.syncPullFailed");
     const data = (await res.json()) as { items: SyncNoteItem[] };
     return data.items;
   }
@@ -281,7 +304,8 @@ export class ApiClient {
       const data = (await res.json()) as { server_version: number };
       return { conflict: true, serverVersion: data.server_version };
     }
-    if (!res.ok) throw new Error(this.t("apiClient.attachmentPushFailed"));
+    if (!res.ok)
+      throw await this.httpError(res, `PUT /sync/attachments/${attachmentId}`, "apiClient.attachmentPushFailed");
     return {};
   }
 
@@ -290,7 +314,7 @@ export class ApiClient {
       headers: { Authorization: `Bearer ${token}` },
     });
     this.assertAuthed(res);
-    if (!res.ok) throw new Error(this.t("apiClient.attachmentPullFailed"));
+    if (!res.ok) throw await this.httpError(res, "GET /sync/attachments", "apiClient.attachmentPullFailed");
     const data = (await res.json()) as { items: SyncAttachmentItem[] };
     return data.items;
   }
@@ -309,7 +333,7 @@ export class ApiClient {
       body: JSON.stringify(body),
     });
     this.assertAuthed(res);
-    if (!res.ok) throw new Error(this.t("apiClient.syncPushFailed"));
+    if (!res.ok) throw await this.httpError(res, `PUT /sync/chat/${messageId}`, "apiClient.syncPushFailed");
   }
 
   async pullChatMessages(token: string): Promise<SyncChatMessageItem[]> {
@@ -317,7 +341,7 @@ export class ApiClient {
       headers: { Authorization: `Bearer ${token}` },
     });
     this.assertAuthed(res);
-    if (!res.ok) throw new Error(this.t("apiClient.syncPullFailed"));
+    if (!res.ok) throw await this.httpError(res, "GET /sync/chat", "apiClient.syncPullFailed");
     const data = (await res.json()) as { items: SyncChatMessageItem[] };
     return data.items;
   }

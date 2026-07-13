@@ -205,6 +205,8 @@ export function VaultApp() {
   const [unlockProgress, setUnlockProgress] = useState<{ current: number; total: number } | null>(null);
   const [isLocking, setIsLocking] = useState(false);
   const [groups, setGroups] = useState<TabGroupState[]>(() => loadTabState().groups);
+  const groupsRef = useRef(groups);
+  groupsRef.current = groups;
   const [activeGroupId, setActiveGroupId] = useState<string>(() => loadTabState().activeGroupId);
   const [editorModeByGroup, setEditorModeByGroup] = useState<Record<string, EditorMode>>({});
   const [tiptapEditorByGroup, setTiptapEditorByGroup] = useState<Record<string, Editor | null>>({});
@@ -219,19 +221,29 @@ export function VaultApp() {
   const [aiSettings, setAiSettings] = useState<AiSettings | null>(null);
   const [aiSessions, setAiSessions] = useState<AiSessionNode[]>([]);
   const [activeAiSessionId, setActiveAiSessionId] = useState<string | null>(null);
+  const activeAiSessionIdRef = useRef(activeAiSessionId);
+  activeAiSessionIdRef.current = activeAiSessionId;
   // In-flight AI reply: streamed here (app level) so switching sessions/views never interrupts it.
   const [aiRun, setAiRun] = useState<{
     sessionId: string;
     text: string;
     thinkingChars?: number;
+    webSearches?: number;
     startedAt: number;
   } | null>(null);
   const [aiRunError, setAiRunError] = useState<{ sessionId: string; message: string } | null>(null);
   const aiAbortRef = useRef<AbortController | null>(null);
   // Find/replace bar: id of the tab group it is open in (null = closed).
   const [findBarGroupId, setFindBarGroupId] = useState<string | null>(null);
-  // Attachment manager modal for the focused table (notes keep their inline panel).
-  const [showTableAttachments, setShowTableAttachments] = useState(false);
+  // Pre-filled query for the find bar (selected editor text on Ctrl+F, or the global-search
+  // query when a result is opened). Cleared when the bar closes.
+  const [findInitialQuery, setFindInitialQuery] = useState<string | null>(null);
+  // Bumped on every Ctrl+F so an already-open bar refocuses (and reloads the initial query).
+  const [findBarNonce, setFindBarNonce] = useState(0);
+  // Ctrl+F while an AI session is open: forwarded to the AI workbench's own find bar.
+  const [aiFindRequest, setAiFindRequest] = useState<{ nonce: number; query: string } | null>(null);
+  // Attachment manager modal for the focused note/table (opened from the 📎 header button).
+  const [showAttachmentsModal, setShowAttachmentsModal] = useState(false);
   const findReplaceByGroupRef = useRef<Record<string, FindReplaceController | null>>({});
   // Cross-vault transfer: ids of the tree nodes being transferred (null = dialog closed).
   const [transferIds, setTransferIds] = useState<string[] | null>(null);
@@ -1203,7 +1215,7 @@ export function VaultApp() {
       setAiRun(null);
       setAiRunError(null);
       setFindBarGroupId(null);
-      setShowTableAttachments(false);
+      setShowAttachmentsModal(false);
       setFormulaEdit(null);
     } finally {
       setIsLocking(false);
@@ -1276,7 +1288,9 @@ export function VaultApp() {
         return;
       }
       if (matchesShortcut(e, bindings.renameNote)) {
-        const id = activeIdRef.current;
+        // Prefer the sidebar's focused node (folders can only be renamed there); tab selection
+        // keeps the anchor in sync, so this also covers "rename the note I'm working on".
+        const id = treeAnchorIdRef.current ?? activeIdRef.current;
         if (!id) return;
         e.preventDefault();
         setRenameRequestId(id);
@@ -1288,6 +1302,26 @@ export function VaultApp() {
       if (matchesShortcut(e, bindings.findInNote)) {
         if (appViewRef.current !== 'notes') return;
         e.preventDefault();
+        // Pre-fill the bar with the current editor selection (browser convention): text inputs
+        // and textareas expose the selection directly; PM/CM selections come from the DOM.
+        const el = document.activeElement;
+        let selected = '';
+        if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) {
+          const start = el.selectionStart ?? 0;
+          const end = el.selectionEnd ?? 0;
+          if (end > start) selected = el.value.slice(start, end);
+        } else {
+          selected = window.getSelection()?.toString() ?? '';
+        }
+        // Multi-line selections are kept intact — the find engines match across lines.
+        const query = selected.replace(/^\n+|\n+$/g, '').slice(0, 500);
+        // An open AI session has its own find bar (the tab groups behind it aren't visible).
+        if (activeAiSessionIdRef.current) {
+          setAiFindRequest((prev) => ({ nonce: (prev?.nonce ?? 0) + 1, query }));
+          return;
+        }
+        setFindInitialQuery(query || null);
+        setFindBarNonce((n) => n + 1);
         setFindBarGroupId(activeGroupIdRef.current);
         return;
       }
@@ -1826,7 +1860,9 @@ export function VaultApp() {
     setGroups((prev) => prev.map((g) => (g.id === groupId ? { ...g, activeTabId: tabId } : g)));
     setActiveGroupId(groupId);
     // Keep the sidebar in sync with the tab the user just picked: expand ancestors, scroll to and
-    // highlight the file.
+    // highlight the file. The anchor moves too, so F2 renames what the user just selected instead
+    // of a stale sidebar row.
+    treeAnchorIdRef.current = tabId;
     revealNoteInTree(tabId);
   };
 
@@ -1982,6 +2018,7 @@ export function VaultApp() {
     aiAbortRef.current = ac;
     let acc = '';
     let thinking = 0;
+    let searches = 0;
     // When the first streamed content (text or hidden thinking) arrived — shown in the reply's
     // timestamp line alongside the completion time.
     let receiveStartTs: string | null = null;
@@ -1993,17 +2030,24 @@ export function VaultApp() {
       const result = await client.streamMessage({
         model: aiSettings.model || DEFAULT_CLAUDE_MODEL,
         maxTokens: aiSettings.maxTokens,
+        webSearch: aiSettings.webSearch,
+        webSearchMaxUses: aiSettings.webSearchMaxUses,
         messages: base.map(aiMessageToApi),
         signal: ac.signal,
         onDelta: (delta) => {
           markReceiveStart();
           acc += delta;
-          setAiRun({ sessionId, text: acc, thinkingChars: thinking, startedAt });
+          setAiRun({ sessionId, text: acc, thinkingChars: thinking, webSearches: searches, startedAt });
         },
         onThinking: (total) => {
           markReceiveStart();
           thinking = total;
-          setAiRun({ sessionId, text: acc, thinkingChars: total, startedAt });
+          setAiRun({ sessionId, text: acc, thinkingChars: total, webSearches: searches, startedAt });
+        },
+        onWebSearch: (total) => {
+          markReceiveStart();
+          searches = total;
+          setAiRun({ sessionId, text: acc, thinkingChars: thinking, webSearches: total, startedAt });
         },
       });
       const finalText = result.text || acc;
@@ -2675,6 +2719,9 @@ export function VaultApp() {
         if (node) await refreshAttachments(node.id);
       }
     } catch (err) {
+      // The status line only shows a short localized message; the full error (stack, fetch
+      // failure reason, server detail already logged by ApiClient) goes to the captured logs.
+      console.error('[FastNote] sync: failed', err);
       if (err instanceof ApiAuthError) {
         expireSession();
         setShowAuth(true);
@@ -2804,6 +2851,28 @@ export function VaultApp() {
     () => (searchQuery ? searchIndexRef.current.search(searchQuery) : []),
     [searchQuery, searchTick],
   );
+
+  /**
+   * After a global-search result is opened: switch that note's group to the source view and open
+   * the find bar pre-filled with the query, so the keyword is highlighted and jumped to. Runs on
+   * the next tick so openNote's state updates have landed and the group can be resolved.
+   */
+  const locateNoteInSource = (noteId: string, query: string) => {
+    const q = query.trim();
+    if (!q) return;
+    window.setTimeout(() => {
+      // Only markdown notes have a source view; tables would just get a dangling mode flag.
+      if (notesRef.current.find((n) => n.id === noteId)?.nodeType !== 'note') return;
+      const group = groupsRef.current.find((g) => g.activeTabId === noteId);
+      if (!group) return;
+      setEditorModeByGroup((prev) =>
+        prev[group.id] === 'source' ? prev : { ...prev, [group.id]: 'source' },
+      );
+      setFindInitialQuery(q);
+      setFindBarNonce((n) => n + 1);
+      setFindBarGroupId(group.id);
+    }, 0);
+  };
 
   const handleSaveDataDirectory = async (dir: string) => {
     if (!dir) return;
@@ -2963,21 +3032,33 @@ export function VaultApp() {
                 />
               </label>
               {isFocused && (
-                <button type="button" onClick={() => setShowTableAttachments(true)}>
+                <button type="button" onClick={() => setShowAttachmentsModal(true)}>
                   📎 {t('vaultApp.attachmentsBtn')}
                   {attachments.length > 0 ? ` (${attachments.length})` : ''}
                 </button>
               )}
                 </div>
+                {findBarGroupId === group.id && (
+                  <FindReplaceBar
+                    key={content.id}
+                    getController={() => findReplaceByGroupRef.current[group.id] ?? null}
+                    initialQuery={findInitialQuery ?? undefined}
+                    focusNonce={findBarNonce}
+                    onClose={() => {
+                      setFindBarGroupId(null);
+                      setFindInitialQuery(null);
+                    }}
+                  />
+                )}
               </div>
             </div>
-            {isFocused && showTableAttachments && (
-              <div className="fn-modal-backdrop" onClick={() => setShowTableAttachments(false)}>
+            {isFocused && showAttachmentsModal && (
+              <div className="fn-modal-backdrop" onClick={() => setShowAttachmentsModal(false)}>
                 <div className="fn-modal fn-attach-modal" onClick={(e) => e.stopPropagation()}>
                   <h2>{t('vaultApp.attachmentsBtn')}</h2>
                   {renderAttachmentsPanel(content.id, true)}
                   <div className="fn-modal__actions">
-                    <button type="button" onClick={() => setShowTableAttachments(false)}>
+                    <button type="button" onClick={() => setShowAttachmentsModal(false)}>
                       {t('common.close')}
                     </button>
                   </div>
@@ -3004,6 +3085,9 @@ export function VaultApp() {
                   repeatActionShortcut={shortcuts.tableRepeatAction}
                   undoShortcut={shortcuts.tableUndo}
                   redoShortcut={shortcuts.tableRedo}
+                  onRegisterFindReplace={(ctrl) => {
+                    findReplaceByGroupRef.current[group.id] = ctrl;
+                  }}
                 />
               </div>
             </div>
@@ -3054,6 +3138,12 @@ export function VaultApp() {
                   >
                     {'{ }'}
                   </button>
+                  {isFocused && (
+                    <button type="button" onClick={() => setShowAttachmentsModal(true)}>
+                      📎 {t('vaultApp.attachmentsBtn')}
+                      {attachments.length > 0 ? ` (${attachments.length})` : ''}
+                    </button>
+                  )}
                   {(selCharsByGroup[group.id] ?? 0) > 0 && (
                     <span className="fn-selchars">
                       {t('vaultApp.selectedChars', { count: String(selCharsByGroup[group.id]) })}
@@ -3065,7 +3155,12 @@ export function VaultApp() {
                   <FindReplaceBar
                     key={`${content.id}-${mode}`}
                     getController={() => findReplaceByGroupRef.current[group.id] ?? null}
-                    onClose={() => setFindBarGroupId(null)}
+                    initialQuery={findInitialQuery ?? undefined}
+                    focusNonce={findBarNonce}
+                    onClose={() => {
+                      setFindBarGroupId(null);
+                      setFindInitialQuery(null);
+                    }}
                   />
                 )}
                 {formulaEdit && formulaEdit.groupId === group.id && (
@@ -3081,6 +3176,19 @@ export function VaultApp() {
                 )}
               </div>
             </div>
+            {isFocused && showAttachmentsModal && (
+              <div className="fn-modal-backdrop" onClick={() => setShowAttachmentsModal(false)}>
+                <div className="fn-modal fn-attach-modal" onClick={(e) => e.stopPropagation()}>
+                  <h2>{t('vaultApp.attachmentsBtn')}</h2>
+                  {renderAttachmentsPanel(content.id, true)}
+                  <div className="fn-modal__actions">
+                    <button type="button" onClick={() => setShowAttachmentsModal(false)}>
+                      {t('common.close')}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
             <div className="fn-tab-group__scroll">
               <div className="fn-note" style={{ maxWidth: noteWidth }}>
                 {renderNoteResizeHandle()}
@@ -3114,7 +3222,6 @@ export function VaultApp() {
                   showLineNumbers={showLineNumbers}
                   enableMath={enableMath}
                 />
-                {isFocused && renderAttachmentsPanel(content.id, true)}
               </div>
             </div>
           </>
@@ -3290,10 +3397,12 @@ export function VaultApp() {
                       type="button"
                       className="fn-search-result"
                       onClick={() => {
+                        const q = searchQuery;
                         openNote(r.id);
                         setExpandedSearch(false);
                         setSearchQuery('');
                         revealNoteInTree(r.id);
+                        locateNoteInSource(r.id, q);
                       }}
                     >
                       <span className="fn-search-result__title">{r.title || t('common.untitled')}</span>
@@ -3380,6 +3489,9 @@ export function VaultApp() {
               streamingStartedAt={
                 aiRun && aiRun.sessionId === activeAiSession.id ? aiRun.startedAt : null
               }
+              streamingWebSearches={
+                aiRun && aiRun.sessionId === activeAiSession.id ? (aiRun.webSearches ?? 0) : 0
+              }
               busy={aiRun !== null}
               error={aiRunError && aiRunError.sessionId === activeAiSession.id ? aiRunError.message : null}
               onSend={(text, attachments) => void runAiRequest(activeAiSession.id, text, attachments)}
@@ -3388,6 +3500,7 @@ export function VaultApp() {
               prepareAttachment={handlePrepareAiAttachment}
               onConvertToNote={(messages) => void handleAiConvertToNote(activeAiSession.id, messages)}
               onOpenSettings={() => setShowSettings(true)}
+              findRequest={aiFindRequest}
             />
           ) : (
             <>

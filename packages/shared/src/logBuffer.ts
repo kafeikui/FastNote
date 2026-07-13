@@ -10,10 +10,19 @@
 export type LogLevel = 'log' | 'info' | 'warn' | 'error';
 
 export interface LogEntry {
-  /** ISO timestamp. */
+  /** Local date-time, `YYYY-MM-DD HH:mm:ss.SSS` (users read these logs in their own timezone). */
   ts: string;
   level: LogLevel;
   text: string;
+}
+
+function formatLocalTs(d: Date): string {
+  const p2 = (n: number) => String(n).padStart(2, '0');
+  const p3 = (n: number) => String(n).padStart(3, '0');
+  return (
+    `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ` +
+    `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}.${p3(d.getMilliseconds())}`
+  );
 }
 
 const MAX_ENTRIES = 2000;
@@ -33,7 +42,7 @@ function formatArg(arg: unknown): string {
 
 function push(level: LogLevel, args: unknown[]): void {
   entries.push({
-    ts: new Date().toISOString(),
+    ts: formatLocalTs(new Date()),
     level,
     text: args.map(formatArg).join(' '),
   });

@@ -166,40 +166,123 @@ export function copyDelimiterChar(active: TableDelimiter[]): string {
 }
 
 /**
- * Parses clipboard text into a 2D grid using the active delimiters. Rows always split on
- * newlines; cells split on the highest-priority active delimiter that actually appears in the
- * text (so a tab-separated Excel paste is never mangled by a comma inside a value when both are
- * active). With no active delimiters, each line stays a single cell (multi-line pastes still
- * fill a column). Returns null when the text is effectively a single value (caller keeps the
- * default paste behavior).
+ * Excel-style quoting for one copied cell: values containing a line break, the delimiter, or a
+ * quote are wrapped in double quotes (inner quotes doubled), so an in-cell Shift+Enter line
+ * break survives a copy → paste round-trip instead of being parsed as a row separator.
+ */
+export function encodeCellForCopy(value: string, delimChar: string): string {
+  if (!value.includes('\n') && !value.includes('"') && !value.includes(delimChar)) return value;
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+/**
+ * Splits clipboard text into rows/cells honoring Excel-style double-quoted fields: inside a
+ * quoted field (quote at field start), delimiters and newlines are literal content and `""` is
+ * an escaped quote. `delim` is a single char, 'space' (any run of blanks, collapsed, edges
+ * trimmed — the legacy whitespace mode), or null (rows only).
+ */
+function splitQuoteAware(text: string, delim: string | 'space' | null): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cur = '';
+  let curQuoted = false;
+  const isDelim = (ch: string) =>
+    delim === 'space' ? ch === ' ' || ch === '\t' : delim !== null && ch === delim;
+  const pushCell = () => {
+    // Space mode collapses delimiter runs, so empty unquoted fragments between blanks vanish.
+    if (delim === 'space' && cur === '' && !curQuoted) return;
+    row.push(curQuoted ? cur : cur.trim());
+    cur = '';
+    curQuoted = false;
+  };
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"' && cur.trim() === '' && !curQuoted) {
+      // Potential quoted field. Only treat it as one if a closing quote exists; otherwise the
+      // quote is literal text (e.g. `"unbalanced).
+      let j = i + 1;
+      let val = '';
+      let closed = false;
+      while (j < text.length) {
+        if (text[j] === '"') {
+          if (text[j + 1] === '"') {
+            val += '"';
+            j += 2;
+            continue;
+          }
+          closed = true;
+          j++;
+          break;
+        }
+        val += text[j];
+        j++;
+      }
+      if (closed) {
+        cur = val;
+        curQuoted = true;
+        i = j - 1;
+        continue;
+      }
+    }
+    if (ch === '\n') {
+      pushCell();
+      if (delim === 'space' && row.length === 0) row.push('');
+      rows.push(row);
+      row = [];
+      continue;
+    }
+    if (isDelim(ch)) {
+      pushCell();
+      continue;
+    }
+    // Lenient: stray text after a closing quote (rare, malformed) is appended as-is.
+    cur += ch;
+  }
+  pushCell();
+  if (row.length > 0) rows.push(row);
+  return rows;
+}
+
+/**
+ * Parses clipboard text into a 2D grid using the active delimiters. Rows split on newlines and
+ * cells on the highest-priority active delimiter that actually appears in the text (so a
+ * tab-separated Excel paste is never mangled by a comma inside a value when both are active) —
+ * except inside double-quoted fields, which keep delimiters *and newlines* literally (this is
+ * how a multi-line cell copied from this table or Excel survives the round-trip). With no
+ * active delimiters, each line stays a single cell (multi-line pastes still fill a column).
+ * Returns null when the text is a single plain value (caller keeps the default paste behavior);
+ * a single *quoted* value still parses, so its quotes never land in the cell literally.
  */
 export function parsePasteGrid(
   text: string,
   active: TableDelimiter[] = DEFAULT_DELIMITERS,
 ): string[][] | null {
   if (!text) return null;
-  const lines = text.replace(/\r\n?/g, '\n').split('\n');
-  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
-  if (lines.length === 0) return null;
+  const normalized = text.replace(/\r\n?/g, '\n');
 
-  let splitLine: (line: string) => string[] = (l) => [l];
+  let delim: string | 'space' | null = null;
   for (const d of DELIMITER_PRIORITY) {
     if (!active.includes(d)) continue;
     if (d === 'space') {
-      if (lines.some((l) => /\s/.test(l.trim()))) {
-        splitLine = (l) => (l.trim() === '' ? [''] : l.trim().split(/\s+/));
+      if (/[^\S\n]/.test(normalized.trim())) {
+        delim = 'space';
         break;
       }
-    } else {
-      const ch = DELIMITER_CHAR[d];
-      if (lines.some((l) => l.includes(ch))) {
-        splitLine = (l) => l.split(ch);
-        break;
-      }
+    } else if (normalized.includes(DELIMITER_CHAR[d])) {
+      delim = DELIMITER_CHAR[d];
+      break;
     }
   }
 
-  const grid = lines.map((l) => splitLine(l).map((v) => v.trim()));
-  if (grid.length === 1 && grid[0].length <= 1) return null;
-  return grid;
+  const rows = splitQuoteAware(normalized, delim);
+  while (rows.length > 0 && rows[rows.length - 1].every((c) => c === '')) rows.pop();
+  if (rows.length === 0) return null;
+  if (rows.length === 1 && rows[0].length <= 1) {
+    const only = rows[0]?.[0] ?? '';
+    // A plain single value → let the native paste insert at the caret. A transformed value
+    // (it was quoted) must go through the grid path or the quotes would paste literally.
+    if (only === normalized.trim()) return null;
+    return [[only]];
+  }
+  return rows;
 }

@@ -113,6 +113,7 @@ export const zh = {
     replace: '替换',
     replaceAll: '全部替换',
     close: '关闭 (Esc)',
+    multilineHint: '支持多行内容：Ctrl/⌘+Enter 插入换行',
   },
   vaultTransfer: {
     title: '传输到其它加密库',
@@ -171,6 +172,8 @@ export const zh = {
     sentAt: '发送',
     recvStartAt: '开始接收',
     recvEndAt: '接收完毕',
+    webSearching: '正在联网搜索（第 {count} 次）…',
+    webSearched: '🔍 本次回复已联网搜索 {count} 次',
     patience: '仍在生成中，复杂问题可能需要几分钟，请耐心等待…（可随时点击"停止"）',
     patienceThinking:
       '仍在深度思考中（已思考 {chars} 字），复杂问题可能需要几分钟，请耐心等待…（可随时点击"停止"）',
@@ -249,6 +252,10 @@ export const zh = {
       maxTokensLabel: '单次回复 token 上限（max_tokens）',
       maxTokensHint:
         '范围 {min}–{max}，默认 {def}。推理模型的内部思考也计入该预算：复杂问题建议调大，否则可能思考耗尽预算导致正文为空。',
+      webSearchLabel: '允许联网搜索（回复过程中自动检索网络信息）',
+      webSearchMaxUsesLabel: '单次回复最大搜索次数',
+      webSearchHint:
+        '开启后模型可在生成回复时调用 Anthropic 服务端的网络搜索获取实时信息（如 Claude App）。搜索在 Anthropic 侧执行，本机不会新增网络连接；次数范围 {min}–{max}（默认 {def}），每次搜索会产生额外 token 消耗。',
       hint: 'API Key 使用主密钥加密后保存在本库中，锁定后不可读；仅在你主动发送消息时才会连接 api.anthropic.com。',
       save: '保存 AI 设置',
       saved: '已保存',
@@ -425,6 +432,7 @@ export const zh = {
     vaultSaltUploadFailed: '上传加密库参数失败',
     keysUploadFailed: '上传公钥失败',
     sessionExpired: '登录已过期，请重新登录',
+    payloadTooLarge: '单条内容过大，被服务器拒绝（HTTP 413）。请升级服务器（新版上限 32MB），或拆分超大的笔记/附件。',
     userNotFound: '用户不存在',
     syncPushFailed: '同步上传失败',
     syncPullFailed: '同步拉取失败',

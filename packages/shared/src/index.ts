@@ -152,12 +152,21 @@ export const AI_MAX_TOKENS_LIMIT = 128000;
 /** Roomy default: reasoning models spend part of the budget on hidden thinking. */
 export const AI_MAX_TOKENS_DEFAULT = 16384;
 
+/** Bounds for the per-reply web search budget (each search adds latency and token cost). */
+export const AI_WEB_SEARCH_USES_MIN = 1;
+export const AI_WEB_SEARCH_USES_LIMIT = 50;
+export const AI_WEB_SEARCH_USES_DEFAULT = 5;
+
 /** Per-vault AI Workbench settings, stored encrypted in vault_meta. */
 export interface AiSettings {
   apiKey: string;
   model: string;
   /** Per-reply output token budget; unset falls back to AI_MAX_TOKENS_DEFAULT. */
   maxTokens?: number;
+  /** Lets the model run Anthropic's server-side web search during a reply (off by default). */
+  webSearch?: boolean;
+  /** Max web searches per reply; unset falls back to AI_WEB_SEARCH_USES_DEFAULT. */
+  webSearchMaxUses?: number;
 }
 
 /**

@@ -6,6 +6,9 @@ import {
   AI_MAX_TOKENS_DEFAULT,
   AI_MAX_TOKENS_LIMIT,
   AI_MAX_TOKENS_MIN,
+  AI_WEB_SEARCH_USES_DEFAULT,
+  AI_WEB_SEARCH_USES_LIMIT,
+  AI_WEB_SEARCH_USES_MIN,
   DEFAULT_SHORTCUTS,
   formatShortcutBinding,
   shortcutBindingFromEvent,
@@ -117,6 +120,10 @@ export function SettingsModal({
   const [aiCustomModelDraft, setAiCustomModelDraft] = useState(isCustomModel ? initialModel : '');
   const [aiMaxTokensDraft, setAiMaxTokensDraft] = useState(
     String(aiSettings?.maxTokens ?? AI_MAX_TOKENS_DEFAULT),
+  );
+  const [aiWebSearchDraft, setAiWebSearchDraft] = useState(aiSettings?.webSearch ?? false);
+  const [aiWebSearchUsesDraft, setAiWebSearchUsesDraft] = useState(
+    String(aiSettings?.webSearchMaxUses ?? AI_WEB_SEARCH_USES_DEFAULT),
   );
   const [aiSaved, setAiSaved] = useState(false);
 
@@ -350,6 +357,40 @@ export function SettingsModal({
               def: String(AI_MAX_TOKENS_DEFAULT),
             })}
           </p>
+          <label className="fn-checkbox">
+            <input
+              type="checkbox"
+              checked={aiWebSearchDraft}
+              onChange={(e) => {
+                setAiWebSearchDraft(e.target.checked);
+                setAiSaved(false);
+              }}
+            />
+            <span>{t('settingsModal.ai.webSearchLabel')}</span>
+          </label>
+          {aiWebSearchDraft && (
+            <label className="fn-field">
+              <span>{t('settingsModal.ai.webSearchMaxUsesLabel')}</span>
+              <input
+                type="number"
+                min={AI_WEB_SEARCH_USES_MIN}
+                max={AI_WEB_SEARCH_USES_LIMIT}
+                step={1}
+                value={aiWebSearchUsesDraft}
+                onChange={(e) => {
+                  setAiWebSearchUsesDraft(e.target.value);
+                  setAiSaved(false);
+                }}
+              />
+            </label>
+          )}
+          <p className="fn-field__hint">
+            {t('settingsModal.ai.webSearchHint', {
+              min: String(AI_WEB_SEARCH_USES_MIN),
+              max: String(AI_WEB_SEARCH_USES_LIMIT),
+              def: String(AI_WEB_SEARCH_USES_DEFAULT),
+            })}
+          </p>
           <p className="fn-field__hint">{t('settingsModal.ai.hint')}</p>
           <div className="fn-modal__actions">
             <button
@@ -362,7 +403,18 @@ export function SettingsModal({
                   ? Math.min(AI_MAX_TOKENS_LIMIT, Math.max(AI_MAX_TOKENS_MIN, parsed))
                   : AI_MAX_TOKENS_DEFAULT;
                 setAiMaxTokensDraft(String(maxTokens));
-                onAiSettingsSave({ apiKey: aiKeyDraft.trim(), model, maxTokens });
+                const parsedUses = Math.round(Number(aiWebSearchUsesDraft));
+                const webSearchMaxUses = Number.isFinite(parsedUses)
+                  ? Math.min(AI_WEB_SEARCH_USES_LIMIT, Math.max(AI_WEB_SEARCH_USES_MIN, parsedUses))
+                  : AI_WEB_SEARCH_USES_DEFAULT;
+                setAiWebSearchUsesDraft(String(webSearchMaxUses));
+                onAiSettingsSave({
+                  apiKey: aiKeyDraft.trim(),
+                  model,
+                  maxTokens,
+                  webSearch: aiWebSearchDraft,
+                  webSearchMaxUses,
+                });
                 setAiSaved(true);
               }}
             >

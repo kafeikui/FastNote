@@ -9,7 +9,7 @@
  * bootstrap scripts).
  */
 
-import { AI_MAX_TOKENS_DEFAULT } from '@fastnote/shared';
+import { AI_MAX_TOKENS_DEFAULT, AI_WEB_SEARCH_USES_DEFAULT } from '@fastnote/shared';
 
 export const ANTHROPIC_API_ORIGIN = 'https://api.anthropic.com';
 const MESSAGES_URL = `${ANTHROPIC_API_ORIGIN}/v1/messages`;
@@ -57,10 +57,20 @@ export interface StreamMessageOptions {
   system?: string;
   maxTokens?: number;
   signal?: AbortSignal;
+  /**
+   * Enables Anthropic's server-side web search tool: the model can look things up mid-response
+   * (like the Claude app does). Everything runs on Anthropic's side within the same request —
+   * the client makes no extra network connections.
+   */
+  webSearch?: boolean;
+  /** Max web searches per reply; unset falls back to AI_WEB_SEARCH_USES_DEFAULT. */
+  webSearchMaxUses?: number;
   /** Called for each streamed visible-text fragment as it arrives. */
   onDelta: (text: string) => void;
   /** Called as the model's (hidden) thinking grows, with the total thinking characters so far. */
   onThinking?: (totalChars: number) => void;
+  /** Called each time the model starts a web search, with the total number of searches so far. */
+  onWebSearch?: (totalSearches: number) => void;
 }
 
 export interface StreamMessageResult {
@@ -69,6 +79,8 @@ export interface StreamMessageResult {
   stopReason: string | null;
   /** Total characters of hidden thinking emitted by the model. */
   thinkingChars: number;
+  /** Number of web searches the model performed (0 unless webSearch was enabled and used). */
+  webSearches: number;
 }
 
 export class AnthropicApiError extends Error {
@@ -142,6 +154,17 @@ export class AnthropicClient {
           system: opts.system,
           messages: opts.messages.map((m) => ({ role: m.role, content: m.content })),
           stream: true,
+          ...(opts.webSearch
+            ? {
+                tools: [
+                  {
+                    type: 'web_search_20250305',
+                    name: 'web_search',
+                    max_uses: opts.webSearchMaxUses ?? AI_WEB_SEARCH_USES_DEFAULT,
+                  },
+                ],
+              }
+            : {}),
         }),
       });
       console.info(`[FastNote] ai: response headers status=${res.status} after ${elapsed()}`);
@@ -162,6 +185,7 @@ export class AnthropicClient {
       let buffer = '';
       let full = '';
       let thinkingChars = 0;
+      let webSearches = 0;
       let stopReason: string | null = null;
       let firstByteLogged = false;
 
@@ -169,6 +193,7 @@ export class AnthropicClient {
         if (!data || data === '[DONE]') return;
         let event: {
           type?: string;
+          content_block?: { type?: string };
           delta?: { type?: string; text?: string; thinking?: string; stop_reason?: string };
           error?: { message?: string };
         };
@@ -179,6 +204,13 @@ export class AnthropicClient {
         }
         if (event.type === 'error') {
           throw new AnthropicApiError(0, event.error?.message ?? 'stream error');
+        }
+        if (event.type === 'content_block_start' && event.content_block?.type === 'server_tool_use') {
+          // The model decided to run a web search (executed server-side); surface it so the UI
+          // can show "searching the web…" instead of an unexplained pause in the stream.
+          webSearches++;
+          console.info(`[FastNote] ai: web search #${webSearches} started after ${elapsed()}`);
+          opts.onWebSearch?.(webSearches);
         }
         if (event.type === 'content_block_delta') {
           if (event.delta?.type === 'text_delta' && event.delta.text) {
@@ -216,9 +248,9 @@ export class AnthropicClient {
       if (rest.startsWith('data:')) handleData(rest.slice(5).trim());
 
       console.info(
-        `[FastNote] ai: done, ${full.length} chars (thinking ${thinkingChars} chars, stop_reason=${stopReason ?? 'n/a'}) in ${elapsed()}`,
+        `[FastNote] ai: done, ${full.length} chars (thinking ${thinkingChars} chars, ${webSearches} web searches, stop_reason=${stopReason ?? 'n/a'}) in ${elapsed()}`,
       );
-      return { text: full, stopReason, thinkingChars };
+      return { text: full, stopReason, thinkingChars, webSearches };
     } catch (err) {
       // Our own watchdog abort → typed timeout (unless the caller aborted first).
       if (timedOutPhase && !opts.signal?.aborted) {

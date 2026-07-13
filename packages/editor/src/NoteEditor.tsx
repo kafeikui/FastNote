@@ -277,6 +277,14 @@ export function NoteEditor({
       if (!m) return;
       const sel = TextSelection.create(editor.state.doc, m.from, m.to);
       editor.view.dispatch(editor.state.tr.setSelection(sel).scrollIntoView());
+      // ProseMirror's scrollIntoView proved unreliable on long documents (the actual scroll
+      // container is an app-level pane, not the editor DOM). Scroll the highlighted match
+      // element directly once the updated decorations have been painted.
+      requestAnimationFrame(() => {
+        if (editor.isDestroyed) return;
+        const el = editor.view.dom.querySelector<HTMLElement>('.fn-find-match--active');
+        el?.scrollIntoView({ block: 'center' });
+      });
     };
 
     const step = (dir: 1 | -1): FindReplaceStatus => {

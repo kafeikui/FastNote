@@ -115,6 +115,7 @@ export const en: Dictionary = {
     replace: 'Replace',
     replaceAll: 'Replace all',
     close: 'Close (Esc)',
+    multilineHint: 'Multi-line supported: Ctrl/⌘+Enter inserts a line break',
   },
   vaultTransfer: {
     title: 'Transfer to another vault',
@@ -173,6 +174,8 @@ export const en: Dictionary = {
     sentAt: 'Sent',
     recvStartAt: 'First received',
     recvEndAt: 'Completed',
+    webSearching: 'Searching the web (search #{count})…',
+    webSearched: '🔍 {count} web search(es) used for this reply',
     patience: 'Still working — complex prompts can take a few minutes, please hang tight… (Stop is always available)',
     patienceThinking:
       'Still thinking deeply ({chars} chars of reasoning so far) — complex prompts can take a few minutes, please hang tight… (Stop is always available)',
@@ -251,6 +254,10 @@ export const en: Dictionary = {
       maxTokensLabel: 'Per-reply token limit (max_tokens)',
       maxTokensHint:
         'Range {min}–{max}, default {def}. Hidden reasoning also counts against this budget: raise it for complex prompts, or the reply may come back empty after thinking exhausts the budget.',
+      webSearchLabel: 'Allow web search (the model can look things up mid-reply)',
+      webSearchMaxUsesLabel: 'Max searches per reply',
+      webSearchHint:
+        "When enabled, the model can use Anthropic's server-side web search for real-time information (like the Claude app). Searches run on Anthropic's side — no extra connections from this device; {min}–{max} searches per reply (default {def}), each with extra token cost.",
       hint: 'The API key is encrypted with your master key and stored in this vault only; api.anthropic.com is contacted only when you actively send a message.',
       save: 'Save AI settings',
       saved: 'Saved',
@@ -427,6 +434,8 @@ export const en: Dictionary = {
     vaultSaltUploadFailed: 'Failed to upload vault parameters',
     keysUploadFailed: 'Failed to upload public keys',
     sessionExpired: 'Session expired — please log in again',
+    payloadTooLarge:
+      'Item too large — rejected by the server (HTTP 413). Upgrade the server (new limit 32MB) or split the oversized note/attachment.',
     userNotFound: 'User not found',
     syncPushFailed: 'Sync upload failed',
     syncPullFailed: 'Sync download failed',

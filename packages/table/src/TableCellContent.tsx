@@ -43,7 +43,7 @@ interface TableCellContentProps {
   rowId: string;
   colId: string;
   onMoveAttachment: (from: AttachmentDragPos, to: AttachmentDragPos) => void;
-  onKeyDown?: (e: KeyboardEvent<HTMLInputElement>) => void;
+  onKeyDown?: (e: KeyboardEvent<HTMLTextAreaElement>) => void;
   /** Per-cell text formatting (bold / font size / color) applied to the text inputs. */
   textStyle?: CSSProperties;
   /** Reports how many characters are selected in the cell's text input (0 when none/blurred). */
@@ -183,12 +183,16 @@ function TableCellContent({
             />
           );
         }
+        const shown = (isFormula || formattedIdle) && !editing ? displayValue : seg.text;
         return (
-          <input
+          // A textarea (not an input) so Shift+Enter can insert in-cell line breaks; it grows
+          // with the number of lines and otherwise behaves like the old single-line input.
+          <textarea
             key={`text-${index}`}
             className={isFormula ? 'fn-table-cell__text fn-table-cell__formula-input' : 'fn-table-cell__text'}
             style={textStyle}
-            value={(isFormula || formattedIdle) && !editing ? displayValue : seg.text}
+            rows={Math.max(1, shown.split('\n').length)}
+            value={shown}
             onFocus={() => {
               setEditing(true);
               onFocus();
@@ -199,7 +203,7 @@ function TableCellContent({
             }}
             onChange={(e) => updateTextSegment(index, e.target.value)}
             onSelect={(e) => {
-              const el = e.target as HTMLInputElement;
+              const el = e.target as HTMLTextAreaElement;
               onTextSelect?.(Math.abs((el.selectionEnd ?? 0) - (el.selectionStart ?? 0)));
             }}
             onKeyDown={onKeyDown}

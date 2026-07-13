@@ -9,23 +9,68 @@ export interface FindMatch {
 }
 
 /**
- * Case-insensitive text search across the document's text nodes. Matches never span node
- * boundaries (e.g. half-bold words) — a deliberate first-version limitation.
+ * One searchable character of the flattened document. `pos` is the ProseMirror position of the
+ * character, or -1 for virtual newlines inserted at block boundaries (which have no single
+ * character position of their own).
  */
-export function findMatchesInDoc(doc: PMNode, query: string): FindMatch[] {
-  const matches: FindMatch[] = [];
-  if (!query) return matches;
-  const q = query.toLowerCase();
+interface FlatChar {
+  ch: string;
+  pos: number;
+}
+
+/**
+ * Flattens the document into a character stream: text node characters keep their PM positions,
+ * hard breaks become '\n', and boundaries between textblocks (paragraph ends, list items, …)
+ * become virtual '\n' characters. This lets a query with newlines match across paragraphs, and
+ * lets any query match across mark boundaries (e.g. a half-bold word).
+ */
+function flattenDoc(doc: PMNode): FlatChar[] {
+  const chars: FlatChar[] = [];
+  let seenTextblock = false;
   doc.descendants((node, pos) => {
-    if (!node.isText || !node.text) return true;
-    const text = node.text.toLowerCase();
-    let idx = text.indexOf(q);
-    while (idx !== -1) {
-      matches.push({ from: pos + idx, to: pos + idx + q.length });
-      idx = text.indexOf(q, idx + q.length);
+    if (node.isTextblock) {
+      if (seenTextblock) chars.push({ ch: '\n', pos: -1 });
+      seenTextblock = true;
+      return true;
+    }
+    if (node.isText && node.text) {
+      for (let i = 0; i < node.text.length; i++) chars.push({ ch: node.text[i], pos: pos + i });
+      return true;
+    }
+    if (node.isInline && node.isLeaf) {
+      // Hard breaks are searchable newlines; other inline atoms (math, …) are opaque — use a
+      // NUL placeholder no query can contain, so matches never span them.
+      chars.push({ ch: node.type.name === 'hardBreak' ? '\n' : '\u0000', pos });
     }
     return true;
   });
+  return chars;
+}
+
+/** Case-insensitive text search over the flattened document (see flattenDoc). */
+export function findMatchesInDoc(doc: PMNode, query: string): FindMatch[] {
+  const matches: FindMatch[] = [];
+  if (!query) return matches;
+  const chars = flattenDoc(doc);
+  const haystack = chars.map((c) => c.ch).join('').toLowerCase();
+  const q = query.toLowerCase();
+  let idx = haystack.indexOf(q);
+  while (idx !== -1) {
+    // Anchor the PM range on the first/last real characters; a match consisting solely of
+    // virtual newlines has no anchor and is skipped.
+    let first = -1;
+    let last = -1;
+    for (let i = idx; i < idx + q.length; i++) {
+      if (chars[i].pos >= 0) {
+        if (first === -1) first = i;
+        last = i;
+      }
+    }
+    if (first !== -1) {
+      matches.push({ from: chars[first].pos, to: chars[last].pos + 1 });
+    }
+    idx = haystack.indexOf(q, idx + q.length);
+  }
   return matches;
 }
 

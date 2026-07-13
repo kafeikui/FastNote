@@ -23,7 +23,9 @@ function flushAndExit(code = 0): void {
 process.on('SIGINT', () => flushAndExit(0));
 process.on('SIGTERM', () => flushAndExit(0));
 
-const app = Fastify({ logger: true });
+// Fastify's default 1 MB body limit rejects large encrypted notes/attachments with HTTP 413;
+// match the WebSocket maxPayload so both transports accept the same sizes.
+const app = Fastify({ logger: true, bodyLimit: 32 * 1024 * 1024 });
 await app.register(cors, { origin: true });
 await app.register(websocket, {
   options: { maxPayload: 32 * 1024 * 1024 },
