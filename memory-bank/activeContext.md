@@ -2,6 +2,13 @@
 
 ## 当前工作焦点（最新会话，2026-07-12：表格数字格式/时间插入 + AI 附件/后台流式/消息管理 + 多格复制修复/桌面右键菜单 + AI 滚动/耐心提示/公式渲染/消息时间戳 + 登录过期处理/设置选项卡 + Alt+方向键调序/AI转笔记/编辑焦点历史 + 自定义分隔符/AI导出文档 + 焦点历史扩展/热键自定义 + 公式丢失修复，随 git 提交按约定 minor bump 至 **v0.9.0**，README 双语功能清单已同步 0.8.x 全部新特性）
 
+**追加（同日第三十二轮，协作标题同步 + 侧边栏协作徽标，随 git 提交 minor bump 至 **v0.13.0**）**：
+1. **文件名（标题）实时同步**：`CollabMessage` 增 `kind:'title'` 与 `title` 字段——标题是短整值，走**整值广播 + LWW**（不做 diff）；`CollabSessionOptions` 增 `getTitle/applyRemoteTitle`，会话内部持 `titleShadow` 抑制回声与无变化广播（`updateLocalTitle` 同样 400ms debounce）。`state` 消息（hello 应答）现携带 `title`，新加入者同时采纳内容与标题；晚到 state 的标题按 titleShadow 比对 LWW。VaultApp：`updateNoteById` 钩子扩展 `patch.title !== undefined → session.updateLocalTitle`；`applyCollabRemote` 泛化为 `applyCollabRemotePatch(noteId, patch)`（title 变更不 bump 编辑器 nonce——标题输入框/标签页/侧边栏都直接渲染 state）。
+2. **侧边栏协作徽标**：`NoteTree` 新增 `collabIds?: Set<string>` prop（VaultApp 从 `collabUi` 键 useMemo 派生），协作中的条目在标题后渲染 `👥` 绿色药丸徽标（`.fn-collab-tree-badge`，2.4s 呼吸脉冲动画 + title 提示 `noteTree.collabActive`）。注意 `.fn-tree-node__label` 是硬列宽 grid，模板从 4 列扩到 5 列（icon|text|协作徽标|同步点|冲突点），否则新增子元素会掉到隐式新行。
+3. e2e 重跑（标题场景 5 断言全过）：后加入者同时采纳内容+标题、双向改名传播、内容编辑与改名并发互不干扰。README 双语同步（协作条目补标题同步与徽标）。版本随提交 minor bump **0.13.0**（server 保持 0.7.2），typecheck + web build 全绿。
+
+**追加（同日第三十一轮，协作房间号防冲突，v0.12.1 → 并入 0.13.0 提交）**：用户指出仅由密码派生房间会导致**不同文档设置相同密码时撞进同一房间互相串内容**。修复：协作房间引入**随机房间号**——`packages/collab` 新增 `generateCollabRoomCode()`（8 字符无易混淆字母表 A-Z2-9 去 0/O/1/I/L，格式 `XXXX-XXXX`，crypto.getRandomValues）和 `normalizeCollabRoomCode()`（容忍小写/丢横线/空白）；`deriveCollabRoom(password, roomCode)` 把房间号作为 PBKDF2 的盐（`fastnote-collab-v1:` + 规范化房间号）——同密码不同房间号派生出完全不同的 roomId/roomKey，顺带消除固定盐的预计算风险。流程：发起方点 🎲 生成房间号，连同密码线下告知对方；加入方填两者。UI：`CollabJoinForm` 加房间号输入行 + 🎲 生成按钮（校验：房间号规范化后 ≥4 字符）；会话激活弹层显示当前房间号（`collabRoomCodes` state，`user-select: all` 的 code 样式便于复制）；退出/锁库清理。服务器协议零改动（roomId 仍是不透明 hex）。i18n 新增 `collabRoomPlaceholder/collabGenerateRoom/collabRoomMissing/collabActiveRoom`，collabHint 重写；README 双语同步。**e2e 重跑 12 断言全过**，新增关键断言：同密码+不同房间号的第三方 C 独居自己房间、A/B 编辑全程不泄漏给 C；B 用小写+空格的房间号也能正确入房。版本 patch bump **0.12.1**（server 保持 0.7.2），typecheck 全绿，未提交。
+
 **追加（2026-07-14 第三十轮，笔记/表格实时协作 = E2E 密文中继房间，随 git 提交 minor bump 至 **v0.12.0** / server 0.7.2）**：用户要求"笔记/表格加入实时协作，通过中继服务器，按钮协商密码加入/退出，不影响安全语义"。
 1. **安全模型（零知识不变）**：协作密码线下协商、永不上服务器。新包 `packages/collab` 的 `deriveCollabRoom(password)`：PBKDF2-SHA256 600k（与库主密码同强度，固定盐 `fastnote-collab-v1`）→ HKDF 两路独立子密钥——`roomId`（16 字节 hex，服务器唯一可见的东西）和 `roomKey`（AES-256-GCM，加密全部载荷）。服务器只在内存转发密文（不落盘、不打日志），能看到"谁在跟哪个不透明房间说话 + 流量"，永远看不到内容/标题/笔记身份。
 2. **server `/ws/v1/collab`**（0.7.2）：复用 `authTokenFromReq`（需登录 token，防匿名滥用），query `room` 校验 `/^[a-f0-9]{16,64}$/`；内存 `Map<roomId, Set<WebSocket>>`，join/leave 广播 `{type:'peers',count}`，`{type:'data',payload}` 原样转发给房间内其他成员，无任何持久化。

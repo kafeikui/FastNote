@@ -1544,7 +1544,8 @@ body.fn-resizing-note .fn-note-resize-handle::after {
      full, untruncated title width. That silently forced this column (and the whole row) wider
      than the sidebar for long file names, which is what pushed a horizontal scrollbar into the
      tree instead of letting `.fn-tree-node__text`'s ellipsis truncation kick in. */
-  grid-template-columns: 20px minmax(0, 1fr) auto auto;
+  /* icon | text | collab badge | sync dot | conflict dot */
+  grid-template-columns: 20px minmax(0, 1fr) auto auto auto;
   align-items: center;
   column-gap: 4px;
   padding: 0.4rem 0.25rem;
@@ -2432,6 +2433,41 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   font-size: 0.95rem;
 }
 
+.fn-collab-modal__room-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.fn-collab-modal__room-row input {
+  flex: 1;
+}
+
+.fn-collab-modal__room-row button {
+  flex: none;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.fn-collab-modal__room {
+  margin: 0.5rem 0;
+  font-size: 0.95rem;
+}
+
+.fn-collab-modal__room code {
+  padding: 0.15rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 1rem;
+  letter-spacing: 0.08em;
+  user-select: all;
+}
+
 .fn-collab-dot {
   width: 9px;
   height: 9px;
@@ -2450,6 +2486,31 @@ body.fn-resizing-note .fn-note-resize-handle::after {
 
 .fn-collab-dot--disconnected {
   background: #d33;
+}
+
+/* Sidebar badge for notes/tables with a live collaboration session: a green 👥 pill with a
+   gentle pulse so an active room stands out at a glance even in a long tree. */
+.fn-collab-tree-badge {
+  flex: none;
+  padding: 0 0.3rem;
+  border-radius: 8px;
+  background: rgba(47, 168, 79, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(47, 168, 79, 0.55);
+  font-size: 0.7rem;
+  line-height: 1.3;
+  animation: fn-collab-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes fn-collab-pulse {
+  0%,
+  100% {
+    box-shadow: inset 0 0 0 1px rgba(47, 168, 79, 0.55);
+  }
+  50% {
+    box-shadow:
+      inset 0 0 0 1px rgba(47, 168, 79, 0.9),
+      0 0 6px rgba(47, 168, 79, 0.6);
+  }
 }
 
 .fn-table-palette__default {

@@ -38,6 +38,8 @@ interface NoteTreeProps {
    * local-only vault every node is permanently "pending" and the dot would just be noise.
    */
   showSyncStatus?: boolean;
+  /** Notes/tables with an active real-time collaboration session get a highlighted 👥 badge. */
+  collabIds?: Set<string>;
 }
 
 type DropHint = TreeDropPosition | null;
@@ -72,6 +74,7 @@ function TreeNode({
   renameRequestId,
   onRenameRequestHandled,
   showSyncStatus,
+  collabIds,
   draggingId,
   onDragStartNode,
   onDragEndNode,
@@ -97,6 +100,7 @@ function TreeNode({
   renameRequestId?: string | null;
   onRenameRequestHandled?: () => void;
   showSyncStatus?: boolean;
+  collabIds?: Set<string>;
   draggingId: string | null;
   onDragStartNode: (id: string) => void;
   onDragEndNode: () => void;
@@ -243,6 +247,11 @@ function TreeNode({
           >
             <span className="fn-tree-node__icon">{icon}</span>
             <span className="fn-tree-node__text">{node.title || defaultTitle}</span>
+            {collabIds?.has(node.id) && (
+              <span className="fn-collab-tree-badge" title={t('noteTree.collabActive')}>
+                👥
+              </span>
+            )}
             {showSyncStatus && node.syncStatus === 'pending' && (
               <span className="fn-sync-dot" title={t('noteTree.pendingSync')} />
             )}
@@ -314,6 +323,7 @@ function TreeNode({
               renameRequestId={renameRequestId}
               onRenameRequestHandled={onRenameRequestHandled}
               showSyncStatus={showSyncStatus}
+              collabIds={collabIds}
               draggingId={draggingId}
               onDragStartNode={onDragStartNode}
               onDragEndNode={onDragEndNode}
@@ -346,6 +356,7 @@ export function NoteTree({
   renameRequestId,
   onRenameRequestHandled,
   showSyncStatus,
+  collabIds,
 }: NoteTreeProps) {
   const t = useT();
   const [rootDrop, setRootDrop] = useState(false);
@@ -439,6 +450,7 @@ export function NoteTree({
             renameRequestId={renameRequestId}
             onRenameRequestHandled={onRenameRequestHandled}
             showSyncStatus={showSyncStatus}
+            collabIds={collabIds}
             draggingId={draggingId}
             onDragStartNode={setDraggingId}
             onDragEndNode={() => setDraggingId(null)}

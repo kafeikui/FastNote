@@ -86,7 +86,7 @@ import {
   type AiContentBlock,
 } from '@fastnote/ai';
 import { IMClient, verifyExchangeKeypair } from '@fastnote/im';
-import { CollabSession, type CollabStatus } from '@fastnote/collab';
+import { CollabSession, generateCollabRoomCode, normalizeCollabRoomCode, type CollabStatus } from '@fastnote/collab';
 import { NoteSearchIndex } from '@fastnote/search';
 import type { ChatMessage, EditorMode, NodeType, NoteAttachment, NoteNode, UserSession, TreeDropPosition, ChatAttachmentRef, ChatWireAttachment, TabGroupState, ShortcutBindings, AiSettings, AiSessionNode, AiMessage, AiAttachment, FindReplaceController } from '@fastnote/shared';
 import { META_KEYS, downloadBlob, isEditableContentNode, computeTreeMove, applySortMode, buildAttachmentMarkdownRef, buildTree, decodeChatWire, toStoredPayload, storedToChatMessage, serverUrlNeedsReload, matchesShortcut, expandAttachmentRefsForExport, installConsoleCapture, getCapturedLogs, clearCapturedLogs, formatCapturedLogs } from '@fastnote/shared';
@@ -1198,6 +1198,7 @@ export function VaultApp() {
       setCollabUi({});
       setCollabModal(null);
       setCollabContentNonce({});
+      setCollabRoomCodes({});
       tabStateReadyRef.current = false;
       setKeys(null);
       setNotes([]);
@@ -1260,6 +1261,9 @@ export function VaultApp() {
   const [collabUi, setCollabUi] = useState<Record<string, CollabStatus>>({});
   const [collabModal, setCollabModal] = useState<string | null>(null);
   const [collabContentNonce, setCollabContentNonce] = useState<Record<string, number>>({});
+  /** Room code of each active session, kept for display so the initiator can share it later. */
+  const [collabRoomCodes, setCollabRoomCodes] = useState<Record<string, string>>({});
+  const collabActiveIds = useMemo(() => new Set(Object.keys(collabUi)), [collabUi]);
 
   const recordEditFocus = useCallback((id: string) => {
     const h = editHistoryRef.current;
@@ -1388,9 +1392,10 @@ export function VaultApp() {
     (id: string, patch: Partial<NoteNode>) => {
       if (!keys) return;
       recordEditFocus(id);
-      // Feed content edits into an active collaboration session (no-op re-entrancy: after a
-      // remote apply the session's shadow already equals the text, so nothing is re-broadcast).
+      // Feed content/title edits into an active collaboration session (no-op re-entrancy: after
+      // a remote apply the session's shadow already equals the value, so nothing is re-broadcast).
       if (patch.contentMd !== undefined) collabSessionsRef.current.get(id)?.updateLocal(patch.contentMd);
+      if (patch.title !== undefined) collabSessionsRef.current.get(id)?.updateLocalTitle(patch.title);
       setNotes((prev) => {
         const current = prev.find((n) => n.id === id);
         if (!current) return prev;
@@ -1402,23 +1407,30 @@ export function VaultApp() {
     [keys, schedulePersist, recordEditFocus],
   );
 
-  /** Applies text merged from the collaboration room without recording an edit-focus entry. */
-  const applyCollabRemote = useCallback(
-    (noteId: string, text: string) => {
+  /** Applies changes merged from the collaboration room without recording an edit-focus entry. */
+  const applyCollabRemotePatch = useCallback(
+    (noteId: string, patch: Partial<NoteNode>) => {
       setNotes((prev) => {
         const current = prev.find((n) => n.id === noteId);
-        if (!current || current.contentMd === text) return prev;
-        const updated = buildUpdated(current, { contentMd: text });
+        if (!current) return prev;
+        const unchanged =
+          (patch.contentMd === undefined || current.contentMd === patch.contentMd) &&
+          (patch.title === undefined || current.title === patch.title);
+        if (unchanged) return prev;
+        const updated = buildUpdated(current, patch);
         schedulePersist(updated);
         return prev.map((n) => (n.id === updated.id ? updated : n));
       });
-      setCollabContentNonce((prev) => ({ ...prev, [noteId]: (prev[noteId] ?? 0) + 1 }));
+      // Only content changes need the editor nudge; titles render from state everywhere.
+      if (patch.contentMd !== undefined) {
+        setCollabContentNonce((prev) => ({ ...prev, [noteId]: (prev[noteId] ?? 0) + 1 }));
+      }
     },
     [schedulePersist],
   );
 
   const handleCollabJoin = useCallback(
-    async (noteId: string, password: string) => {
+    async (noteId: string, roomCode: string, password: string) => {
       if (!session) throw new Error(t('vaultApp.collabLoginRequired'));
       const note = notesRef.current.find((n) => n.id === noteId);
       if (!note) return;
@@ -1427,6 +1439,7 @@ export function VaultApp() {
         serverUrl,
         token: session.token,
         password,
+        roomCode,
         getText: () => notesRef.current.find((n) => n.id === noteId)?.contentMd ?? '',
         // Tables are stored as JSON; refuse any merge that would no longer parse so a bad
         // fuzzy patch can never corrupt the document (the session resyncs full state instead).
@@ -1441,19 +1454,27 @@ export function VaultApp() {
               }
             }
           : undefined,
-        applyRemote: (text) => applyCollabRemote(noteId, text),
+        applyRemote: (text) => applyCollabRemotePatch(noteId, { contentMd: text }),
+        getTitle: () => notesRef.current.find((n) => n.id === noteId)?.title ?? '',
+        applyRemoteTitle: (title) => applyCollabRemotePatch(noteId, { title }),
         onStatus: (status) => setCollabUi((prev) => ({ ...prev, [noteId]: status })),
       });
       collabSessionsRef.current.get(noteId)?.close();
       collabSessionsRef.current.set(noteId, collab);
+      setCollabRoomCodes((prev) => ({ ...prev, [noteId]: normalizeCollabRoomCode(roomCode) }));
     },
-    [session, serverUrl, applyCollabRemote, t],
+    [session, serverUrl, applyCollabRemotePatch, t],
   );
 
   const handleCollabLeave = useCallback((noteId: string) => {
     collabSessionsRef.current.get(noteId)?.close();
     collabSessionsRef.current.delete(noteId);
     setCollabUi((prev) => {
+      const next = { ...prev };
+      delete next[noteId];
+      return next;
+    });
+    setCollabRoomCodes((prev) => {
       const next = { ...prev };
       delete next[noteId];
       return next;
@@ -3558,6 +3579,7 @@ export function VaultApp() {
                   renameRequestId={renameRequestId}
                   onRenameRequestHandled={() => setRenameRequestId(null)}
                   showSyncStatus={!!session}
+                  collabIds={collabActiveIds}
                 />
               </div>
             </div>
@@ -3704,6 +3726,12 @@ export function VaultApp() {
                           ? t('vaultApp.collabConnecting')
                           : t('vaultApp.collabDisconnected')}
                     </p>
+                    {collabRoomCodes[collabModal] && (
+                      <p className="fn-collab-modal__room">
+                        {t('vaultApp.collabActiveRoom')}
+                        <code>{collabRoomCodes[collabModal]}</code>
+                      </p>
+                    )}
                     <p className="fn-collab-modal__hint">{t('vaultApp.collabActiveHint')}</p>
                     <div className="fn-modal__actions">
                       <button type="button" onClick={() => handleCollabLeave(collabModal)}>
@@ -3718,7 +3746,7 @@ export function VaultApp() {
                   <CollabJoinForm
                     t={t}
                     loggedIn={!!session}
-                    onJoin={(password) => handleCollabJoin(collabModal, password)}
+                    onJoin={(roomCode, password) => handleCollabJoin(collabModal, roomCode, password)}
                     onClose={() => setCollabModal(null)}
                   />
                 )}
@@ -3744,21 +3772,28 @@ export function VaultApp() {
 interface CollabJoinFormProps {
   t: TFunction;
   loggedIn: boolean;
-  onJoin: (password: string) => Promise<void>;
+  onJoin: (roomCode: string, password: string) => Promise<void>;
   onClose: () => void;
 }
 
 /**
- * Join step of the collaboration modal: enter the out-of-band negotiated password. Kept as a
- * separate component so the password lives in local state and is dropped as soon as the form
+ * Join step of the collaboration modal: enter the out-of-band negotiated room code + password.
+ * The initiator generates a fresh random room code (🎲) — without it, two unrelated documents
+ * that happened to pick the same password would collide in the same relay room. Kept as a
+ * separate component so the credentials live in local state and are dropped as soon as the form
  * unmounts (the session only keeps the derived room key).
  */
 function CollabJoinForm({ t, loggedIn, onJoin, onClose }: CollabJoinFormProps) {
+  const [roomCode, setRoomCode] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const join = async () => {
+    if (normalizeCollabRoomCode(roomCode).length < 4) {
+      setError(t('vaultApp.collabRoomMissing'));
+      return;
+    }
     if (password.length < 6) {
       setError(t('vaultApp.collabPasswordTooShort'));
       return;
@@ -3766,7 +3801,7 @@ function CollabJoinForm({ t, loggedIn, onJoin, onClose }: CollabJoinFormProps) {
     setBusy(true);
     setError(null);
     try {
-      await onJoin(password);
+      await onJoin(roomCode, password);
       setPassword('');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -3775,24 +3810,43 @@ function CollabJoinForm({ t, loggedIn, onJoin, onClose }: CollabJoinFormProps) {
     }
   };
 
+  const submitOnEnter = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && loggedIn && !busy && roomCode && password) void join();
+  };
+
   return (
     <>
       <p className="fn-collab-modal__hint">{t('vaultApp.collabHint')}</p>
       {!loggedIn && <p className="fn-collab-modal__error">{t('vaultApp.collabLoginRequired')}</p>}
+      <div className="fn-collab-modal__room-row">
+        <input
+          type="text"
+          className="fn-collab-modal__password"
+          value={roomCode}
+          placeholder={t('vaultApp.collabRoomPlaceholder')}
+          onChange={(e) => setRoomCode(e.target.value)}
+          onKeyDown={submitOnEnter}
+          autoFocus
+        />
+        <button
+          type="button"
+          onClick={() => setRoomCode(generateCollabRoomCode())}
+          title={t('vaultApp.collabGenerateRoom')}
+        >
+          🎲 {t('vaultApp.collabGenerateRoom')}
+        </button>
+      </div>
       <input
         type="password"
         className="fn-collab-modal__password"
         value={password}
         placeholder={t('vaultApp.collabPasswordPlaceholder')}
         onChange={(e) => setPassword(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && loggedIn && !busy && password) void join();
-        }}
-        autoFocus
+        onKeyDown={submitOnEnter}
       />
       {error && <p className="fn-collab-modal__error">{error}</p>}
       <div className="fn-modal__actions">
-        <button type="button" disabled={!loggedIn || busy || !password} onClick={() => void join()}>
+        <button type="button" disabled={!loggedIn || busy || !roomCode || !password} onClick={() => void join()}>
           {busy ? t('vaultApp.collabJoining') : t('vaultApp.collabJoin')}
         </button>
         <button type="button" onClick={onClose}>

@@ -35,7 +35,7 @@ Encrypted notes + 1:1 end-to-end encrypted instant messaging. Built for personal
 - Resizable note content width; collapsible sidebar for a wider content area
 - Multiple local vaults, switchable from the unlock screen
 - Cross-vault transfer: copy or move notes/folders (attachments included) into another local vault after verifying its password
-- **Real-time collaboration (notes/tables)**: negotiate a collaboration password out of band, then everyone clicks "👥 Collab" in the title bar and enters the same password to join the room; anyone without the document locally just creates a new blank document of the **same type** (note for note, table for table) and joins from there — the content syncs to the latest session state automatically; edits flow as incremental diffs in real time, and you can leave at any point. The password only derives the room id and an AES-GCM key locally (PBKDF2 600k) — the relay forwards ciphertext in memory only, never persists it, never knows the key, and never sees content, so the zero-knowledge model is unchanged (table merges are validated as JSON first; a bad patch falls back to a full-state resync)
+- **Real-time collaboration (notes/tables)**: the initiator clicks "👥 Collab" in the title bar → 🎲 generates a random room code, and shares it out of band together with the negotiated collaboration password; everyone enters the same room code + password to join the room (the random code guarantees unrelated documents never collide even with the same password); anyone without the document locally just creates a new blank document of the **same type** (note for note, table for table) and joins from there — the content syncs to the latest session state automatically; edits flow as incremental diffs in real time, **the document title syncs live too**, the sidebar marks collaborating items with a prominent 👥 badge, and you can leave at any point. The room code (as salt) and password only derive the room id and an AES-GCM key locally (PBKDF2 600k) — the relay forwards ciphertext in memory only, never persists it, never knows the key, and never sees content, so the zero-knowledge model is unchanged (table merges are validated as JSON first; a bad patch falls back to a full-state resync)
 
 **AI Workbench (optional, off unless you configure it)**
 - Chat with Claude models directly inside the app: bring your own Anthropic API key (encrypted with your master key, stored only in this vault)
@@ -100,8 +100,8 @@ pnpm dev:server
 ### Verifying real-time collaboration
 
 1. Both sides log into a cloud account (collaboration is relayed through the server, so a login session is required)
-2. The initiator opens the note/table to collaborate on → "👥 Collab" in the title bar → enters the negotiated collaboration password (min. 6 chars) → joins
-3. The other side creates a new blank document of the **same type** → clicks "👥 Collab" → enters the same password → the content syncs to the latest session state automatically
+2. The initiator opens the note/table to collaborate on → "👥 Collab" in the title bar → 🎲 generates a room code → enters the negotiated collaboration password (min. 6 chars) → joins, then shares the room code and password out of band (the dialog keeps showing the room code while the session is active)
+3. The other side creates a new blank document of the **same type** → clicks "👥 Collab" → enters the shared room code and password → the content syncs to the latest session state automatically
 4. Edits now flow both ways in real time; either side can leave from the dialog at any point, and locking the vault disconnects all sessions
 
 ## Project layout
