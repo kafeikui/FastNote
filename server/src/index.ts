@@ -376,6 +376,60 @@ app.register(async (fastify) => {
       }
     });
   });
+
+  // Real-time collaboration rooms: pure in-memory ciphertext relay. The room id is derived
+  // client-side from an out-of-band collaboration password and payloads are AES-GCM encrypted
+  // with a key the server never sees — nothing here is persisted or logged, preserving the
+  // zero-knowledge model. Login is still required so the relay can't be abused anonymously.
+  const collabRooms = new Map<string, Set<WebSocket>>();
+
+  fastify.get('/ws/v1/collab', { websocket: true }, (socket, req) => {
+    const userId = authTokenFromReq(req);
+    if (!userId) {
+      socket.close();
+      return;
+    }
+    const url = new URL(req.url ?? '', 'http://localhost');
+    const room = url.searchParams.get('room') ?? '';
+    if (!/^[a-f0-9]{16,64}$/.test(room)) {
+      socket.close();
+      return;
+    }
+    let members = collabRooms.get(room);
+    if (!members) {
+      members = new Set();
+      collabRooms.set(room, members);
+    }
+    members.add(socket);
+    const broadcastPeers = () => {
+      const frame = JSON.stringify({ type: 'peers', count: members.size });
+      for (const m of members) if (m.readyState === 1) m.send(frame);
+    };
+    broadcastPeers();
+    socket.on('close', () => {
+      members.delete(socket);
+      if (members.size === 0) collabRooms.delete(room);
+      else broadcastPeers();
+    });
+    socket.on('message', (raw: Buffer | ArrayBuffer | Buffer[]) => {
+      try {
+        const text = Buffer.isBuffer(raw) ? raw.toString() : String(raw);
+        const msg = JSON.parse(text) as { type: string; payload?: unknown };
+        if (msg.type === 'ping') {
+          socket.send(JSON.stringify({ type: 'pong' }));
+          return;
+        }
+        if (msg.type === 'data' && typeof msg.payload === 'string') {
+          const frame = JSON.stringify({ type: 'data', payload: msg.payload });
+          for (const m of members) {
+            if (m !== socket && m.readyState === 1) m.send(frame);
+          }
+        }
+      } catch {
+        /* ignore malformed */
+      }
+    });
+  });
 });
 
 await app.listen({ port: PORT, host: '0.0.0.0' });

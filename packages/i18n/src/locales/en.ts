@@ -407,6 +407,7 @@ export const en: Dictionary = {
     delimiter_comma: 'Comma ,',
     delimiter_space: 'Space / whitespace runs',
     helpMove: 'With a whole row selected, Alt+Up/Down moves it; with a whole column, Alt+Left/Right moves it; with a single cell, Alt+Arrow swaps its content with the adjacent cell',
+    helpSelectAll: 'Ctrl/⌘+A selects the whole table; while editing a cell, the first press selects the cell text and a second press selects the whole table',
     rowNumberTooltip: 'Row number for formula references (unaffected by sort/filter); click to select the whole row',
     columnLetterTooltip: 'Column {letter}; click to select the whole column',
     selectRowTooltip: 'Click to select the whole row',
@@ -514,5 +515,30 @@ export const en: Dictionary = {
     csvImportFailed: 'CSV import failed',
     notePlaceholder: 'Title',
     emptySelectOrCreate: 'Select an item or create a new one',
+    collabBtn: 'Collab',
+    collabTitle: 'Real-time collaboration',
+    collabHint:
+      'Negotiate a collaboration password with your collaborators out of band; everyone enters the same password on their own device to join the same room. If you don\u2019t have the document locally, create a new blank document of the same type (note for note, table for table) and join from there — the content syncs automatically. The password only derives the room id and encryption key locally and is never sent to the server — the relay only forwards ciphertext. Note: after joining an active session, this document will be synced to the latest session content.',
+    collabPasswordPlaceholder: 'Collaboration password (min. 6 characters)',
+    collabPasswordTooShort: 'The collaboration password needs at least 6 characters',
+    collabLoginRequired: 'Real-time collaboration requires a cloud account login (to reach the relay server)',
+    collabJoin: 'Join session',
+    collabJoining: 'Joining…',
+    collabLeave: 'Leave session',
+    collabConnecting: 'Connecting…',
+    collabConnected: 'Connected · {count} in room',
+    collabDisconnected: 'Disconnected',
+    collabActiveHint:
+      'Collaboration active: content changes are synced end-to-end encrypted to the other room members through the relay server in real time.',
+  },
+  mobileApp: {
+    sessions: 'Sessions',
+    settings: 'Settings',
+    lock: 'Lock',
+    noSession: 'No session yet — create one to start chatting with Claude.',
+    cloudNotSupported:
+      'Cloud account login/sync is not supported in the mobile build yet; please use password unlock.',
+    copiedAsMarkdown: 'The selected Q&A has been copied to the clipboard as Markdown.',
+    copyFailed: 'Copy failed, please try again.',
   },
 };

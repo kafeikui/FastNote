@@ -258,22 +258,30 @@ export async function importFnxtFile(
   return { title: parsed.title, doc: importEncryptedTableFile(parsed, notesKey, locale) };
 }
 
-export function addColumn(doc: TableDocument, locale: Locale = 'zh'): TableDocument {
+/** Appends a column, or inserts it at `index` (before the column currently there) when given. */
+export function addColumn(doc: TableDocument, locale: Locale = 'zh', index?: number): TableDocument {
   const col: TableColumn = {
     id: crypto.randomUUID(),
     name: translate(locale, 'tableUtils.defaultColumnN', { index: doc.columns.length + 1 }),
   };
+  const columns = [...doc.columns];
+  const at = index === undefined ? columns.length : Math.max(0, Math.min(index, columns.length));
+  columns.splice(at, 0, col);
   return {
     ...doc,
-    columns: [...doc.columns, col],
+    columns,
     rows: doc.rows.map((r) => ({ ...r, cells: { ...r.cells, [col.id]: '' } })),
   };
 }
 
-export function addRow(doc: TableDocument): TableDocument {
+/** Appends a row, or inserts it at `index` (before the row currently there) when given. */
+export function addRow(doc: TableDocument, index?: number): TableDocument {
   const cells: Record<string, string> = {};
   for (const c of doc.columns) cells[c.id] = '';
-  return { ...doc, rows: [...doc.rows, { id: crypto.randomUUID(), cells }] };
+  const rows = [...doc.rows];
+  const at = index === undefined ? rows.length : Math.max(0, Math.min(index, rows.length));
+  rows.splice(at, 0, { id: crypto.randomUUID(), cells });
+  return { ...doc, rows };
 }
 
 export function removeColumn(doc: TableDocument, columnId: string): TableDocument {

@@ -1,12 +1,17 @@
 {
   "name": "fastnote",
   "private": true,
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Encrypted notes + E2E messaging for personal use",
   "license": "MIT",
   "scripts": {
     "proxy:sync": "bash scripts/sync-proxy.sh",
     "dev:web": "pnpm --filter @fastnote/web dev",
+    "dev:mobile": "pnpm --filter @fastnote/mobile dev",
+    "build:mobile": "pnpm --filter @fastnote/mobile build",
+    "android:sync": "pnpm --filter @fastnote/mobile cap:sync",
+    "android:open": "pnpm --filter @fastnote/mobile cap:open",
+    "android:apk": "pnpm --filter @fastnote/mobile apk:debug",
     "dev:desktop": "pnpm --filter @fastnote/desktop dev",
     "dev:server": "pnpm --filter @fastnote/server dev",
     "build": "pnpm -r build",

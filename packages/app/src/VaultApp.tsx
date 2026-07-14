@@ -86,6 +86,7 @@ import {
   type AiContentBlock,
 } from '@fastnote/ai';
 import { IMClient, verifyExchangeKeypair } from '@fastnote/im';
+import { CollabSession, type CollabStatus } from '@fastnote/collab';
 import { NoteSearchIndex } from '@fastnote/search';
 import type { ChatMessage, EditorMode, NodeType, NoteAttachment, NoteNode, UserSession, TreeDropPosition, ChatAttachmentRef, ChatWireAttachment, TabGroupState, ShortcutBindings, AiSettings, AiSessionNode, AiMessage, AiAttachment, FindReplaceController } from '@fastnote/shared';
 import { META_KEYS, downloadBlob, isEditableContentNode, computeTreeMove, applySortMode, buildAttachmentMarkdownRef, buildTree, decodeChatWire, toStoredPayload, storedToChatMessage, serverUrlNeedsReload, matchesShortcut, expandAttachmentRefsForExport, installConsoleCapture, getCapturedLogs, clearCapturedLogs, formatCapturedLogs } from '@fastnote/shared';
@@ -1192,6 +1193,11 @@ export function VaultApp() {
       if (keys) await saveSearchSnapshot(keys.indexKey, notes);
       imRef.current?.disconnect();
       imRef.current = null;
+      for (const collab of collabSessionsRef.current.values()) collab.close();
+      collabSessionsRef.current.clear();
+      setCollabUi({});
+      setCollabModal(null);
+      setCollabContentNonce({});
       tabStateReadyRef.current = false;
       setKeys(null);
       setNotes([]);
@@ -1246,6 +1252,14 @@ export function VaultApp() {
   const notesRef = useRef<NoteNode[]>([]);
   notesRef.current = notes;
   const navigateEditFocusRef = useRef<(dir: -1 | 1) => void>(() => {});
+
+  // Real-time collaboration: one E2E-encrypted relay session per note/table (keyed by note id).
+  // Sessions live in a ref (they hold sockets); `collabUi` mirrors connection state for rendering
+  // and `collabContentNonce` tells an open NoteEditor "this content change came from the room".
+  const collabSessionsRef = useRef(new Map<string, CollabSession>());
+  const [collabUi, setCollabUi] = useState<Record<string, CollabStatus>>({});
+  const [collabModal, setCollabModal] = useState<string | null>(null);
+  const [collabContentNonce, setCollabContentNonce] = useState<Record<string, number>>({});
 
   const recordEditFocus = useCallback((id: string) => {
     const h = editHistoryRef.current;
@@ -1374,6 +1388,9 @@ export function VaultApp() {
     (id: string, patch: Partial<NoteNode>) => {
       if (!keys) return;
       recordEditFocus(id);
+      // Feed content edits into an active collaboration session (no-op re-entrancy: after a
+      // remote apply the session's shadow already equals the text, so nothing is re-broadcast).
+      if (patch.contentMd !== undefined) collabSessionsRef.current.get(id)?.updateLocal(patch.contentMd);
       setNotes((prev) => {
         const current = prev.find((n) => n.id === id);
         if (!current) return prev;
@@ -1384,6 +1401,64 @@ export function VaultApp() {
     },
     [keys, schedulePersist, recordEditFocus],
   );
+
+  /** Applies text merged from the collaboration room without recording an edit-focus entry. */
+  const applyCollabRemote = useCallback(
+    (noteId: string, text: string) => {
+      setNotes((prev) => {
+        const current = prev.find((n) => n.id === noteId);
+        if (!current || current.contentMd === text) return prev;
+        const updated = buildUpdated(current, { contentMd: text });
+        schedulePersist(updated);
+        return prev.map((n) => (n.id === updated.id ? updated : n));
+      });
+      setCollabContentNonce((prev) => ({ ...prev, [noteId]: (prev[noteId] ?? 0) + 1 }));
+    },
+    [schedulePersist],
+  );
+
+  const handleCollabJoin = useCallback(
+    async (noteId: string, password: string) => {
+      if (!session) throw new Error(t('vaultApp.collabLoginRequired'));
+      const note = notesRef.current.find((n) => n.id === noteId);
+      if (!note) return;
+      const isTable = note.nodeType === 'table';
+      const collab = await CollabSession.create({
+        serverUrl,
+        token: session.token,
+        password,
+        getText: () => notesRef.current.find((n) => n.id === noteId)?.contentMd ?? '',
+        // Tables are stored as JSON; refuse any merge that would no longer parse so a bad
+        // fuzzy patch can never corrupt the document (the session resyncs full state instead).
+        validate: isTable
+          ? (text) => {
+              if (!text.trim()) return true;
+              try {
+                const doc = JSON.parse(text) as { version?: number; columns?: unknown; rows?: unknown };
+                return doc.version === 1 && Array.isArray(doc.columns) && Array.isArray(doc.rows);
+              } catch {
+                return false;
+              }
+            }
+          : undefined,
+        applyRemote: (text) => applyCollabRemote(noteId, text),
+        onStatus: (status) => setCollabUi((prev) => ({ ...prev, [noteId]: status })),
+      });
+      collabSessionsRef.current.get(noteId)?.close();
+      collabSessionsRef.current.set(noteId, collab);
+    },
+    [session, serverUrl, applyCollabRemote, t],
+  );
+
+  const handleCollabLeave = useCallback((noteId: string) => {
+    collabSessionsRef.current.get(noteId)?.close();
+    collabSessionsRef.current.delete(noteId);
+    setCollabUi((prev) => {
+      const next = { ...prev };
+      delete next[noteId];
+      return next;
+    });
+  }, []);
 
   const handleCreate = async (nodeType: NodeType, parentId: string | null) => {
     if (!keys) return;
@@ -3037,6 +3112,17 @@ export function VaultApp() {
                   {attachments.length > 0 ? ` (${attachments.length})` : ''}
                 </button>
               )}
+              {isFocused && (
+                <button
+                  type="button"
+                  className={collabUi[content.id]?.state === 'connected' ? 'active' : ''}
+                  onClick={() => setCollabModal(content.id)}
+                  title={t('vaultApp.collabTitle')}
+                >
+                  👥 {t('vaultApp.collabBtn')}
+                  {collabUi[content.id]?.state === 'connected' ? ` (${collabUi[content.id].peers})` : ''}
+                </button>
+              )}
                 </div>
                 {findBarGroupId === group.id && (
                   <FindReplaceBar
@@ -3144,6 +3230,17 @@ export function VaultApp() {
                       {attachments.length > 0 ? ` (${attachments.length})` : ''}
                     </button>
                   )}
+                  {isFocused && (
+                    <button
+                      type="button"
+                      className={collabUi[content.id]?.state === 'connected' ? 'active' : ''}
+                      onClick={() => setCollabModal(content.id)}
+                      title={t('vaultApp.collabTitle')}
+                    >
+                      👥 {t('vaultApp.collabBtn')}
+                      {collabUi[content.id]?.state === 'connected' ? ` (${collabUi[content.id].peers})` : ''}
+                    </button>
+                  )}
                   {(selCharsByGroup[group.id] ?? 0) > 0 && (
                     <span className="fn-selchars">
                       {t('vaultApp.selectedChars', { count: String(selCharsByGroup[group.id]) })}
@@ -3221,6 +3318,7 @@ export function VaultApp() {
                   onAttachmentEdit={handleAttachmentEdit}
                   showLineNumbers={showLineNumbers}
                   enableMath={enableMath}
+                  externalContentNonce={collabContentNonce[content.id] ?? 0}
                 />
               </div>
             </div>
@@ -3584,6 +3682,50 @@ export function VaultApp() {
         />
       )}
       {showAbout && <AboutModal onClose={() => setShowAbout(false)} version={__APP_VERSION__} />}
+      {collabModal &&
+        (() => {
+          const note = notes.find((n) => n.id === collabModal);
+          if (!note) return null;
+          const ui = collabUi[collabModal];
+          const active = collabSessionsRef.current.has(collabModal);
+          return (
+            <div className="fn-modal-backdrop" onClick={() => setCollabModal(null)}>
+              <div className="fn-modal fn-collab-modal" onClick={(e) => e.stopPropagation()}>
+                <h2>
+                  {t('vaultApp.collabTitle')} — {note.title || t('common.untitled')}
+                </h2>
+                {active ? (
+                  <>
+                    <p className="fn-collab-modal__status">
+                      <span className={`fn-collab-dot fn-collab-dot--${ui?.state ?? 'connecting'}`} />
+                      {ui?.state === 'connected'
+                        ? t('vaultApp.collabConnected', { count: String(ui.peers) })
+                        : ui?.state === 'connecting'
+                          ? t('vaultApp.collabConnecting')
+                          : t('vaultApp.collabDisconnected')}
+                    </p>
+                    <p className="fn-collab-modal__hint">{t('vaultApp.collabActiveHint')}</p>
+                    <div className="fn-modal__actions">
+                      <button type="button" onClick={() => handleCollabLeave(collabModal)}>
+                        {t('vaultApp.collabLeave')}
+                      </button>
+                      <button type="button" onClick={() => setCollabModal(null)}>
+                        {t('common.close')}
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <CollabJoinForm
+                    t={t}
+                    loggedIn={!!session}
+                    onJoin={(password) => handleCollabJoin(collabModal, password)}
+                    onClose={() => setCollabModal(null)}
+                  />
+                )}
+              </div>
+            </div>
+          );
+        })()}
       {showLogs && (
         <LogsModal
           entries={getCapturedLogs()}
@@ -3596,5 +3738,67 @@ export function VaultApp() {
         />
       )}
     </I18nProvider>
+  );
+}
+
+interface CollabJoinFormProps {
+  t: TFunction;
+  loggedIn: boolean;
+  onJoin: (password: string) => Promise<void>;
+  onClose: () => void;
+}
+
+/**
+ * Join step of the collaboration modal: enter the out-of-band negotiated password. Kept as a
+ * separate component so the password lives in local state and is dropped as soon as the form
+ * unmounts (the session only keeps the derived room key).
+ */
+function CollabJoinForm({ t, loggedIn, onJoin, onClose }: CollabJoinFormProps) {
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const join = async () => {
+    if (password.length < 6) {
+      setError(t('vaultApp.collabPasswordTooShort'));
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await onJoin(password);
+      setPassword('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <p className="fn-collab-modal__hint">{t('vaultApp.collabHint')}</p>
+      {!loggedIn && <p className="fn-collab-modal__error">{t('vaultApp.collabLoginRequired')}</p>}
+      <input
+        type="password"
+        className="fn-collab-modal__password"
+        value={password}
+        placeholder={t('vaultApp.collabPasswordPlaceholder')}
+        onChange={(e) => setPassword(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && loggedIn && !busy && password) void join();
+        }}
+        autoFocus
+      />
+      {error && <p className="fn-collab-modal__error">{error}</p>}
+      <div className="fn-modal__actions">
+        <button type="button" disabled={!loggedIn || busy || !password} onClick={() => void join()}>
+          {busy ? t('vaultApp.collabJoining') : t('vaultApp.collabJoin')}
+        </button>
+        <button type="button" onClick={onClose}>
+          {t('common.close')}
+        </button>
+      </div>
+    </>
   );
 }

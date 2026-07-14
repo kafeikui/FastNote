@@ -35,6 +35,7 @@
 - 笔记内容区宽度可拖拽调整；左侧目录侧边栏可一键收起，为内容区腾出更大空间
 - 多本地保险库（vault），解锁页可切换
 - 跨库传输：验证目标库密码后，可将笔记/文件夹（含附件）复制或移动到另一个本地保险库
+- **实时协作（笔记/表格）**：线下协商一个协作密码，双方在各自设备上点击标题栏「👥 协作」输入相同密码即可加入同一房间；本地没有该文档的一方新建一个**同类型**的空白文档（笔记对笔记、表格对表格）后加入，内容自动同步为会话最新内容；内容变更以 diff 增量实时互通，随时可退出。密码仅在本地派生房间 ID 与 AES-GCM 密钥（PBKDF2 600k），中继服务器只在内存中转发密文——不落盘、不知道密钥、看不到内容，零知识语义不变（表格合并前校验 JSON 结构，坏补丁自动回退全量重传）
 
 **AI 工作台（可选功能，不配置则完全不启用）**
 - 应用内直接与 Claude 模型对话：填入你自己的 Anthropic API key（用主密钥加密，只存在当前保险库内）
@@ -45,6 +46,7 @@
 - 消息级管理：逐条删除、导出为 Markdown 或 Word 文档；问答（选定范围或全部）可一键转为笔记；消息显示发送/开始接收/接收完毕时间
 - `max_tokens` 可在设置中调整（上限 128k）；长时间生成显示思考进度与耐心提示
 - `api.anthropic.com` 是 CSP 白名单中唯一的第三方例外，且在你保存 key 并主动发消息之前不会产生任何请求
+- **Android 移动版（Capacitor）**：`apps/mobile` 是聚焦 AI 助手的移动壳——加密库解锁/创建、加密 AI 会话、流式回复、附件、设置均复用同一套 packages 与库格式；移动端的"转为笔记"改为分享/复制 Markdown
 
 **聊天（1:1 端到端加密）**
 - 本地永久保存聊天记录（手动删除前不丢失），与是否登录云账号无关
@@ -62,7 +64,7 @@
 
 **安全**
 - 主密码仅用于本地派生密钥，绝不上传服务器
-- 全 E2E：笔记与聊天服务端均只见密文
+- 全 E2E：笔记、聊天与实时协作服务端均只见密文
 - 运行时 CSP 白名单：只允许连接到你配置的服务器地址，其它任何网络目的地（包括依赖引入的）都会被浏览器直接拦截
 - Electron 硬化：`contextIsolation`/无 `nodeIntegration`、拒绝所有系统权限请求、应用内链接一律用系统浏览器打开、禁用 webview
 
@@ -95,16 +97,24 @@ pnpm dev:server
 2. 切到「聊天」→ 输入对方用户名 → 发起聊天
 3. 消息经密钥交换 + AEAD 端到端加密，中继只见密文
 
+### 实时协作验证
+
+1. 双方都登录云账号（协作经中继服务器转发，需要登录态）
+2. 发起方打开要协作的笔记/表格 → 标题栏「👥 协作」→ 输入协商好的协作密码（≥6 位）→ 加入
+3. 另一方新建一个**同类型**的空白文档 → 同样点「👥 协作」→ 输入相同密码 → 内容自动同步为会话最新内容
+4. 双方实时互通编辑；弹层内可随时「退出协作」，锁库自动断开
+
 ## 项目结构
 
 ```
 apps/web        — 浏览器版（Vite + React）
 apps/desktop    — Electron 桌面版（macOS / Windows / Linux）
-packages/*      — Web 与 Electron 共享的业务逻辑（crypto / storage / editor / im / sync / ui / …）
+apps/mobile     — Android 移动版（Capacitor WebView，聚焦 AI 助手的壳层）
+packages/*      — Web / Electron / Android 共享的业务逻辑（crypto / storage / editor / im / sync / ui / …）
 server/         — 自托管中继（Fastify + WebSocket，仅存密文）
 ```
 
-Web 与 Electron **共享** `packages/*`，只有壳层不同；桌面版额外通过 `window.fastnote` IPC 提供"选择本地数据目录"等原生能力。
+所有壳层**共享** `packages/*`，只有壳层不同；桌面版额外通过 `window.fastnote` IPC 提供"选择本地数据目录"等原生能力。移动版沿用完全相同的加密库格式（Android WebView 内同样的 IndexedDB 布局），当前仅提供解锁 + AI 助手；笔记/表格/聊天/云同步暂时仍为桌面与 Web 功能。
 
 ## 构建三端
 
@@ -123,6 +133,24 @@ pnpm build
 pnpm dist:mac      # macOS dmg
 pnpm dist:win      # Windows nsis
 pnpm dist:linux    # Ubuntu: AppImage + deb
+```
+
+### Android 移动版（Capacitor）
+
+构建 APK 的机器需要安装 Android Studio（或至少 Android SDK + JDK 21）：
+
+```bash
+pnpm dev:mobile      # 浏览器内预览移动壳层（http://localhost:5174）
+pnpm android:sync    # 构建 Web 资源并同步进 apps/mobile/android 原生工程
+pnpm android:open    # 用 Android Studio 打开原生工程（在其中构建/运行/签名）
+pnpm android:apk     # 或直接用 Gradle 构建 debug APK
+```
+
+**JDK 说明**：Android Gradle Plugin 要求 Gradle 运行在 JDK 17–21 上——过新的 JDK（如 26）会报 `JdkImageTransform`/`androidJdkImage` 错误。从 Android Studio 内启动的构建自动使用 IDE 自带 JDK；命令行构建（`pnpm android:apk`）如果系统默认 JDK 过新，请在**用户级** `~/.gradle/gradle.properties` 中指定受支持的 JDK（机器特定路径不要提交进仓库）：
+
+```properties
+# macOS 示例：使用 Android Studio 自带的 JBR 21
+org.gradle.java.home=/Applications/Android Studio.app/Contents/jbr/Contents/Home
 ```
 
 ### 自托管中继部署（HTTPS）

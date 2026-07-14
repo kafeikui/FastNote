@@ -5,7 +5,7 @@ import Placeholder from '@tiptap/extension-placeholder';
 import { Mathematics } from '@tiptap/extension-mathematics';
 import { Markdown } from '@tiptap/markdown';
 import { Marked, marked as markedGlobal } from 'marked';
-import { EditorView, keymap } from '@codemirror/view';
+import { EditorView, keymap, rectangularSelection } from '@codemirror/view';
 import { Prec } from '@codemirror/state';
 import { deleteLine } from '@codemirror/commands';
 import {
@@ -62,6 +62,13 @@ export interface NoteEditorProps {
   showLineNumbers?: boolean;
   /** Off by default: KaTeX parsing/rendering can be slow on very long documents. */
   enableMath?: boolean;
+  /**
+   * Bump to force the current `content` into the editor even for the same note (used by
+   * real-time collaboration when a remote edit lands). WYSIWYG mode deliberately ignores
+   * `content` changes after load (local typing owns the document); this nonce is the explicit
+   * "the change came from outside, apply it" signal. Source mode already tracks `content`.
+   */
+  externalContentNonce?: number;
 }
 
 function getMarkdown(editor: NonNullable<ReturnType<typeof useEditor>>): string {
@@ -85,6 +92,7 @@ export function NoteEditor({
   placeholder,
   showLineNumbers = true,
   enableMath = false,
+  externalContentNonce = 0,
 }: NoteEditorProps) {
   const t = useT();
   const effectivePlaceholder = placeholder ?? t('noteEditor.placeholder');
@@ -229,6 +237,17 @@ export function NoteEditor({
     }
     prevModeRef.current = mode;
   }, [mode, content, editor]);
+
+  // Remote collaboration edit landed while this note is open in render mode: reload the content,
+  // then put the caret back where it was (clamped) — setContent resets the selection to the top.
+  useEffect(() => {
+    if (!editor || externalContentNonce === 0 || modeRef.current !== 'wysiwyg') return;
+    const { from } = editor.state.selection;
+    editor.commands.setContent(prepareContent(content), { contentType: 'markdown', emitUpdate: false });
+    const max = editor.state.doc.content.size;
+    editor.commands.setTextSelection(Math.min(from, max));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [externalContentNonce, editor]);
 
   useEffect(() => {
     if (!editor || mode !== 'wysiwyg') return;
@@ -394,6 +413,10 @@ export function NoteEditor({
       doc: content,
       extensions: [
         basicSetup,
+        // Middle-mouse drag makes a rectangular (column) selection — one cursor per line — so a
+        // vertical block of text can be selected and edited at once. basicSetup already provides
+        // the same via Alt+drag; this only adds the middle-button trigger.
+        rectangularSelection({ eventFilter: (e) => e.button === 1 }),
         markdown(),
         // Provides the search state used by the shared find/replace bar (driven programmatically
         // below — CodeMirror's own panel stays hidden).
@@ -536,8 +559,20 @@ export function NoteEditor({
     const view = cmView.current;
     const cur = view.state.doc.toString();
     if (cur !== content) {
+      // Replace only the changed middle (common prefix/suffix stripped) instead of the whole
+      // document: CodeMirror then maps the local cursor through the change, so a remote
+      // collaboration edit elsewhere in the note doesn't yank the caret around.
+      let start = 0;
+      const minLen = Math.min(cur.length, content.length);
+      while (start < minLen && cur[start] === content[start]) start++;
+      let endCur = cur.length;
+      let endNew = content.length;
+      while (endCur > start && endNew > start && cur[endCur - 1] === content[endNew - 1]) {
+        endCur--;
+        endNew--;
+      }
       view.dispatch({
-        changes: { from: 0, to: cur.length, insert: content },
+        changes: { from: start, to: endCur, insert: content.slice(start, endNew) },
       });
     }
   }, [content, mode]);

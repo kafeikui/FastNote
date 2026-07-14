@@ -183,7 +183,7 @@ export function AiWorkbench({
   const findIdxRef = useRef(0);
   const findMarksRef = useRef<HTMLElement[]>([]);
   const lastFindQueryRef = useRef('');
-  const findInputRef = useRef<HTMLInputElement>(null);
+  const findInputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     if (!findRequest) return;
@@ -399,10 +399,14 @@ export function AiWorkbench({
       </div>
       {findOpen && (
         <div className="fn-ai-findbar">
-          <input
+          {/* A textarea so multi-line queries (e.g. a selection spanning lines pre-filled by
+              Ctrl+F) keep their newlines visible; Ctrl/Cmd+Enter inserts one manually. */}
+          <textarea
             ref={findInputRef}
+            rows={Math.max(1, findQuery.split('\n').length)}
             value={findQuery}
             placeholder={t('findReplace.findPlaceholder')}
+            title={t('findReplace.multilineHint')}
             onChange={(e) => {
               setFindQuery(e.target.value);
               setFindIdx(0);
@@ -410,6 +414,15 @@ export function AiWorkbench({
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
                 e.preventDefault();
+                if (e.ctrlKey || e.metaKey) {
+                  const el = e.currentTarget;
+                  const start = el.selectionStart ?? findQuery.length;
+                  const end = el.selectionEnd ?? findQuery.length;
+                  setFindQuery(findQuery.slice(0, start) + '\n' + findQuery.slice(end));
+                  setFindIdx(0);
+                  requestAnimationFrame(() => el.setSelectionRange(start + 1, start + 1));
+                  return;
+                }
                 stepFind(e.shiftKey ? -1 : 1);
               } else if (e.key === 'Escape') {
                 e.preventDefault();

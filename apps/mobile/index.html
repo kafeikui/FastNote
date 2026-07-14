@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      Content-Security-Policy bootstrap — same mechanism as apps/web/index.html: a <meta> CSP is
+      applied exactly once at parse time, so it must be written synchronously via document.write
+      before any resource-loading tag. Inside the Capacitor WebView the app origin is
+      https://localhost ('self'); connect-src additionally allows api.anthropic.com for the AI
+      Workbench (the mobile build has no cloud sync, so no server origin is added).
+    -->
+    <script>
+      (function () {
+        var connectSrc = ["'self'", 'https://api.anthropic.com'].join(' ');
+        var policy = [
+          "default-src 'self'",
+          "script-src 'self'",
+          "style-src 'self' 'unsafe-inline'",
+          "img-src 'self' data: blob:",
+          "font-src 'self' data:",
+          "media-src 'self' blob:",
+          'connect-src ' + connectSrc,
+          "object-src 'none'",
+          "base-uri 'self'",
+          "form-action 'none'",
+        ].join('; ');
+        document.write('<meta http-equiv="Content-Security-Policy" content="' + policy + '">');
+      })();
+    </script>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no"
+    />
+    <title>FastNote</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

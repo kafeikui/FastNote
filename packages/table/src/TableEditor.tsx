@@ -832,14 +832,30 @@ export function TableEditor({
     onRegisterInsert?.(insertAttachmentText);
   }, [onRegisterInsert, insertAttachmentText]);
 
+  // With a cell selected, "+column"/"+row" inserts before that cell's column/row (Excel-style);
+  // with no selection it appends at the end. The selection is shifted so the same cells stay
+  // selected after the insert.
   const handleAddColumn = useCallback(() => {
     lastActionRef.current = { type: 'addColumn' };
-    emitChange(addColumn(docRef.current, locale));
+    const range = selectionRangeRef.current;
+    emitChange(addColumn(docRef.current, locale, range?.colStart));
+    if (range) {
+      setSelAnchor((p) => (p && p.colIdx >= range.colStart ? { ...p, colIdx: p.colIdx + 1 } : p));
+      setSelFocus((p) => (p && p.colIdx >= range.colStart ? { ...p, colIdx: p.colIdx + 1 } : p));
+    }
   }, [locale, emitChange]);
 
   const handleAddRow = useCallback(() => {
     lastActionRef.current = { type: 'addRow' };
-    emitChange(addRow(docRef.current));
+    const range = selectionRangeRef.current;
+    // The selection's row index is a display index; map it to the underlying document row.
+    const anchorRow = range ? displayRowsRef.current[range.rowStart] : undefined;
+    const docIdx = anchorRow ? docRef.current.rows.findIndex((r) => r.id === anchorRow.id) : -1;
+    emitChange(addRow(docRef.current, docIdx >= 0 ? docIdx : undefined));
+    if (range && docIdx >= 0) {
+      setSelAnchor((p) => (p && p.rowIdx >= range.rowStart ? { ...p, rowIdx: p.rowIdx + 1 } : p));
+      setSelFocus((p) => (p && p.rowIdx >= range.rowStart ? { ...p, rowIdx: p.rowIdx + 1 } : p));
+    }
   }, [emitChange]);
 
   // The × buttons unmount themselves on click, dropping keyboard focus to <body>; refocusing the
@@ -972,6 +988,22 @@ export function TableEditor({
     if (redoShortcut && matchesShortcut(e, redoShortcut)) {
       e.preventDefault();
       redo();
+      return;
+    }
+    // Mod+A selects the whole grid, spreadsheet-style two-stage behavior: while editing a cell
+    // whose text isn't fully selected yet, the first press keeps the native select-all-in-cell;
+    // pressing again (or when nothing is being edited) selects every cell.
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'a') {
+      const el = document.activeElement;
+      if (el instanceof HTMLTextAreaElement && el.dataset.rowIdx !== undefined) {
+        const fullySelected =
+          (el.selectionStart ?? 0) === 0 && (el.selectionEnd ?? 0) === el.value.length;
+        if (!fullySelected && el.value.length > 0) return;
+      }
+      e.preventDefault();
+      if (displayRows.length === 0 || doc.columns.length === 0) return;
+      setSelAnchor({ rowIdx: 0, colIdx: 0 });
+      setSelFocus({ rowIdx: displayRows.length - 1, colIdx: doc.columns.length - 1 });
       return;
     }
     // Mod+C with focus outside any text field (row/column selected via header) never produces a
@@ -1210,6 +1242,7 @@ export function TableEditor({
               <p>{t('tableEditor.helpCopy')}</p>
               <p>{t('tableEditor.helpPaste')}</p>
               <p>{t('tableEditor.helpMove')}</p>
+              <p>{t('tableEditor.helpSelectAll')}</p>
             </div>
           )}
         </div>

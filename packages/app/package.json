@@ -1,6 +1,6 @@
 {
   "name": "@fastnote/app",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
@@ -11,6 +11,7 @@
   "dependencies": {
     "@fastnote/ai": "workspace:*",
     "@fastnote/api": "workspace:*",
+    "@fastnote/collab": "workspace:*",
     "@fastnote/crypto": "workspace:*",
     "@fastnote/editor": "workspace:*",
     "@fastnote/i18n": "workspace:*",

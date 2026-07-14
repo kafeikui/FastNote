@@ -1,0 +1,233 @@
+/* Mobile overrides layered on top of the shared desktop stylesheet (apps/web/src/styles.css). */
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overscroll-behavior: none;
+}
+
+.fn-mobile {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  background: var(--bg);
+  color: var(--text);
+  /* Keep content clear of notches / gesture bars. */
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* The unlock screen fills the phone screen instead of floating as a desktop card. */
+.fn-mobile .fn-unlock {
+  min-height: 100%;
+}
+
+.fn-mobile__header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface);
+}
+
+.fn-mobile__header-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 0.95rem;
+  text-align: center;
+}
+
+.fn-mobile__header-actions {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.fn-mobile__header-btn {
+  min-width: 2.4rem;
+  min-height: 2.4rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 1.05rem;
+  cursor: pointer;
+}
+
+.fn-mobile__main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.fn-mobile__empty {
+  margin: auto;
+  text-align: center;
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.fn-mobile__empty button {
+  padding: 0.6rem 1.2rem;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.95rem;
+}
+
+/* --- session drawer / settings sheet ------------------------------------------ */
+
+.fn-mobile__drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+}
+
+.fn-mobile__drawer {
+  width: min(82vw, 320px);
+  height: 100%;
+  overflow-y: auto;
+  background: var(--surface-elevated);
+  border-right: 1px solid var(--border-soft);
+  padding: calc(0.5rem + env(safe-area-inset-top)) 0.5rem calc(0.5rem + env(safe-area-inset-bottom));
+}
+
+.fn-mobile__drawer-title {
+  font-weight: 600;
+  padding: 0.4rem 0.5rem 0.6rem;
+}
+
+.fn-mobile__settings {
+  margin: auto;
+  width: min(92vw, 420px);
+  max-height: 86dvh;
+  overflow-y: auto;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.fn-mobile__settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+  font-size: 1.05rem;
+}
+
+.fn-mobile__settings-head button {
+  border: none;
+  background: none;
+  font-size: 1.1rem;
+  cursor: pointer;
+  min-width: 2.2rem;
+  min-height: 2.2rem;
+}
+
+.fn-mobile__settings-section {
+  margin-top: 0.25rem;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border-soft);
+  padding-top: 0.75rem;
+}
+
+.fn-mobile__field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+}
+
+.fn-mobile__field input:not([type='checkbox']),
+.fn-mobile__field select {
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  font-size: 0.9rem;
+}
+
+.fn-mobile__field--row {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.fn-mobile__hint {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.fn-mobile__save {
+  padding: 0.65rem;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: #fff;
+  font-weight: 500;
+  font-size: 0.95rem;
+}
+
+.fn-mobile__version {
+  margin: 0;
+  text-align: center;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+/* --- touch adaptations ---------------------------------------------------------- */
+
+@media (pointer: coarse) {
+  /* Hover-gated affordances have no hover on touch — always show them. */
+  .fn-ai-tree__actions {
+    display: inline-flex;
+  }
+
+  .fn-ai-msg__actions {
+    opacity: 1;
+  }
+
+  .fn-ai-tree__row {
+    min-height: 2.4rem;
+    align-items: center;
+  }
+
+  .fn-ai-tree__actions button {
+    min-width: 2rem;
+    min-height: 2rem;
+    font-size: 0.95rem;
+  }
+
+  /* Messages use the full phone width instead of the desktop 52rem column. */
+  .fn-ai-msg {
+    max-width: 100%;
+  }
+
+  .fn-ai-workbench__messages {
+    padding: 0.75rem 0.6rem;
+  }
+
+  .fn-ai-workbench__composer {
+    padding: 0.5rem 0.6rem calc(0.5rem + env(safe-area-inset-bottom));
+  }
+}

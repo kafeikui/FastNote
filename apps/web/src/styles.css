@@ -2394,6 +2394,64 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   width: min(640px, 94vw);
 }
 
+/* --- Real-time collaboration modal ------------------------------------------------ */
+
+.fn-modal.fn-collab-modal {
+  width: min(480px, 94vw);
+}
+
+.fn-collab-modal__hint {
+  margin: 0.5rem 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.fn-collab-modal__error {
+  margin: 0.5rem 0;
+  color: #d33;
+  font-size: 0.85rem;
+}
+
+.fn-collab-modal__password {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: inherit;
+  font-size: 0.95rem;
+}
+
+.fn-collab-modal__status {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0.5rem 0;
+  font-size: 0.95rem;
+}
+
+.fn-collab-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--muted);
+}
+
+.fn-collab-dot--connected {
+  background: #2fa84f;
+}
+
+.fn-collab-dot--connecting {
+  background: #e0a52d;
+}
+
+.fn-collab-dot--disconnected {
+  background: #d33;
+}
+
 .fn-table-palette__default {
   display: block;
   width: 100%;
@@ -3233,7 +3291,7 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   background: var(--surface);
 }
 
-.fn-ai-findbar input {
+.fn-ai-findbar textarea {
   flex: 1;
   min-width: 0;
   max-width: 340px;
@@ -3243,6 +3301,11 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   background: var(--bg);
   color: var(--text);
   font-size: 0.85rem;
+  font-family: inherit;
+  resize: none;
+  overflow: hidden;
+  line-height: 1.35;
+  white-space: pre-wrap;
 }
 
 .fn-ai-findbar__count {

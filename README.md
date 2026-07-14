@@ -35,6 +35,7 @@ Encrypted notes + 1:1 end-to-end encrypted instant messaging. Built for personal
 - Resizable note content width; collapsible sidebar for a wider content area
 - Multiple local vaults, switchable from the unlock screen
 - Cross-vault transfer: copy or move notes/folders (attachments included) into another local vault after verifying its password
+- **Real-time collaboration (notes/tables)**: negotiate a collaboration password out of band, then everyone clicks "👥 Collab" in the title bar and enters the same password to join the room; anyone without the document locally just creates a new blank document of the **same type** (note for note, table for table) and joins from there — the content syncs to the latest session state automatically; edits flow as incremental diffs in real time, and you can leave at any point. The password only derives the room id and an AES-GCM key locally (PBKDF2 600k) — the relay forwards ciphertext in memory only, never persists it, never knows the key, and never sees content, so the zero-knowledge model is unchanged (table merges are validated as JSON first; a bad patch falls back to a full-state resync)
 
 **AI Workbench (optional, off unless you configure it)**
 - Chat with Claude models directly inside the app: bring your own Anthropic API key (encrypted with your master key, stored only in this vault)
@@ -45,6 +46,7 @@ Encrypted notes + 1:1 end-to-end encrypted instant messaging. Built for personal
 - Per-message management: delete, export as Markdown or a Word document; convert Q&A (a selected range or the whole session) into a note; send/receive timestamps on every message
 - Configurable `max_tokens` (up to 128k) in Settings; long generations show thinking progress and a patience hint
 - `api.anthropic.com` is the single CSP exception, and no request is ever made until you save a key and send a message
+- **Android app (Capacitor)**: a mobile shell (`apps/mobile`) focused on the AI assistant — vault unlock/creation, encrypted AI sessions, streaming replies, attachments, and Settings all reuse the same packages and vault format; "convert to note" becomes share/copy-as-Markdown on mobile
 
 **Chat (1:1 end-to-end encrypted)**
 - Chat history is kept locally forever (until manually deleted), independent of cloud login state
@@ -62,7 +64,7 @@ Encrypted notes + 1:1 end-to-end encrypted instant messaging. Built for personal
 
 **Security**
 - The master password is only ever used to derive keys locally — it never leaves your device
-- Full E2E: the server only ever sees ciphertext for both notes and chat
+- Full E2E: the server only ever sees ciphertext for notes, chat, and real-time collaboration
 - Runtime CSP allowlist: only your configured server address can be reached; every other network destination (including ones introduced by dependencies) is blocked by the browser itself
 - Electron hardening: `contextIsolation` on / `nodeIntegration` off, all system permission requests denied, in-app links always open in the system browser, `webview` disabled
 
@@ -95,16 +97,24 @@ pnpm dev:server
 2. Switch to "Chat" → enter the other user's username → start a chat
 3. Messages are encrypted end-to-end via key exchange + AEAD; the relay only ever sees ciphertext
 
+### Verifying real-time collaboration
+
+1. Both sides log into a cloud account (collaboration is relayed through the server, so a login session is required)
+2. The initiator opens the note/table to collaborate on → "👥 Collab" in the title bar → enters the negotiated collaboration password (min. 6 chars) → joins
+3. The other side creates a new blank document of the **same type** → clicks "👥 Collab" → enters the same password → the content syncs to the latest session state automatically
+4. Edits now flow both ways in real time; either side can leave from the dialog at any point, and locking the vault disconnects all sessions
+
 ## Project layout
 
 ```
 apps/web        — browser version (Vite + React)
 apps/desktop    — Electron desktop version (macOS / Windows / Linux)
-packages/*      — business logic shared between Web and Electron (crypto / storage / editor / im / sync / ui / i18n / …)
+apps/mobile     — Android version (Capacitor WebView; AI-assistant-focused shell)
+packages/*      — business logic shared between Web / Electron / Android (crypto / storage / editor / im / sync / ui / i18n / …)
 server/         — self-hosted relay (Fastify + WebSocket, ciphertext-only)
 ```
 
-Web and Electron **share** `packages/*` — only the shell differs. The desktop build additionally exposes native capabilities (e.g. choosing a local data directory) through a `window.fastnote` IPC bridge.
+All shells **share** `packages/*` — only the shell differs. The desktop build additionally exposes native capabilities (e.g. choosing a local data directory) through a `window.fastnote` IPC bridge. The mobile shell keeps the identical encrypted-vault format (same IndexedDB layout inside the Android WebView) but currently ships only unlock + the AI assistant; notes/tables/chat/cloud-sync remain desktop/web features for now.
 
 ## Building all three targets
 
@@ -123,6 +133,24 @@ pnpm build
 pnpm dist:mac      # macOS dmg
 pnpm dist:win      # Windows nsis
 pnpm dist:linux    # Ubuntu: AppImage + deb
+```
+
+### Android app (Capacitor)
+
+Requires Android Studio (or at least an Android SDK + JDK 21) on the machine doing the build:
+
+```bash
+pnpm dev:mobile      # browser preview of the mobile shell (http://localhost:5174)
+pnpm android:sync    # build web assets and sync them into apps/mobile/android
+pnpm android:open    # open the native project in Android Studio (build/run/sign there)
+pnpm android:apk     # or build a debug APK directly via Gradle
+```
+
+**JDK note**: the Android Gradle Plugin needs Gradle to run on JDK 17–21 — very new JDKs (e.g. 26) fail with a `JdkImageTransform`/`androidJdkImage` error. Builds started from Android Studio use the IDE's bundled JDK automatically; for command-line builds (`pnpm android:apk`) with a newer system JDK, point Gradle at a supported one in your user-level `~/.gradle/gradle.properties` (do not commit machine-specific paths into the repo):
+
+```properties
+# example on macOS, using Android Studio's bundled JBR 21
+org.gradle.java.home=/Applications/Android Studio.app/Contents/jbr/Contents/Home
 ```
 
 ### Self-hosted relay deployment (HTTPS)
