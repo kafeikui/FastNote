@@ -376,7 +376,6 @@ export const zh = {
     filterPlaceholder: '筛选…',
     deleteColumn: '删除列',
     selectCellFirst: '请先点击要插入附件的单元格',
-    footerHint: '点击单元格后可从上方下拉插入附件 · 共 {shown}/{total} 行',
     renameColumnPrompt: '列名',
     formulaHint: '以 = 开头输入公式，例如 =SUM(A1:A3)、=AVERAGE(B1:B5)、=SUM(C:C) 整列求和',
     helpFormulaRef: '输入 = 后：点击其他单元格插入引用，按住拖动引用多行多列区域，点击列号引用整列（如 C:C）',
@@ -433,10 +432,10 @@ export const zh = {
     columnLetterTooltip: '列 {letter}，点击可选中整列',
     selectRowTooltip: '点击选中整行',
     stats: {
+      rows: '共 {shown}/{total} 行',
       count: '计数：{count}',
       sum: '求和：{sum}',
       average: '平均值：{average}',
-      placeholder: '选中单元格后此处显示计数 / 求和 / 平均值',
     },
   },
   tableUtils: {

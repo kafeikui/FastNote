@@ -661,6 +661,9 @@ body.fn-resizing-sidebar .fn-sidebar {
   overflow-y: hidden;
   display: flex;
   flex-direction: column;
+  /* No gap between the pane header and the table toolbar — content area gets the space. */
+  padding-top: 0;
+  padding-bottom: 0.5rem;
 }
 
 .fn-tab-group__scroll--table .fn-note {
@@ -2039,6 +2042,10 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   position: sticky;
   top: 0;
   z-index: 5;
+  /* Keep the header a single compact line: never wrap, clip what doesn't fit. */
+  padding-top: 0.15rem;
+  padding-bottom: 0.15rem;
+  white-space: nowrap;
 }
 
 /* Row-delete column, frozen at the very left edge. */
@@ -2059,6 +2066,8 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   position: sticky;
   left: 0;
   z-index: 4;
+  /* Centered like the row number, so both stay visible in very short rows. */
+  vertical-align: middle;
 }
 
 .fn-table__row-del {
@@ -2088,6 +2097,9 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   position: sticky;
   left: 2rem;
   z-index: 4;
+  /* Overrides the top alignment other cells use, so the number sits centered even in
+     very short (down to 12px) rows. */
+  vertical-align: middle;
 }
 
 /* Optional Excel-style freeze of the first data column (toggled per table). */
@@ -2118,6 +2130,38 @@ body.fn-resizing-note .fn-note-resize-handle::after {
 
 .fn-table__col-resize:hover {
   background: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* Rows with an explicit (possibly very small) height: a CSS-table row height is only a
+   minimum, so the cell content itself must be capped and clipped for rows to shrink down
+   to MIN_ROW_HEIGHT (just the row number + resize handle). */
+.fn-table tr.fn-table__row--fixed td {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.fn-table tr.fn-table__row--fixed .fn-table-cell {
+  /* min-height wins over max-height in CSS, so the base 1.75rem floor must be lifted here —
+     it was what kept rows from shrinking below 28px. */
+  min-height: 0;
+  max-height: var(--fn-row-h);
+  overflow: hidden;
+}
+
+.fn-table tr.fn-table__row--fixed .fn-table-cell__text {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.fn-table tr.fn-table__row--fixed .fn-table__row-del {
+  height: 0.75rem;
+  width: 0.75rem;
+  font-size: 0.7rem;
+}
+
+.fn-table tr.fn-table__row--fixed .fn-table__rownum-col {
+  font-size: 0.7rem;
+  line-height: 1;
 }
 
 .fn-table__row-resize {
@@ -2221,12 +2265,17 @@ body.fn-resizing-note .fn-note-resize-handle::after {
 
 .fn-table__sort {
   flex: 1;
+  /* Long column names never wrap the header taller; they get ellipsized instead. */
+  min-width: 0;
   border: none;
   background: transparent;
   cursor: pointer;
   font-weight: 600;
   padding: 0;
   text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .fn-table__rownum-col {
@@ -2612,12 +2661,6 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   max-width: 280px;
 }
 
-.fn-table-editor__hint {
-  margin-top: 0.5rem;
-  color: var(--muted);
-  font-size: 0.8rem;
-}
-
 .fn-table-editor__formula-hint {
   color: var(--muted);
   font-size: 0.78rem;
@@ -2625,8 +2668,8 @@ body.fn-resizing-note .fn-note-resize-handle::after {
 }
 
 /* Sits between the toolbar and the table so it stays visible with tall tables. */
-/* Always rendered with a constant single-line height so toggling between placeholder and real
-   stats never resizes the table wrap (whose horizontal scrollbar must stay in a fixed spot). */
+/* Always rendered (the row count is always shown) with a constant single-line height so the
+   table wrap never resizes (its horizontal scrollbar must stay in a fixed spot). */
 .fn-table-editor__stats {
   display: flex;
   align-items: center;
@@ -2645,11 +2688,6 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   line-height: 1.4;
   font-variant-numeric: tabular-nums;
 }
-
-.fn-table-editor__stats-placeholder {
-  color: var(--muted);
-}
-
 
 .fn-chat {
   display: flex;

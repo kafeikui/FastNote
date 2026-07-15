@@ -55,6 +55,11 @@ export interface NoteEditorProps {
   onEditFormula?: (latex: string, apply: (next: string) => void) => void;
   /** Registers the find/replace driver for the current view (source or render mode). */
   onRegisterFindReplace?: (controller: FindReplaceController | null) => void;
+  /**
+   * Registers a select-all action for the current view, used by the app-level Ctrl/Cmd+A so
+   * "select all" grabs the note content instead of the whole UI when focus is outside the editor.
+   */
+  onRegisterSelectAll?: (fn: (() => void) | null) => void;
   attachments?: NoteAttachment[];
   onAttachmentDownload?: (attachmentId: string) => void;
   onAttachmentEdit?: (attachmentId: string, description: string) => void | Promise<void>;
@@ -86,6 +91,7 @@ export function NoteEditor({
   onSelectionChars,
   onEditFormula,
   onRegisterFindReplace,
+  onRegisterSelectAll,
   attachments = [],
   onAttachmentDownload,
   onAttachmentEdit,
@@ -404,6 +410,27 @@ export function NoteEditor({
       });
     }
   }, [editor, mode, onRegisterInsert, noteId]);
+
+  useEffect(() => {
+    if (!onRegisterSelectAll) return;
+    if (mode === 'wysiwyg' && editor) {
+      onRegisterSelectAll(() => {
+        editor.chain().focus().selectAll().run();
+      });
+      return () => onRegisterSelectAll(null);
+    }
+    if (mode === 'source') {
+      // DOM-range selection can't work here (CodeMirror only renders visible lines), so the
+      // selection is made through the editor state instead.
+      onRegisterSelectAll(() => {
+        const view = cmView.current;
+        if (!view) return;
+        view.focus();
+        view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+      });
+      return () => onRegisterSelectAll(null);
+    }
+  }, [editor, mode, onRegisterSelectAll, noteId]);
 
   useEffect(() => {
     if (mode !== 'source' || !cmRef.current) return;

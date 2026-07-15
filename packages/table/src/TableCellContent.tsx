@@ -33,6 +33,8 @@ interface TableCellContentProps {
   attachments: NoteAttachment[];
   onChange: (value: string) => void;
   onFocus: () => void;
+  /** Fires when the cell's text input loses focus (used e.g. to auto-close formula parens). */
+  onEditBlur?: () => void;
   onDownload: (id: string) => void;
   onEdit: (id: string, description: string) => void | Promise<void>;
   selected?: boolean;
@@ -59,6 +61,7 @@ function TableCellContent({
   attachments,
   onChange,
   onFocus,
+  onEditBlur,
   onDownload,
   onEdit,
   selected,
@@ -200,6 +203,7 @@ function TableCellContent({
             onBlur={() => {
               setEditing(false);
               onTextSelect?.(0);
+              onEditBlur?.();
             }}
             onChange={(e) => updateTextSegment(index, e.target.value)}
             onSelect={(e) => {

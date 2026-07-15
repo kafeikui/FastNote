@@ -250,6 +250,9 @@ export function VaultApp() {
   // Attachment manager modal for the focused note/table (opened from the 📎 header button).
   const [showAttachmentsModal, setShowAttachmentsModal] = useState(false);
   const findReplaceByGroupRef = useRef<Record<string, FindReplaceController | null>>({});
+  // Select-all actions registered by the mounted note/table editors, used by the app-level
+  // Ctrl/Cmd+A so "select all" targets the active content instead of the whole UI.
+  const selectAllByGroupRef = useRef<Record<string, (() => void) | null>>({});
   // Cross-vault transfer: ids of the tree nodes being transferred (null = dialog closed).
   const [transferIds, setTransferIds] = useState<string[] | null>(null);
   const [transferBusy, setTransferBusy] = useState(false);
@@ -1358,6 +1361,36 @@ export function VaultApp() {
         setFindInitialQuery(query || null);
         setFindBarNonce((n) => n + 1);
         setFindBarGroupId(activeGroupIdRef.current);
+        return;
+      }
+      // Ctrl/Cmd+A outside any editable element: select the active content (note text, table
+      // cells, or the AI conversation) instead of letting the browser select the whole UI.
+      // Inside inputs/editors the native per-field select-all keeps working.
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        !e.altKey &&
+        !e.shiftKey &&
+        e.key.toLowerCase() === 'a' &&
+        !isTypingTarget(e.target) &&
+        appViewRef.current === 'notes'
+      ) {
+        if (activeAiSessionIdRef.current) {
+          const messages = document.querySelector('.fn-ai-workbench__messages');
+          if (messages) {
+            e.preventDefault();
+            const range = document.createRange();
+            range.selectNodeContents(messages);
+            const sel = window.getSelection();
+            sel?.removeAllRanges();
+            sel?.addRange(range);
+          }
+          return;
+        }
+        const selectAll = selectAllByGroupRef.current[activeGroupIdRef.current ?? ''];
+        if (selectAll) {
+          e.preventDefault();
+          selectAll();
+        }
         return;
       }
       // Delete the sidebar selection — but never while the user is typing in an input or editor,
@@ -3206,6 +3239,9 @@ export function VaultApp() {
                   onRegisterFindReplace={(ctrl) => {
                     findReplaceByGroupRef.current[group.id] = ctrl;
                   }}
+                  onRegisterSelectAll={(fn) => {
+                    selectAllByGroupRef.current[group.id] = fn;
+                  }}
                 />
               </div>
             </div>
@@ -3338,6 +3374,9 @@ export function VaultApp() {
                   onEditFormula={(latex, apply) => setFormulaEdit({ groupId: group.id, latex, apply })}
                   onRegisterFindReplace={(ctrl) => {
                     findReplaceByGroupRef.current[group.id] = ctrl;
+                  }}
+                  onRegisterSelectAll={(fn) => {
+                    selectAllByGroupRef.current[group.id] = fn;
                   }}
                   attachments={isFocused ? attachments : []}
                   onAttachmentDownload={handleAttachmentDownload}

@@ -85,6 +85,11 @@ export interface TableEditorProps {
   redoShortcut?: ShortcutBinding;
   /** Registers the find/replace driver for this table (searches cell contents). */
   onRegisterFindReplace?: (controller: FindReplaceController | null) => void;
+  /**
+   * Registers a select-all action (select every cell), used by the app-level Ctrl/Cmd+A so
+   * "select all" grabs the grid instead of the whole UI when focus is outside the table.
+   */
+  onRegisterSelectAll?: (fn: (() => void) | null) => void;
 }
 
 /** Curated palettes: single-click swatches avoid flooding the undo history the way a live color picker would. */
@@ -129,6 +134,7 @@ export function TableEditor({
   undoShortcut,
   redoShortcut,
   onRegisterFindReplace,
+  onRegisterSelectAll,
 }: TableEditorProps) {
   const t = useT();
   const locale = useLocale();
@@ -375,6 +381,23 @@ export function TableEditor({
       },
     });
     return () => onRegisterFindReplaceRef.current?.(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- all lookups go through refs
+  }, []);
+
+  const onRegisterSelectAllRef = useRef(onRegisterSelectAll);
+  onRegisterSelectAllRef.current = onRegisterSelectAll;
+  useEffect(() => {
+    if (!onRegisterSelectAllRef.current) return;
+    onRegisterSelectAllRef.current(() => {
+      const rows = displayRowsRef.current.length;
+      const cols = docRef.current.columns.length;
+      if (rows === 0 || cols === 0) return;
+      // Focus the grid so the selection is visible and follow-up keys (Mod+C, Esc…) land here.
+      containerRef.current?.focus();
+      setSelAnchor({ rowIdx: 0, colIdx: 0 });
+      setSelFocus({ rowIdx: rows - 1, colIdx: cols - 1 });
+    });
+    return () => onRegisterSelectAllRef.current?.(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- all lookups go through refs
   }, []);
 
@@ -957,12 +980,100 @@ export function TableEditor({
     el.select();
   }, []);
 
+  /** Value a cell held when its edit began (textarea focus) — what Esc reverts to. */
+  const editStartValueRef = useRef<{ rowId: string; colId: string; value: string } | null>(null);
+  /** Set by the Esc-revert path so the following blur doesn't re-finalize the reverted formula. */
+  const skipFinalizeRef = useRef(false);
+
+  /** Commits a formula's missing closing parens when the edit ends (Enter / focus moved away). */
+  const finalizeFormulaParens = useCallback(
+    (rowId: string, colId: string) => {
+      const raw = docRef.current.rows.find((r) => r.id === rowId)?.cells[colId] ?? '';
+      if (!isFormulaValue(raw)) return;
+      const missing = (raw.match(/\(/g) ?? []).length - (raw.match(/\)/g) ?? []).length;
+      if (missing > 0) emitChange(updateCell(docRef.current, rowId, colId, raw + ')'.repeat(missing)));
+    },
+    [emitChange],
+  );
+
+  const handleEditBlur = useCallback(
+    (rowId: string, colId: string) => {
+      if (skipFinalizeRef.current) {
+        skipFinalizeRef.current = false;
+        return;
+      }
+      finalizeFormulaParens(rowId, colId);
+    },
+    [finalizeFormulaParens],
+  );
+
   const handleCellKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>, rowIdx: number, colIdx: number) => {
+      const cellIds = () => {
+        const row = displayRowsRef.current[rowIdx];
+        const col = docRef.current.columns[colIdx];
+        return row && col ? { rowId: row.id, colId: col.id } : null;
+      };
+
+      // Esc cancels the current edit: the cell reverts to its value from when editing began,
+      // and the grid returns to a no-selection state.
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        const ids = cellIds();
+        const start = editStartValueRef.current;
+        if (
+          ids &&
+          start &&
+          start.rowId === ids.rowId &&
+          start.colId === ids.colId &&
+          (docRef.current.rows.find((r) => r.id === ids.rowId)?.cells[ids.colId] ?? '') !== start.value
+        ) {
+          emitChange(updateCell(docRef.current, ids.rowId, ids.colId, start.value));
+        }
+        skipFinalizeRef.current = true;
+        (e.target as HTMLTextAreaElement).blur();
+        setSelAnchor(null);
+        setSelFocus(null);
+        setFocusCell(null);
+        return;
+      }
+
+      // Shift+Arrow moves the selected cell and starts editing it; the current cell's edits
+      // are kept (they're already committed per keystroke) and formulas get closed parens.
+      if (
+        e.shiftKey &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight')
+      ) {
+        const targetRow =
+          e.key === 'ArrowUp' ? rowIdx - 1 : e.key === 'ArrowDown' ? rowIdx + 1 : rowIdx;
+        const targetCol =
+          e.key === 'ArrowLeft' ? colIdx - 1 : e.key === 'ArrowRight' ? colIdx + 1 : colIdx;
+        if (
+          targetRow < 0 ||
+          targetRow >= displayRowsRef.current.length ||
+          targetCol < 0 ||
+          targetCol >= docRef.current.columns.length
+        )
+          return;
+        e.preventDefault();
+        const ids = cellIds();
+        if (ids) finalizeFormulaParens(ids.rowId, ids.colId);
+        setSelAnchor({ rowIdx: targetRow, colIdx: targetCol });
+        setSelFocus({ rowIdx: targetRow, colIdx: targetCol });
+        focusCellInput(targetRow, targetCol);
+        return;
+      }
+
       if (e.key !== 'Enter') return;
       // Shift+Enter inserts an in-cell line break (the textarea's default behavior).
       if (e.shiftKey) return;
       e.preventDefault();
+      const ids = cellIds();
+      if (ids) finalizeFormulaParens(ids.rowId, ids.colId);
       // Move to the same column on the next visible row, spreadsheet-style. The selection
       // outline follows along — focusCellInput alone only moves the text caret.
       if (rowIdx + 1 < displayRows.length) {
@@ -973,7 +1084,7 @@ export function TableEditor({
         (e.target as HTMLTextAreaElement).blur();
       }
     },
-    [displayRows.length, focusCellInput],
+    [displayRows.length, focusCellInput, emitChange, finalizeFormulaParens],
   );
 
   const selectionStats = useMemo(() => {
@@ -1186,6 +1297,42 @@ export function TableEditor({
   };
 
   const handleContainerKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    // Esc with a selection but no cell being edited (e.g. a row/column selected via its
+    // header): drop the selection entirely. The editing case is handled in handleCellKeyDown,
+    // which stops propagation.
+    if (e.key === 'Escape' && (selAnchor || selFocus || focusCell)) {
+      e.preventDefault();
+      setSelAnchor(null);
+      setSelFocus(null);
+      setFocusCell(null);
+      return;
+    }
+    // Shift+Arrow with a selection but no focused cell input: move the selection to the
+    // adjacent cell and start editing it (mirrors the in-cell behavior).
+    if (
+      e.shiftKey &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.altKey &&
+      (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') &&
+      selFocus &&
+      !(document.activeElement instanceof HTMLTextAreaElement &&
+        (document.activeElement as HTMLTextAreaElement).dataset.rowIdx !== undefined)
+    ) {
+      const targetRow = Math.min(
+        Math.max(selFocus.rowIdx + (e.key === 'ArrowUp' ? -1 : e.key === 'ArrowDown' ? 1 : 0), 0),
+        displayRows.length - 1,
+      );
+      const targetCol = Math.min(
+        Math.max(selFocus.colIdx + (e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0), 0),
+        doc.columns.length - 1,
+      );
+      e.preventDefault();
+      setSelAnchor({ rowIdx: targetRow, colIdx: targetCol });
+      setSelFocus({ rowIdx: targetRow, colIdx: targetCol });
+      focusCellInput(targetRow, targetCol);
+      return;
+    }
     if (
       e.altKey &&
       !e.ctrlKey &&
@@ -1562,6 +1709,8 @@ export function TableEditor({
       {/* Always rendered (placeholder when idle) so its appearance never shifts the table wrap —
           otherwise the always-visible horizontal scrollbar would jump when a selection is made. */}
       <div className="fn-table-editor__stats">
+        {/* Row count lives here (not in a footer line) so the area below the table stays free. */}
+        <span>{t('tableEditor.stats.rows', { shown: String(displayRows.length), total: String(doc.rows.length) })}</span>
         {cellSelChars > 0 && <span>{t('vaultApp.selectedChars', { count: String(cellSelChars) })}</span>}
         {selectionStats && (
           <>
@@ -1573,9 +1722,6 @@ export function TableEditor({
               })}
             </span>
           </>
-        )}
-        {!selectionStats && cellSelChars === 0 && (
-          <span className="fn-table-editor__stats-placeholder">{t('tableEditor.stats.placeholder')}</span>
         )}
       </div>
       <div className="fn-table-wrap" ref={tableWrapRef} onPaste={handleGridPaste} onCopy={handleGridCopy}>
@@ -1684,8 +1830,21 @@ export function TableEditor({
             </tr>
           </thead>
           <tbody>
-            {displayRows.map((row, rowIdx) => (
-              <tr key={row.id} style={rowHeightFor(row.id, row.height) ? { height: rowHeightFor(row.id, row.height) } : undefined}>
+            {displayRows.map((row, rowIdx) => {
+              const fixedHeight = rowHeightFor(row.id, row.height);
+              return (
+              <tr
+                key={row.id}
+                // The class + CSS var let cells actually clip to small heights: a bare CSS-table
+                // row height is only a *minimum*, so without capping the cell content, rows
+                // could never shrink below their natural content height.
+                className={fixedHeight ? 'fn-table__row--fixed' : undefined}
+                style={
+                  fixedHeight
+                    ? ({ height: fixedHeight, '--fn-row-h': `${fixedHeight}px` } as CSSProperties)
+                    : undefined
+                }
+              >
                 <td className="fn-table__rowdel-col">
                   <button
                     type="button"
@@ -1764,7 +1923,16 @@ export function TableEditor({
                         hasError={!!result?.error}
                         attachments={attachments}
                         onChange={(next) => emitChange(updateCell(doc, row.id, col.id, next))}
-                        onFocus={() => setFocusCell({ rowId: row.id, colId: col.id })}
+                        onFocus={() => {
+                          setFocusCell({ rowId: row.id, colId: col.id });
+                          // Snapshot for Esc: reverts the cell to this value if editing is canceled.
+                          editStartValueRef.current = {
+                            rowId: row.id,
+                            colId: col.id,
+                            value: docRef.current.rows.find((r) => r.id === row.id)?.cells[col.id] ?? '',
+                          };
+                        }}
+                        onEditBlur={() => handleEditBlur(row.id, col.id)}
                         onDownload={(id) => onAttachmentDownload?.(id)}
                         onEdit={(id, desc) => onAttachmentEdit?.(id, desc)}
                         selected={isCellSelected(rowIdx, colIdx)}
@@ -1790,12 +1958,10 @@ export function TableEditor({
                   );
                 })}
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
-      </div>
-      <div className="fn-table-editor__hint">
-        {t('tableEditor.footerHint', { shown: displayRows.length, total: doc.rows.length })}
       </div>
     </div>
   );

@@ -379,7 +379,6 @@ export const en: Dictionary = {
     filterPlaceholder: 'Filter…',
     deleteColumn: 'Delete column',
     selectCellFirst: 'Click a cell first to insert the attachment into',
-    footerHint: 'Click a cell, then use the dropdown above to insert an attachment · {shown}/{total} rows',
     renameColumnPrompt: 'Column name',
     formulaHint: 'Start with = to enter a formula, e.g. =SUM(A1:A3), =AVERAGE(B1:B5), =SUM(C:C) for a whole column',
     helpFormulaRef:
@@ -437,10 +436,10 @@ export const en: Dictionary = {
     columnLetterTooltip: 'Column {letter}; click to select the whole column',
     selectRowTooltip: 'Click to select the whole row',
     stats: {
+      rows: '{shown}/{total} rows',
       count: 'Count: {count}',
       sum: 'Sum: {sum}',
       average: 'Average: {average}',
-      placeholder: 'Select cells to see count / sum / average here',
     },
   },
   tableUtils: {

@@ -409,7 +409,8 @@ export function swapCells(
 
 export const MIN_COL_WIDTH = 48;
 export const MAX_COL_WIDTH = 1200;
-export const MIN_ROW_HEIGHT = 26;
+// Just enough to keep the row number and the resize handle visible/clickable.
+export const MIN_ROW_HEIGHT = 12;
 export const MAX_ROW_HEIGHT = 600;
 
 /** Sets (or clears with undefined) a column's numeric display format. */
