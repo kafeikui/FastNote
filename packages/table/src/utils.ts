@@ -447,6 +447,22 @@ export function setRowHeight(doc: TableDocument, rowId: string, height: number):
   };
 }
 
+/** Sets every row to the same height, or clears all explicit heights (auto) with undefined. */
+export function setAllRowHeights(doc: TableDocument, height: number | undefined): TableDocument {
+  if (height === undefined) {
+    return {
+      ...doc,
+      rows: doc.rows.map((r) => {
+        if (r.height === undefined) return r;
+        const { height: _drop, ...rest } = r;
+        return rest;
+      }),
+    };
+  }
+  const clamped = Math.round(Math.min(MAX_ROW_HEIGHT, Math.max(MIN_ROW_HEIGHT, height)));
+  return { ...doc, rows: doc.rows.map((r) => ({ ...r, height: clamped })) };
+}
+
 /**
  * Merges a style patch into every listed cell. Keys explicitly set to `undefined` in the patch
  * are removed (back to default); cells whose style ends up empty drop the entry entirely.

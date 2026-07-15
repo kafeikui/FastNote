@@ -29,6 +29,7 @@ import {
 import { useLocale, useT } from '@fastnote/i18n';
 import { TableCellContent, type AttachmentDragPos } from './TableCellContent';
 import {
+  FORMULA_PREFIX,
   columnLetter,
   computeRangeStats,
   evaluateCellFormula,
@@ -50,6 +51,7 @@ import {
   removeColumn,
   removeRow,
   renameColumn,
+  setAllRowHeights,
   setColumnFormat,
   setColumnWidth,
   setRowHeight,
@@ -163,6 +165,19 @@ export function TableEditor({
       return next;
     });
   };
+  // Where "+column"/"+row" inserts relative to the selected cell (app-wide preference).
+  const [insertDir, setInsertDir] = useState<'before' | 'after'>(() =>
+    localStorage.getItem('fastnote_table_insert_dir') === 'after' ? 'after' : 'before',
+  );
+  const insertDirRef = useRef(insertDir);
+  insertDirRef.current = insertDir;
+  const changeInsertDir = (dir: 'before' | 'after') => {
+    setInsertDir(dir);
+    localStorage.setItem('fastnote_table_insert_dir', dir);
+  };
+  // Uniform row-height popover (applies one height to every row, or resets all to auto).
+  const [showRowHeightPop, setShowRowHeightPop] = useState(false);
+  const [rowHeightDraft, setRowHeightDraft] = useState('32');
   // Active cell delimiters (paste parsing + multi-cell copy); persisted app-wide in localStorage.
   const [delims, setDelims] = useState<TableDelimiter[]>(loadTableDelimiters);
   const toggleDelimiter = (d: TableDelimiter) => {
@@ -415,18 +430,135 @@ export function TableEditor({
     [selectionRange],
   );
 
+  // ---- Formula cell-reference picking (spreadsheet-style) -----------------------------------
+  // While a cell holding "=..." is being edited, clicking another cell inserts its reference
+  // (A1) instead of moving focus; dragging widens it to a range (A1:B3); clicking a column
+  // letter inserts a whole-column reference (C:C). Row numbers are document-order (matching
+  // the visible row numbers), so references stay correct under sort/filter.
+
+  interface FormulaPick {
+    textarea: HTMLTextAreaElement;
+    rowId: string;
+    colId: string;
+    /** Offset of the reference text inside the formula, and its current length/content. */
+    start: number;
+    length: number;
+    text: string;
+    /** Drag anchor in document coordinates (null for whole-column references). */
+    anchor: { col: number; row: number } | null;
+  }
+  /** Active while the mouse button is down on a picked cell (drag extends the range). */
+  const formulaPickRef = useRef<FormulaPick | null>(null);
+  /** Last inserted reference; a follow-up click replaces it (Excel-style) instead of appending. */
+  const lastFormulaRefRef = useRef<Omit<FormulaPick, 'anchor' | 'rowId' | 'colId'> | null>(null);
+  /** Set on the column letter's mousedown to make the subsequent click skip selectColumn. */
+  const suppressColSelectRef = useRef(false);
+
+  /** The formula-cell textarea currently being edited, or null. */
+  const activeFormulaEdit = () => {
+    const el = document.activeElement;
+    if (!(el instanceof HTMLTextAreaElement) || !tableWrapRef.current?.contains(el)) return null;
+    if (!el.value.trimStart().startsWith(FORMULA_PREFIX)) return null;
+    const rowIdx = Number(el.dataset.rowIdx);
+    const colIdx = Number(el.dataset.colIdx);
+    const row = displayRowsRef.current[rowIdx];
+    const col = docRef.current.columns[colIdx];
+    if (!row || !col) return null;
+    return { textarea: el, rowId: row.id, colId: col.id, rowIdx, colIdx };
+  };
+
+  /** Display row index -> 1-based document row number used in references. */
+  const docRowNumber = (displayRowIdx: number): number => {
+    const row = displayRowsRef.current[displayRowIdx];
+    const idx = row ? docRef.current.rows.findIndex((r) => r.id === row.id) : -1;
+    return idx >= 0 ? idx + 1 : displayRowIdx + 1;
+  };
+
+  const rangeRefText = (a: { col: number; row: number }, b: { col: number; row: number }): string => {
+    if (a.col === b.col && a.row === b.row) return `${columnLetter(a.col)}${a.row}`;
+    const c1 = Math.min(a.col, b.col);
+    const c2 = Math.max(a.col, b.col);
+    const r1 = Math.min(a.row, b.row);
+    const r2 = Math.max(a.row, b.row);
+    return `${columnLetter(c1)}${r1}:${columnLetter(c2)}${r2}`;
+  };
+
+  /** Writes `refText` into the formula, replacing the last inserted reference when the caret
+   *  hasn't moved off it (so consecutive clicks retarget instead of concatenating). */
+  const writeFormulaRef = (
+    fe: NonNullable<ReturnType<typeof activeFormulaEdit>>,
+    refText: string,
+    anchor: { col: number; row: number } | null,
+    pushHistory: boolean,
+  ) => {
+    const el = fe.textarea;
+    const value = el.value;
+    let start = el.selectionStart ?? value.length;
+    let removed = (el.selectionEnd ?? start) - start;
+    const last = lastFormulaRefRef.current;
+    if (
+      last &&
+      last.textarea === el &&
+      value.slice(last.start, last.start + last.length) === last.text &&
+      start === last.start + last.length &&
+      removed === 0
+    ) {
+      start = last.start;
+      removed = last.length;
+    }
+    const next = value.slice(0, start) + refText + value.slice(start + removed);
+    const update = updateCell(docRef.current, fe.rowId, fe.colId, next);
+    if (pushHistory) emitChange(update);
+    else onChangeRef.current(update);
+    lastFormulaRefRef.current = { textarea: el, start, length: refText.length, text: refText };
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(start + refText.length, start + refText.length);
+    });
+    return { start, length: refText.length, text: refText, anchor };
+  };
+
   // Main button only: a right-click must keep the current multi-cell selection (so the context
   // menu's Copy targets it) and must never arm drag-select — the context menu swallows the
   // matching mouseup, which would leave isSelecting stuck on until the next click drags out a
   // bogus selection.
   const handleCellMouseDown = (e: MouseEvent, rowIdx: number, colIdx: number) => {
     if (e.button !== 0) return;
+    const fe = activeFormulaEdit();
+    if (fe && (fe.rowIdx !== rowIdx || fe.colIdx !== colIdx)) {
+      // Keep focus (and the caret) inside the formula cell; insert a reference instead.
+      e.preventDefault();
+      const anchor = { col: colIdx, row: docRowNumber(rowIdx) };
+      const written = writeFormulaRef(fe, rangeRefText(anchor, anchor), anchor, true);
+      formulaPickRef.current = { textarea: fe.textarea, rowId: fe.rowId, colId: fe.colId, ...written };
+      return;
+    }
     setSelAnchor({ rowIdx, colIdx });
     setSelFocus({ rowIdx, colIdx });
     setIsSelecting(true);
   };
 
   const handleCellMouseEnter = (rowIdx: number, colIdx: number) => {
+    const pick = formulaPickRef.current;
+    if (pick?.anchor) {
+      // Dragging across cells widens the picked reference into a range.
+      const el = pick.textarea;
+      const cur = { col: colIdx, row: docRowNumber(rowIdx) };
+      const refText = rangeRefText(pick.anchor, cur);
+      if (refText === pick.text) return;
+      const value = el.value;
+      const next = value.slice(0, pick.start) + refText + value.slice(pick.start + pick.length);
+      const row = docRef.current.rows.find((r) => r.id === pick.rowId);
+      if (row) onChangeRef.current(updateCell(docRef.current, pick.rowId, pick.colId, next));
+      pick.length = refText.length;
+      pick.text = refText;
+      lastFormulaRefRef.current = { textarea: el, start: pick.start, length: refText.length, text: refText };
+      requestAnimationFrame(() => {
+        el.focus();
+        el.setSelectionRange(pick.start + refText.length, pick.start + refText.length);
+      });
+      return;
+    }
     if (isFilling) {
       setFillTargetRow(rowIdx);
       return;
@@ -434,6 +566,16 @@ export function TableEditor({
     if (!isSelecting) return;
     setSelFocus({ rowIdx, colIdx });
   };
+
+  // The pick's drag phase ends on mouseup anywhere; the "replace on next click" memory
+  // (lastFormulaRefRef) survives until the formula cell's value changes some other way.
+  useEffect(() => {
+    const clear = () => {
+      formulaPickRef.current = null;
+    };
+    window.addEventListener('mouseup', clear);
+    return () => window.removeEventListener('mouseup', clear);
+  }, []);
 
   const selectionRangeRef = useRef<typeof selectionRange>(null);
   selectionRangeRef.current = selectionRange;
@@ -615,11 +757,51 @@ export function TableEditor({
     const onUp = (ev: globalThis.MouseEvent) => {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
-      emitChange(setColumnWidth(docRef.current, colId, startWidth + ev.clientX - startX));
+      // No movement means this was (half of) a double-click for auto-fit — don't pollute the
+      // undo history with a no-op width commit.
+      if (ev.clientX !== startX) emitChange(setColumnWidth(docRef.current, colId, startWidth + ev.clientX - startX));
       setLiveColWidth(null);
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
+  };
+
+  /**
+   * Double-clicking a column's resize handle sizes it to fit the widest rendered content
+   * (Excel/Sheets-style). Widths are measured with a canvas using each cell's effective font
+   * (bold / per-cell font size respected); formula and number-formatted cells measure their
+   * displayed value, multiline cells their longest line.
+   */
+  const autoFitColumn = (colId: string) => {
+    const d = docRef.current;
+    const col = d.columns.find((c) => c.id === colId);
+    const measure = document.createElement('canvas').getContext('2d');
+    if (!col || !measure) return;
+    const baseFamily = tableWrapRef.current
+      ? getComputedStyle(tableWrapRef.current).fontFamily
+      : 'sans-serif';
+    const baseSize = tableWrapRef.current
+      ? parseFloat(getComputedStyle(tableWrapRef.current).fontSize) || 14.4
+      : 14.4;
+    // Header row: letter chip + name + rename/delete buttons need roughly 76px beside the name.
+    measure.font = `600 ${baseSize}px ${baseFamily}`;
+    let best = measure.measureText(col.name).width + 76;
+    for (const row of d.rows) {
+      const raw = row.cells[colId] ?? '';
+      if (!raw.trim()) continue;
+      const formula = isFormulaValue(raw);
+      const result = formula ? evaluateCellFormula(d, row.id, colId) : null;
+      const numeric = col.format && !result?.error ? (formula ? result!.value : parseNumericValue(raw)) : null;
+      const shown =
+        col.format && numeric !== null ? formatColumnNumber(numeric, col.format) : formula ? result!.display : raw;
+      const style = row.styles?.[colId];
+      measure.font = `${style?.bold ? '700' : '400'} ${style?.fontSize ?? baseSize}px ${baseFamily}`;
+      for (const line of shown.split('\n')) {
+        best = Math.max(best, measure.measureText(line).width);
+      }
+    }
+    // Cell padding (0.35rem each side) + a little slack so text doesn't touch the border.
+    emitChange(setColumnWidth(d, colId, Math.ceil(best) + 16));
   };
 
   const handleRowResizeStart = (e: MouseEvent, rowId: string) => {
@@ -871,16 +1053,17 @@ export function TableEditor({
     onRegisterInsert?.(insertAttachmentText);
   }, [onRegisterInsert, insertAttachmentText]);
 
-  // With a cell selected, "+column"/"+row" inserts before that cell's column/row (Excel-style);
-  // with no selection it appends at the end. The selection is shifted so the same cells stay
-  // selected after the insert.
+  // With a cell selected, "+column"/"+row" inserts next to that cell's column/row — before
+  // (above/left) or after (below/right) per the toolbar's insert-direction preference; with no
+  // selection it appends at the end. The selection is shifted so the same cells stay selected.
   const handleAddColumn = useCallback(() => {
     lastActionRef.current = { type: 'addColumn' };
     const range = selectionRangeRef.current;
-    emitChange(addColumn(docRef.current, locale, range?.colStart));
-    if (range) {
-      setSelAnchor((p) => (p && p.colIdx >= range.colStart ? { ...p, colIdx: p.colIdx + 1 } : p));
-      setSelFocus((p) => (p && p.colIdx >= range.colStart ? { ...p, colIdx: p.colIdx + 1 } : p));
+    const at = range ? (insertDirRef.current === 'before' ? range.colStart : range.colEnd + 1) : undefined;
+    emitChange(addColumn(docRef.current, locale, at));
+    if (range && at !== undefined) {
+      setSelAnchor((p) => (p && p.colIdx >= at ? { ...p, colIdx: p.colIdx + 1 } : p));
+      setSelFocus((p) => (p && p.colIdx >= at ? { ...p, colIdx: p.colIdx + 1 } : p));
     }
   }, [locale, emitChange]);
 
@@ -888,10 +1071,13 @@ export function TableEditor({
     lastActionRef.current = { type: 'addRow' };
     const range = selectionRangeRef.current;
     // The selection's row index is a display index; map it to the underlying document row.
-    const anchorRow = range ? displayRowsRef.current[range.rowStart] : undefined;
-    const docIdx = anchorRow ? docRef.current.rows.findIndex((r) => r.id === anchorRow.id) : -1;
-    emitChange(addRow(docRef.current, docIdx >= 0 ? docIdx : undefined));
-    if (range && docIdx >= 0) {
+    const edgeRow = range
+      ? displayRowsRef.current[insertDirRef.current === 'before' ? range.rowStart : range.rowEnd]
+      : undefined;
+    const edgeDocIdx = edgeRow ? docRef.current.rows.findIndex((r) => r.id === edgeRow.id) : -1;
+    const docIdx = edgeDocIdx >= 0 ? (insertDirRef.current === 'before' ? edgeDocIdx : edgeDocIdx + 1) : undefined;
+    emitChange(addRow(docRef.current, docIdx));
+    if (range && insertDirRef.current === 'before' && docIdx !== undefined) {
       setSelAnchor((p) => (p && p.rowIdx >= range.rowStart ? { ...p, rowIdx: p.rowIdx + 1 } : p));
       setSelFocus((p) => (p && p.rowIdx >= range.rowStart ? { ...p, rowIdx: p.rowIdx + 1 } : p));
     }
@@ -1068,6 +1254,61 @@ export function TableEditor({
         <button type="button" onClick={handleAddRow}>
           {t('tableEditor.addRow')}
         </button>
+        <select
+          className="fn-table-fmt__size"
+          title={t('tableEditor.insertDirTitle')}
+          value={insertDir}
+          onChange={(e) => changeInsertDir(e.target.value as 'before' | 'after')}
+        >
+          <option value="before">{t('tableEditor.insertBefore')}</option>
+          <option value="after">{t('tableEditor.insertAfter')}</option>
+        </select>
+        <div className="fn-table-palette-wrap">
+          <button
+            type="button"
+            className={showRowHeightPop ? 'active' : ''}
+            title={t('tableEditor.uniformRowHeight')}
+            onClick={() => setShowRowHeightPop((v) => !v)}
+          >
+            ↕
+          </button>
+          {showRowHeightPop && (
+            <div className="fn-table-palette fn-table-rowheight-pop">
+              <label className="fn-table-rowheight-pop__row">
+                <span>{t('tableEditor.uniformRowHeightLabel')}</span>
+                <input
+                  type="number"
+                  min={MIN_ROW_HEIGHT}
+                  max={MAX_ROW_HEIGHT}
+                  value={rowHeightDraft}
+                  onChange={(e) => setRowHeightDraft(e.target.value)}
+                />
+              </label>
+              <div className="fn-table-rowheight-pop__actions">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const h = Math.round(Number(rowHeightDraft));
+                    if (!Number.isFinite(h)) return;
+                    emitChange(setAllRowHeights(docRef.current, h));
+                    setShowRowHeightPop(false);
+                  }}
+                >
+                  {t('tableEditor.uniformRowHeightApply')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    emitChange(setAllRowHeights(docRef.current, undefined));
+                    setShowRowHeightPop(false);
+                  }}
+                >
+                  {t('tableEditor.uniformRowHeightAuto')}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
         <button
           type="button"
           onClick={undo}
@@ -1285,6 +1526,7 @@ export function TableEditor({
           {showHelp && (
             <div className="fn-table-palette fn-table-help-pop">
               <p>{t('tableEditor.formulaHint')}</p>
+              <p>{t('tableEditor.helpFormulaRef')}</p>
               {repeatActionShortcut && (
                 <p>{t('tableEditor.repeatActionHint', { key: formatShortcutBinding(repeatActionShortcut) })}</p>
               )}
@@ -1357,7 +1599,24 @@ export function TableEditor({
                         type="button"
                         className="fn-table__col-letter"
                         title={t('tableEditor.columnLetterTooltip', { letter: columnLetter(colIdx) })}
-                        onClick={() => selectColumn(colIdx)}
+                        onMouseDown={(e) => {
+                          // While editing a formula, clicking the column letter inserts a
+                          // whole-column reference (C:C) instead of selecting the column.
+                          if (e.button !== 0) return;
+                          const fe = activeFormulaEdit();
+                          if (!fe) return;
+                          e.preventDefault();
+                          const letter = columnLetter(colIdx);
+                          writeFormulaRef(fe, `${letter}:${letter}`, null, true);
+                          suppressColSelectRef.current = true;
+                        }}
+                        onClick={() => {
+                          if (suppressColSelectRef.current) {
+                            suppressColSelectRef.current = false;
+                            return;
+                          }
+                          selectColumn(colIdx);
+                        }}
                       >
                         {columnLetter(colIdx)}
                       </button>
@@ -1413,6 +1672,11 @@ export function TableEditor({
                       className="fn-table__col-resize"
                       title={t('tableEditor.colResizeTitle')}
                       onMouseDown={(e) => handleColResizeStart(e, col.id)}
+                      onDoubleClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        autoFitColumn(col.id);
+                      }}
                     />
                   </th>
                 );

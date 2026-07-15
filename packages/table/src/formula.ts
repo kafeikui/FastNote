@@ -66,6 +66,11 @@ function parseCellRefToken(word: string): CellRef | null {
   return { col: letterToColumnIndex(m[1]), row: parseInt(m[2], 10) - 1 };
 }
 
+/** Pure-letter token (e.g. "C" in the whole-column range C:C) -> 0-based column index. */
+function parseColOnlyToken(word: string): number | null {
+  return /^[A-Z]+$/.test(word) ? letterToColumnIndex(word) : null;
+}
+
 export class FormulaEvalError extends Error {
   code: string;
   constructor(code: string) {
@@ -315,7 +320,8 @@ class Parser {
     const t = this.peek();
     if (t?.type === 'word') {
       const maybeRef = parseCellRefToken(t.value);
-      if (maybeRef) {
+      const maybeCol = parseColOnlyToken(t.value);
+      if (maybeRef || maybeCol !== null) {
         const savedPos = this.pos;
         this.next();
         const colon = this.peek();
@@ -324,8 +330,16 @@ class Parser {
           const endTok = this.next();
           if (endTok.type !== 'word') throw new FormulaEvalError('#ERROR!');
           const endRef = parseCellRefToken(endTok.value);
-          if (!endRef) throw new FormulaEvalError('#ERROR!');
-          return expandRange(this.ctx, maybeRef, endRef);
+          const endCol = parseColOnlyToken(endTok.value);
+          if (!endRef && endCol === null) throw new FormulaEvalError('#ERROR!');
+          if (maybeRef && endRef) return expandRange(this.ctx, maybeRef, endRef);
+          // Whole-column semantics (C:C, A:C, and mixed forms like C1:C): the range covers
+          // every row of the involved columns.
+          const lastRow = this.ctx.doc.rows.length - 1;
+          if (lastRow < 0) return [];
+          const startCol = maybeRef ? maybeRef.col : maybeCol!;
+          const endColIdx = endRef ? endRef.col : endCol!;
+          return expandRange(this.ctx, { col: startCol, row: 0 }, { col: endColIdx, row: lastRow });
         }
         this.pos = savedPos;
       }

@@ -2,6 +2,14 @@
 
 ## 当前工作焦点（最新会话，2026-07-12：表格数字格式/时间插入 + AI 附件/后台流式/消息管理 + 多格复制修复/桌面右键菜单 + AI 滚动/耐心提示/公式渲染/消息时间戳 + 登录过期处理/设置选项卡 + Alt+方向键调序/AI转笔记/编辑焦点历史 + 自定义分隔符/AI导出文档 + 焦点历史扩展/热键自定义 + 公式丢失修复，随 git 提交按约定 minor bump 至 **v0.9.0**，README 双语功能清单已同步 0.8.x 全部新特性）
 
+**追加（2026-07-15 第三十四轮，表格三连：统一行高/双击自适应列宽 + 插入方向选项 + 公式点选引用与整列引用，随 git 提交 minor bump 至 **v0.15.0**）**：
+1. **整列公式引用**：`formula.ts` 的 `parseArg` 增列-only token 支持（`parseColOnlyToken`，纯字母），`C:C`、`A:C`、混合 `C1:C` 均展开为该列（组）全行范围（空表返回 []）；`=A+1` 这类裸列名仍报 `#NAME?`（只有函数参数里的 `X:Y` 语法生效）。冒烟测试 9 断言全过（编译 formula.ts 为 CJS 后 node 跑）。
+2. **公式点选引用（Excel 式）**：`TableEditor` 新增 formula-pick 机制——`activeFormulaEdit()` 用 `document.activeElement`（cell textarea 且值以 = 开头，data-row/col-idx 定位）判定"正在编辑公式"；此时 `handleCellMouseDown` 对其他单元格 `e.preventDefault()`（阻止焦点转移）并写入引用（`writeFormulaRef`：插入到光标处；若光标仍停在上次插入的引用末尾则**替换**上次引用，Excel 连续点选换目标语义）；`handleCellMouseEnter` 在按住拖动时把引用扩为规范化 `A1:B3` 区间（drag 中走 `onChangeRef` 不进 undo 栈，mousedown 那次才 emitChange 进历史）；window mouseup 结束 pick。**列号按钮**（`fn-table__col-letter`）onMouseDown 在公式编辑态插入 `C:C` 并用 `suppressColSelectRef` 吃掉后续 click 的 selectColumn。行引用一律用**文档序行号**（`docRowNumber`，与行号列显示一致），排序/筛选下引用不漂移。光标用 rAF 在重渲染后 setSelectionRange 到引用末尾。
+3. **统一行高**：utils 新 `setAllRowHeights(doc, h|undefined)`（undefined 清所有显式行高恢复自动）；工具栏 ↕ 弹层（number 输入 + 应用到所有行/恢复自动，`.fn-table-rowheight-pop`）。
+4. **双击自适应列宽**：列宽拖柄 `onDoubleClick` → `autoFitColumn`：canvas measureText 测量表头名（+76px 按钮空间）与每格显示值（公式取计算结果、数字格式取格式化后文本、多行取最长行，尊重 bold/fontSize 单元格样式），+16px padding 后 `setColumnWidth`（内部 clamp 48-1200）。顺带修复：拖柄 mouseup 未移动时不再 emit 无操作宽度提交（避免双击污染 undo 历史）。
+5. **插入方向选项**：`insertDir`（'before'|'after'，localStorage `fastnote_table_insert_dir` 全局持久化，默认 before 与旧行为一致）；工具栏 +列/+行旁的下拉（插入于上方/左侧 / 下方/右侧）；`handleAddColumn` at=colStart 或 colEnd+1，`handleAddRow` 映射显示行→文档行后取 edge±；before 时选区顺移，after 时选区不动。
+6. i18n 新增 insertDir*/uniformRowHeight*/helpFormulaRef/clearFormatting 等，colResizeTitle 提示双击自适应；帮助弹层加公式点选引用说明；README 双语表格条目重写。版本随提交 minor bump **v0.15.0**（server 不变 0.7.2），全仓 typecheck + web build 全绿。
+
 **追加（2026-07-15 第三十三轮，聊天多行输入 + 桌面代理 + 去标题栏/表格紧凑化 + 清除格式 + 简洁主题，随 git 提交 minor bump 至 **v0.14.0**）**：
 1. **聊天多行输入**：`ChatPanel` 输入框由 `<input>` 换成自动增高 `<textarea>`（max-height 9.5rem 后内部滚动），Enter 发送（尊重 IME composing）、Shift+Enter 换行；消息体 `.fn-chat__text` 本就 pre-wrap 无需改。placeholder 双语提示 Shift+Enter。
 2. **网络代理（桌面版）**：`packages/api` 新增 `ProxySettings{mode:'none'|'http'|'socks5',host,port}` + load/save（localStorage `fastnote_proxy`）+ `proxyRulesFromSettings`（生成 Chromium proxyRules 如 `socks5://127.0.0.1:1080`）。Electron main 新增 IPC `fastnote:setProxy` → `session.defaultSession.setProxy` + `closeAllConnections()`（强制存量 wss 走新路由重连），preload/`window.fastnote.setProxy` 暴露，`packages/storage` 的 Window 声明同步。VaultApp 启动即应用并随保存实时生效。设置 → 账户与同步 加「网络代理」区（模式下拉 + host + port，`.fn-proxy-row`）。**关键限制**：浏览器不允许页面自行指定代理，网页版此设置仅展示 + 提示用系统/浏览器代理（hintWeb 明示）——用户原话要求网页版支持，实际只能做到桌面版，README/设置里都写清了。
