@@ -241,12 +241,25 @@ export function ChatPanel({
             e.target.value = '';
           }}
         />
-        <input
+        <textarea
+          className="fn-chat__composer-input"
           placeholder={activePeerId ? t('chatPanel.composerPlaceholderActive') : t('chatPanel.composerPlaceholderInactive')}
           value={draft}
           disabled={!activePeerId}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && void handleSend()}
+          rows={1}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            // Auto-grow up to the CSS max-height, then let the textarea scroll internally.
+            e.target.style.height = 'auto';
+            e.target.style.height = `${e.target.scrollHeight}px`;
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              void handleSend();
+              (e.target as HTMLTextAreaElement).style.height = 'auto';
+            }
+          }}
         />
         <button type="button" disabled={!activePeerId || sending} onClick={() => void handleSend()}>
           {sending ? t('chatPanel.sending') : t('chatPanel.send')}

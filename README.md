@@ -53,9 +53,12 @@ Encrypted notes + 1:1 end-to-end encrypted instant messaging. Built for personal
 - Attachments (image preview, file download, editable/removable, deleting a received attachment requires confirmation)
 - Session list + smart scroll (auto-follow when already at the bottom / floating "new message" indicator otherwise)
 - Unread notifications: nav-bar red dot + per-session unread counts + configurable sound/volume/bubble toggle
+- Multiline message composer: Shift+Enter inserts a newline, Enter sends
 
 **Interface**
-- Four built-in UI themes (warm/elegant/business/fresh), with a consistent selected(dark)/unselected(light) visual language across the main UI and unlock screen
+- Five built-in UI themes (warm/elegant/business/fresh/simple), with a consistent selected(dark)/unselected(light) visual language across the main UI and unlock screen; the Simple theme is a white-on-light-gray palette echoing the Google Docs/Sheets default look, with a pure-white sheet area
+- No in-pane title bar for notes/tables (rename via the sidebar) — plus a compact table toolbar and a collapsible filter row, maximizing room for the content area
+- Network proxy (Settings → Account & Sync): the desktop app can reach the server through an HTTP or SOCKS5 proxy (covers the wss chat/collab channels), applied immediately on save; browsers don't let a page pick its own proxy, so on web configure a system/browser proxy instead
 - i18n: Chinese and English, switchable anytime in Settings, persisted locally
 - Tabbed Settings: General / Account & Sync / AI Assistant / Shortcuts / Storage
 - Expired logins (401) are detected automatically: the local session is cleared and a banner prompts you to log in again, instead of showing a stale logged-in state

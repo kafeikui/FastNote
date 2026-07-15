@@ -104,6 +104,15 @@ function registerSettingsIpc() {
   ipcMain.handle('fastnote:pickStorageDirectory', () => desktopSettings.pickStorageDirectory());
   ipcMain.handle('fastnote:getUserDataPath', () => desktopSettings.getUserDataPath());
   ipcMain.handle('fastnote:openUserDataFolder', () => desktopSettings.openUserDataFolder());
+  // Routes ALL renderer traffic (fetch and WebSocket/wss alike) through an HTTP or SOCKS5
+  // proxy. `rules` is a Chromium proxyRules string like "socks5://127.0.0.1:1080"; null
+  // restores the system default. closeAllConnections drops live sockets (e.g. the chat
+  // relay WebSocket) so they immediately reconnect through the new route.
+  ipcMain.handle('fastnote:setProxy', async (_e, rules: string | null) => {
+    const ses = session.defaultSession;
+    await ses.setProxy(rules ? { proxyRules: rules } : { mode: 'system' });
+    await ses.closeAllConnections();
+  });
 }
 
 registerSettingsIpc();

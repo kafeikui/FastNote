@@ -579,9 +579,9 @@ export function saveChatNotificationSettings(
   localStorage.setItem(CHAT_NOTIFY_KEY, JSON.stringify(settings));
 }
 
-export type UiThemeId = "warm" | "elegant" | "business" | "fresh";
+export type UiThemeId = "warm" | "elegant" | "business" | "fresh" | "simple";
 
-export const UI_THEMES: UiThemeId[] = ["warm", "elegant", "business", "fresh"];
+export const UI_THEMES: UiThemeId[] = ["warm", "elegant", "business", "fresh", "simple"];
 
 const UI_THEME_KEY = "fastnote_ui_theme";
 
@@ -592,6 +592,45 @@ export function loadUiTheme(): UiThemeId {
 
 export function saveUiTheme(theme: UiThemeId): void {
   localStorage.setItem(UI_THEME_KEY, theme);
+}
+
+// --- network proxy ------------------------------------------------------------------
+// Desktop (Electron) can route all server traffic — HTTP(S) and WebSocket (wss) alike —
+// through an HTTP or SOCKS5 proxy via session.setProxy. Browsers do not let a page pick
+// its own proxy, so on web this setting is informational only (use the system/browser proxy).
+
+export type ProxyMode = "none" | "http" | "socks5";
+
+export interface ProxySettings {
+  mode: ProxyMode;
+  host: string;
+  port: string;
+}
+
+export const DEFAULT_PROXY_SETTINGS: ProxySettings = { mode: "none", host: "", port: "" };
+
+const PROXY_SETTINGS_KEY = "fastnote_proxy";
+
+export function loadProxySettings(): ProxySettings {
+  try {
+    const raw = JSON.parse(localStorage.getItem(PROXY_SETTINGS_KEY) ?? "");
+    if (raw && (raw.mode === "http" || raw.mode === "socks5" || raw.mode === "none")) {
+      return { mode: raw.mode, host: String(raw.host ?? ""), port: String(raw.port ?? "") };
+    }
+  } catch {
+    /* fall through to default */
+  }
+  return { ...DEFAULT_PROXY_SETTINGS };
+}
+
+export function saveProxySettings(settings: ProxySettings): void {
+  localStorage.setItem(PROXY_SETTINGS_KEY, JSON.stringify(settings));
+}
+
+/** Chromium proxyRules string for Electron's session.setProxy, or null for "no proxy". */
+export function proxyRulesFromSettings(settings: ProxySettings): string | null {
+  if (settings.mode === "none" || !settings.host.trim() || !settings.port.trim()) return null;
+  return `${settings.mode}://${settings.host.trim()}:${settings.port.trim()}`;
 }
 
 export const NOTE_WIDTH_MIN = 480;

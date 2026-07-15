@@ -891,6 +891,7 @@ declare global {
       pickStorageDirectory?: () => Promise<string | null>;
       getUserDataPath?: () => Promise<string>;
       openUserDataFolder?: () => Promise<void>;
+      setProxy?: (rules: string | null) => Promise<void>;
     };
   }
 }

@@ -9,4 +9,5 @@ contextBridge.exposeInMainWorld('fastnote', {
   pickStorageDirectory: () => ipcRenderer.invoke('fastnote:pickStorageDirectory') as Promise<string | null>,
   getUserDataPath: () => ipcRenderer.invoke('fastnote:getUserDataPath') as Promise<string>,
   openUserDataFolder: () => ipcRenderer.invoke('fastnote:openUserDataFolder') as Promise<void>,
+  setProxy: (rules: string | null) => ipcRenderer.invoke('fastnote:setProxy', rules) as Promise<void>,
 });

@@ -1,5 +1,5 @@
 import { useState, useEffect, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import type { ChatNotificationSettings, ChatSoundId, UiThemeId } from '@fastnote/api';
+import type { ChatNotificationSettings, ChatSoundId, ProxyMode, ProxySettings, UiThemeId } from '@fastnote/api';
 import { CHAT_SOUND_IDS, UI_THEMES } from '@fastnote/api';
 import type { AiSettings, ShortcutAction, ShortcutBindings } from '@fastnote/shared';
 import {
@@ -33,6 +33,7 @@ const THEME_SWATCHES: Record<UiThemeId, string> = {
   elegant: '#7c4a8c',
   business: '#2563eb',
   fresh: '#1f9d78',
+  simple: '#dadce0',
 };
 
 type SettingsTab = 'general' | 'account' | 'ai' | 'shortcuts' | 'storage';
@@ -68,6 +69,8 @@ interface SettingsModalProps {
   onSaveDataDirectory: (path: string) => void | Promise<void>;
   onPickDataDirectory?: () => Promise<string | null>;
   onChatNotifyChange: (settings: ChatNotificationSettings) => void;
+  proxySettings: ProxySettings;
+  onProxySettingsChange: (settings: ProxySettings) => void;
   onUiThemeChange: (theme: UiThemeId) => void;
   onLocaleChange: (locale: Locale) => void;
   onOpenAuth: () => void;
@@ -101,6 +104,8 @@ export function SettingsModal({
   onSaveDataDirectory,
   onPickDataDirectory,
   onChatNotifyChange,
+  proxySettings,
+  onProxySettingsChange,
   onUiThemeChange,
   onLocaleChange,
   onOpenAuth,
@@ -126,6 +131,8 @@ export function SettingsModal({
     String(aiSettings?.webSearchMaxUses ?? AI_WEB_SEARCH_USES_DEFAULT),
   );
   const [aiSaved, setAiSaved] = useState(false);
+  const [proxyDraft, setProxyDraft] = useState<ProxySettings>(proxySettings);
+  const [proxySaved, setProxySaved] = useState(false);
 
   const SHORTCUT_LABELS: Record<ShortcutAction, string> = {
     renameNote: t('settingsModal.shortcuts.renameNote'),
@@ -156,6 +163,7 @@ export function SettingsModal({
     elegant: t('settingsModal.theme.elegant'),
     business: t('settingsModal.theme.business'),
     fresh: t('settingsModal.theme.fresh'),
+    simple: t('settingsModal.theme.simple'),
   };
 
   useEffect(() => {
@@ -551,6 +559,62 @@ export function SettingsModal({
             {t('settingsModal.saveServer')}
           </button>
         </div>
+        <hr />
+        <fieldset className="fn-field fn-field--checkboxes">
+          <legend>{t('settingsModal.proxy.legend')}</legend>
+          <div className="fn-proxy-row">
+            <select
+              value={proxyDraft.mode}
+              onChange={(e) => {
+                setProxyDraft((prev) => ({ ...prev, mode: e.target.value as ProxyMode }));
+                setProxySaved(false);
+              }}
+            >
+              <option value="none">{t('settingsModal.proxy.modeNone')}</option>
+              <option value="http">HTTP</option>
+              <option value="socks5">SOCKS5</option>
+            </select>
+            <input
+              value={proxyDraft.host}
+              disabled={proxyDraft.mode === 'none'}
+              placeholder={t('settingsModal.proxy.hostPlaceholder')}
+              onChange={(e) => {
+                setProxyDraft((prev) => ({ ...prev, host: e.target.value }));
+                setProxySaved(false);
+              }}
+            />
+            <input
+              className="fn-proxy-row__port"
+              value={proxyDraft.port}
+              disabled={proxyDraft.mode === 'none'}
+              placeholder={t('settingsModal.proxy.portPlaceholder')}
+              inputMode="numeric"
+              onChange={(e) => {
+                setProxyDraft((prev) => ({ ...prev, port: e.target.value.replace(/[^\d]/g, '') }));
+                setProxySaved(false);
+              }}
+            />
+          </div>
+          <p className="fn-field__hint">
+            {isElectron ? t('settingsModal.proxy.hintDesktop') : t('settingsModal.proxy.hintWeb')}
+          </p>
+          <div className="fn-modal__actions">
+            <button
+              type="button"
+              disabled={proxyDraft.mode !== 'none' && (!proxyDraft.host.trim() || !proxyDraft.port.trim())}
+              onClick={() => {
+                onProxySettingsChange({
+                  mode: proxyDraft.mode,
+                  host: proxyDraft.host.trim(),
+                  port: proxyDraft.port.trim(),
+                });
+                setProxySaved(true);
+              }}
+            >
+              {proxySaved ? t('settingsModal.proxy.saved') : t('settingsModal.proxy.save')}
+            </button>
+          </div>
+        </fieldset>
         <hr />
         <p className="fn-field">
           {t('settingsModal.accountLabel', { username: sessionUsername ?? t('settingsModal.notLoggedIn') })}

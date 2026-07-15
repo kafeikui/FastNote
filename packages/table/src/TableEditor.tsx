@@ -150,6 +150,19 @@ export function TableEditor({
   const [cellSelChars, setCellSelChars] = useState(0);
   const [showHelp, setShowHelp] = useState(false);
   const [showDelims, setShowDelims] = useState(false);
+  // Filter row visibility (app-wide preference). Collapsing clears active filters so no
+  // rows can stay invisibly hidden behind a collapsed filter row.
+  const [showFilters, setShowFilters] = useState(
+    () => localStorage.getItem('fastnote_table_filters_visible') !== '0',
+  );
+  const toggleFilters = () => {
+    setShowFilters((prev) => {
+      const next = !prev;
+      localStorage.setItem('fastnote_table_filters_visible', next ? '1' : '0');
+      if (!next) setFilters({});
+      return next;
+    });
+  };
   // Active cell delimiters (paste parsing + multi-cell copy); persisted app-wide in localStorage.
   const [delims, setDelims] = useState<TableDelimiter[]>(loadTableDelimiters);
   const toggleDelimiter = (d: TableDelimiter) => {
@@ -521,6 +534,32 @@ export function TableEditor({
     for (const colId of formatColIds) {
       const cur = next.columns.find((c) => c.id === colId)?.format;
       next = setColumnFormat(next, colId, mutate(cur));
+    }
+    emitChange(next);
+  };
+
+  /**
+   * Clears the target cells' text formatting (bold / font size / colors). When the
+   * selection covers entire columns, those columns' number format is cleared too —
+   * mirrors how the toolbar's number-format controls are column-scoped.
+   */
+  const clearFormatting = () => {
+    if (formatTargets.length === 0) {
+      alert(t('tableEditor.formatNeedTarget'));
+      return;
+    }
+    let next = applyCellStyle(docRef.current, formatTargets, {
+      bold: undefined,
+      fontSize: undefined,
+      color: undefined,
+      fill: undefined,
+    });
+    const wholeColumns =
+      selectionRange !== null &&
+      selectionRange.rowStart === 0 &&
+      selectionRange.rowEnd >= displayRows.length - 1;
+    if (wholeColumns) {
+      for (const colId of formatColIds) next = setColumnFormat(next, colId, undefined);
     }
     emitChange(next);
   };
@@ -1143,6 +1182,9 @@ export function TableEditor({
             </div>
           )}
         </div>
+        <button type="button" title={t('tableEditor.clearFormatting')} onClick={clearFormatting}>
+          <span className="fn-table-fmt__clear">T</span>
+        </button>
         <button
           type="button"
           className={doc.freezeFirstColumn ? 'active' : ''}
@@ -1150,6 +1192,14 @@ export function TableEditor({
           onClick={() => emitChange({ ...docRef.current, freezeFirstColumn: !docRef.current.freezeFirstColumn })}
         >
           📌
+        </button>
+        <button
+          type="button"
+          className={showFilters ? 'active' : ''}
+          title={showFilters ? t('tableEditor.hideFilters') : t('tableEditor.showFilters')}
+          onClick={toggleFilters}
+        >
+          ▽
         </button>
         <button
           type="button"
@@ -1351,12 +1401,14 @@ export function TableEditor({
                         ×
                       </button>
                     </div>
-                    <input
-                      className="fn-table__filter"
-                      placeholder={t('tableEditor.filterPlaceholder')}
-                      value={filters[col.id] ?? ''}
-                      onChange={(e) => setFilters((f) => ({ ...f, [col.id]: e.target.value }))}
-                    />
+                    {showFilters && (
+                      <input
+                        className="fn-table__filter"
+                        placeholder={t('tableEditor.filterPlaceholder')}
+                        value={filters[col.id] ?? ''}
+                        onChange={(e) => setFilters((f) => ({ ...f, [col.id]: e.target.value }))}
+                      />
+                    )}
                     <span
                       className="fn-table__col-resize"
                       title={t('tableEditor.colResizeTitle')}

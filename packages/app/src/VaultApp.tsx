@@ -17,6 +17,9 @@ import {
   saveChatNotificationSettings,
   loadUiTheme,
   saveUiTheme,
+  loadProxySettings,
+  saveProxySettings,
+  proxyRulesFromSettings,
   loadNoteWidth,
   saveNoteWidth,
   NOTE_WIDTH_MIN,
@@ -57,6 +60,7 @@ import {
   loadVaultRegistry,
   saveVaultRegistry,
   createVaultRegistryEntry,
+  type ProxySettings,
 } from '@fastnote/api';
 import {
   deriveKeysFromPassword,
@@ -367,6 +371,19 @@ export function VaultApp() {
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', uiTheme);
   }, [uiTheme]);
+
+  // Network proxy (desktop only): Electron's session.setProxy routes every renderer
+  // request — fetch and the chat/collab WebSockets (wss) included — through the
+  // configured HTTP/SOCKS5 proxy. Browsers can't set a per-page proxy, so on web the
+  // stored setting is surfaced in Settings with a hint to use the system proxy instead.
+  const [proxySettings, setProxySettings] = useState(() => loadProxySettings());
+  useEffect(() => {
+    void window.fastnote?.setProxy?.(proxyRulesFromSettings(proxySettings));
+  }, [proxySettings]);
+  const handleProxySettingsChange = useCallback((next: ProxySettings) => {
+    setProxySettings(next);
+    saveProxySettings(next);
+  }, []);
 
   // Outbound network access is locked down to only the user-configured
   // server (HTTP + WebSocket) via a Content-Security-Policy baked into the
@@ -3068,12 +3085,6 @@ export function VaultApp() {
             <div className="fn-tab-group__header">
               <div className="fn-note-header" style={{ maxWidth: noteWidth }}>
                 {renderNoteResizeHandle()}
-                <input
-                  className="fn-note__title"
-                  value={content.title}
-                  onChange={(e) => updateNoteById(content.id, { title: e.target.value })}
-                  placeholder={t('vaultApp.tableTitlePlaceholder')}
-                />
                 <div className="fn-table-export">
               <button
                 type="button"
@@ -3204,12 +3215,6 @@ export function VaultApp() {
             <div className="fn-tab-group__header">
               <div className="fn-note-header" style={{ maxWidth: noteWidth }}>
                 {renderNoteResizeHandle()}
-                <input
-                  className="fn-note__title"
-                  value={content.title}
-                  onChange={(e) => updateNoteById(content.id, { title: e.target.value })}
-                  placeholder={t('vaultApp.notePlaceholder')}
-                />
                 <div className="fn-tab-group__controls">
                   <button type="button" className={mode === 'wysiwyg' ? 'active' : ''} onClick={() => handleEditorModeForGroup(group.id, 'wysiwyg')}>
                     {t('vaultApp.modeWysiwyg')}
@@ -3655,6 +3660,8 @@ export function VaultApp() {
           }
           isElectron={!!window.fastnote?.isElectron}
           chatNotify={chatNotify}
+          proxySettings={proxySettings}
+          onProxySettingsChange={handleProxySettingsChange}
           uiTheme={uiTheme}
           locale={locale}
           shortcuts={shortcuts}

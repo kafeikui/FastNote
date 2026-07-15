@@ -80,6 +80,28 @@
   --shadow-md: 0 4px 16px rgba(15, 23, 42, 0.1);
 }
 
+/* —— 简洁 Simple theme: white content on light-gray chrome, echoing the default
+   Google Docs/Sheets palette (blue #1a73e8 accent, #dadce0 hairlines, #202124 ink). —— */
+:root[data-theme="simple"] {
+  --bg: #f8f9fa;
+  --bg-soft: #f1f3f4;
+  --surface: #ffffff;
+  --surface-elevated: #ffffff;
+  --border: #dadce0;
+  --border-soft: #e8eaed;
+  --text: #202124;
+  --muted: #5f6368;
+  --accent: #1a73e8;
+  --accent-soft: #e8f0fe;
+  --accent-hover: #1765cc;
+  --accent-dark: #185abc;
+  --on-accent-dark: #e8f0fe;
+  --shadow: 0 1px 2px rgba(60, 64, 67, 0.1);
+  --shadow-md: 0 2px 8px rgba(60, 64, 67, 0.15);
+  --radius: 6px;
+  --radius-lg: 8px;
+}
+
 /* —— 清新 Fresh theme —— */
 :root[data-theme="fresh"] {
   --bg: #f2faf7;
@@ -614,7 +636,7 @@ body.fn-resizing-sidebar .fn-sidebar {
 /* Fixed (non-scrolling) header area: note title, mode controls and format toolbar. */
 .fn-tab-group__header {
   flex-shrink: 0;
-  padding: 0.9rem 2rem 0;
+  padding: 0.5rem 2rem 0;
   border-bottom: 1px solid var(--border-soft);
   background: transparent;
 }
@@ -827,22 +849,6 @@ body.fn-resizing-note {
 
 body.fn-resizing-note .fn-note-resize-handle::after {
   background: var(--accent);
-}
-
-.fn-note__title {
-  width: 100%;
-  font-size: 1.65rem;
-  font-weight: 600;
-  border: none;
-  background: transparent;
-  margin-bottom: 1rem;
-  outline: none;
-  letter-spacing: -0.02em;
-}
-
-.fn-note__title::placeholder {
-  color: var(--muted);
-  opacity: 0.7;
 }
 
 .fn-editor {
@@ -1957,6 +1963,8 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   scrollbar-gutter: stable;
   border: 1px solid var(--border);
   border-radius: 8px;
+  /* Sheet content sits on the surface color (pure white in the Simple theme). */
+  background: var(--surface);
 }
 
 .fn-table-wrap::-webkit-scrollbar {
@@ -2252,12 +2260,12 @@ body.fn-resizing-note .fn-note-resize-handle::after {
 .fn-table-editor__tools button,
 .fn-table-export button,
 .fn-import-btn {
-  padding: 0.35rem 0.75rem;
+  padding: 0.22rem 0.5rem;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--surface);
   cursor: pointer;
-  font-size: 0.85rem;
+  font-size: 0.8rem;
 }
 
 .fn-table__col-rename {
@@ -2296,6 +2304,12 @@ body.fn-resizing-note .fn-note-resize-handle::after {
 
 .fn-table-fmt__bold {
   font-weight: 700;
+}
+
+/* Google-style "clear formatting" glyph: a struck-through T. */
+.fn-table-fmt__clear {
+  text-decoration: line-through;
+  font-weight: 600;
 }
 
 .fn-table-fmt__size {
@@ -2547,15 +2561,15 @@ body.fn-resizing-note .fn-note-resize-handle::after {
 
 .fn-table-export {
   display: flex;
-  gap: 0.5rem;
-  margin-bottom: 0.75rem;
+  gap: 0.35rem;
+  margin-bottom: 0.4rem;
   flex-wrap: wrap;
 }
 
 .fn-table-editor__tools {
   display: flex;
-  gap: 0.5rem;
-  margin-bottom: 0.5rem;
+  gap: 0.3rem;
+  margin-bottom: 0.35rem;
   flex-wrap: wrap;
   align-items: center;
 }
@@ -2592,9 +2606,9 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   white-space: nowrap;
   overflow: hidden;
   gap: 1rem;
-  margin-bottom: 0.5rem;
+  margin-bottom: 0.35rem;
   /* Slightly more bottom padding biases the text a touch upward within the bar. */
-  padding: 0.25rem 0.75rem 0.5rem;
+  padding: 0.15rem 0.75rem 0.35rem;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--accent-soft);
@@ -2929,17 +2943,42 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   cursor: not-allowed;
 }
 
+.fn-proxy-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.fn-proxy-row select {
+  flex: none;
+}
+
+.fn-proxy-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.fn-proxy-row .fn-proxy-row__port {
+  flex: none;
+  width: 5.5rem;
+}
+
 .fn-chat__composer {
   display: flex;
   gap: 0.5rem;
   margin-top: 0.75rem;
+  align-items: flex-end;
 }
 
-.fn-chat__composer input {
+.fn-chat__composer-input {
   flex: 1;
   padding: 0.5rem;
   border: 1px solid var(--border);
   border-radius: 6px;
+  background: var(--surface);
+  resize: none;
+  max-height: 9.5rem;
+  overflow-y: auto;
+  line-height: 1.45;
 }
 
 .fn-sidebar-chat {
