@@ -77,12 +77,18 @@ importers:
       '@fastnote/i18n':
         specifier: workspace:*
         version: link:../../packages/i18n
+      '@fastnote/im':
+        specifier: workspace:*
+        version: link:../../packages/im
       '@fastnote/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       '@fastnote/storage':
         specifier: workspace:*
         version: link:../../packages/storage
+      '@fastnote/sync':
+        specifier: workspace:*
+        version: link:../../packages/sync
       '@fastnote/ui':
         specifier: workspace:*
         version: link:../../packages/ui

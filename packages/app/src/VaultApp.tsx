@@ -253,6 +253,13 @@ export function VaultApp() {
   // Select-all actions registered by the mounted note/table editors, used by the app-level
   // Ctrl/Cmd+A so "select all" targets the active content instead of the whole UI.
   const selectAllByGroupRef = useRef<Record<string, (() => void) | null>>({});
+  // Scroll positions per group+tab, restored when a tab becomes active again (so switching
+  // between tabs preserves each tab's viewport).
+  const viewportByTabRef = useRef<Record<string, { top: number; left: number }>>({});
+  const paneElsByGroupRef = useRef<Record<string, HTMLDivElement | null>>({});
+  // While a restore is in flight, ignore scroll events (the browser clamps/fires scrolls when
+  // content swaps, which would corrupt the saved positions).
+  const restoringViewportRef = useRef(false);
   // Cross-vault transfer: ids of the tree nodes being transferred (null = dialog closed).
   const [transferIds, setTransferIds] = useState<string[] | null>(null);
   const [transferBusy, setTransferBusy] = useState(false);
@@ -1153,6 +1160,14 @@ export function VaultApp() {
           await loadChatHistory(derived);
           if (sessionAtUnlock && keysRef.current === derived) {
             await initIM(derived, sessionAtUnlock);
+            // Already-logged-in unlock: pull any chat history synced from other devices.
+            try {
+              const client = new SyncClient(new ApiClient(serverUrl, locale), sessionAtUnlock);
+              const { pulled } = await client.syncChatMessages(storage);
+              if (pulled > 0 && keysRef.current === derived) await loadChatHistory(derived);
+            } catch (err) {
+              console.warn('[FastNote] chat: history sync after unlock failed', err);
+            }
           }
         } catch (err) {
           console.error('post-unlock background init failed', err);
@@ -1160,7 +1175,7 @@ export function VaultApp() {
         }
       })();
     },
-    [storage, prepareSearchIndexInBackground, session, initIM, serverUrl, loadChatHistory, restoreTabState, expireSession],
+    [storage, prepareSearchIndexInBackground, session, initIM, serverUrl, locale, loadChatHistory, restoreTabState, expireSession],
   );
 
   const handleCreateVault = async (password: string) => {
@@ -1536,6 +1551,22 @@ export function VaultApp() {
     const sortOrder = notes.filter((n) => n.parentId === parentId && !n.deleted).length;
     const node = newNode(nodeType, parentId, sortOrder, locale);
     await saveNoteNow(node);
+    // Sidebar focus jumps to the new item (folders included) so F2-rename/keyboard actions
+    // target it right away; the parent folder is expanded so the item is actually visible.
+    if (parentId) {
+      setCollapsedFolderIds((prev) => {
+        if (!prev.has(parentId)) return prev;
+        const next = new Set(prev);
+        next.delete(parentId);
+        saveCollapsedFolderIds(next);
+        return next;
+      });
+    }
+    setTreeSelectedIds(new Set([node.id]));
+    treeAnchorIdRef.current = node.id;
+    // Scroll the sidebar so the new row is actually visible (reveal also flashes it briefly).
+    setRevealId(node.id);
+    setTimeout(() => setRevealId((prev) => (prev === node.id ? null : prev)), 1500);
     if (isEditableContentNode(node)) {
       openNote(node.id, { pin: true });
       setAppView('notes');
@@ -2830,6 +2861,17 @@ export function VaultApp() {
     await uploadKeysIfNeeded(s, derived);
     await initIM(derived, s);
     void syncAttachmentsIfOnline();
+    // Pull the full chat history right after login (new device / re-login) instead of waiting
+    // for a manual sync — messages are immutable ciphertext blobs, so this is cheap and safe.
+    void (async () => {
+      try {
+        const client = new SyncClient(api, s);
+        const { pulled } = await client.syncChatMessages(storage);
+        if (pulled > 0 && keysRef.current) await loadChatHistory(keysRef.current);
+      } catch (err) {
+        console.warn('[FastNote] chat: history sync after login failed', err);
+      }
+    })();
   };
 
   const handleSync = async () => {
@@ -3081,6 +3123,34 @@ export function VaultApp() {
     window.addEventListener('mouseup', onUp);
   };
 
+  // Restore each group's viewport when its active tab changes. Runs one frame later so the
+  // freshly mounted content has laid out; fresh tabs (no saved position) reset to the top.
+  const activeTabsKey = groups.map((g) => `${g.id}:${g.activeTabId ?? ''}`).join('|');
+  useEffect(() => {
+    restoringViewportRef.current = true;
+    const raf = requestAnimationFrame(() => {
+      for (const g of groupsRef.current) {
+        if (!g.activeTabId) continue;
+        const pane = paneElsByGroupRef.current[g.id];
+        if (!pane) continue;
+        const scroller =
+          pane.querySelector<HTMLElement>('.fn-table-wrap') ??
+          pane.querySelector<HTMLElement>('.fn-tab-group__scroll');
+        if (!scroller) continue;
+        const saved = viewportByTabRef.current[`${g.id}:${g.activeTabId}`];
+        scroller.scrollTop = saved?.top ?? 0;
+        scroller.scrollLeft = saved?.left ?? 0;
+      }
+      requestAnimationFrame(() => {
+        restoringViewportRef.current = false;
+      });
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      restoringViewportRef.current = false;
+    };
+  }, [activeTabsKey]);
+
   const renderGroupPane = (group: TabGroupState, idx: number) => {
     const isFocused = group.id === activeGroupId;
     const content = contentForGroup(group);
@@ -3090,8 +3160,26 @@ export function VaultApp() {
     return (
       <div
         key={group.id}
+        ref={(el) => {
+          paneElsByGroupRef.current[group.id] = el;
+        }}
         className={`fn-tab-group${isFocused ? ' fn-tab-group--focused' : ''}`}
         style={{ flex: `${flexGrow} 1 0%` }}
+        // Scroll doesn't bubble, so the capture phase is the only way to observe the inner
+        // scrollers (note pane / table wrap) from here. Positions are keyed per group+tab and
+        // restored when the tab becomes active again.
+        onScrollCapture={(e) => {
+          if (restoringViewportRef.current) return;
+          const target = e.target;
+          if (!(target instanceof HTMLElement)) return;
+          const isScroller =
+            target.classList.contains('fn-tab-group__scroll') || target.classList.contains('fn-table-wrap');
+          if (!isScroller || !group.activeTabId) return;
+          viewportByTabRef.current[`${group.id}:${group.activeTabId}`] = {
+            top: target.scrollTop,
+            left: target.scrollLeft,
+          };
+        }}
         onMouseDownCapture={(e) => {
           if (activeGroupId !== group.id) setActiveGroupId(group.id);
           // Placing the cursor inside the page content counts as a focus switch for the

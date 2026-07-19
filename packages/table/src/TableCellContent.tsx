@@ -210,7 +210,19 @@ function TableCellContent({
               const el = e.target as HTMLTextAreaElement;
               onTextSelect?.(Math.abs((el.selectionEnd ?? 0) - (el.selectionStart ?? 0)));
             }}
-            onKeyDown={onKeyDown}
+            onKeyDown={(e) => {
+              // Tab types a literal tab character inside the cell instead of moving focus.
+              if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+                e.preventDefault();
+                const el = e.currentTarget;
+                const start = el.selectionStart ?? el.value.length;
+                const end = el.selectionEnd ?? start;
+                updateTextSegment(index, el.value.slice(0, start) + '\t' + el.value.slice(end));
+                requestAnimationFrame(() => el.setSelectionRange(start + 1, start + 1));
+                return;
+              }
+              onKeyDown?.(e);
+            }}
             data-row-idx={rowIdx}
             data-col-idx={colIdx}
           />

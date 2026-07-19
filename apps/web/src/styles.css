@@ -2696,6 +2696,34 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   min-height: 480px;
 }
 
+/* Right-click menu on a message bubble. */
+.fn-chat__ctx-menu {
+  position: fixed;
+  z-index: 200;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 0.25rem;
+}
+
+.fn-chat__ctx-menu button {
+  display: block;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.85rem;
+  padding: 0.35rem 0.75rem;
+  border-radius: calc(var(--radius) - 2px);
+  cursor: pointer;
+  text-align: left;
+}
+
+.fn-chat__ctx-menu button:hover {
+  background: var(--accent-soft);
+}
+
 .fn-chat__start {
   display: flex;
   gap: 0.5rem;
@@ -3640,6 +3668,15 @@ mark.fn-ai-find-mark--current {
 .fn-ai-tree__row--active {
   background: var(--accent-soft);
   outline: 1px solid var(--accent);
+}
+
+/* Focused (last clicked) but not active — the anchor for toolbar creation and F2 rename. */
+.fn-ai-tree__row--focus {
+  background: color-mix(in srgb, var(--accent-soft) 55%, transparent);
+}
+
+.fn-ai-tree:focus {
+  outline: none;
 }
 
 .fn-ai-tree__row--drop {

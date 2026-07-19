@@ -50,7 +50,9 @@ export function tokenizeForSearch(text: string): string[] {
 function makeSnippet(content: string, query: string, maxLen = 96): string {
   const plain = content.replace(/\s+/g, ' ').trim();
   if (!plain) return '';
-  const tokens = tokenizeForSearch(query).filter((t) => t.length >= 1);
+  // Prefer a snippet around the full exact query; fall back to individual tokens.
+  const full = query.normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
+  const tokens = full ? [full, ...tokenizeForSearch(query)] : tokenizeForSearch(query);
   for (const token of tokens) {
     const idx = plain.toLowerCase().indexOf(token);
     if (idx >= 0) {
@@ -69,10 +71,14 @@ const MINI_SEARCH_OPTIONS = {
   fields: ['title', 'content'] as ('title' | 'content')[],
   storeFields: ['title', 'content'] as ('title' | 'content')[],
   tokenize: tokenizeForSearch,
+  // AND + no fuzziness: every query token must match. The final exact-substring filter in
+  // `search()` is what actually guarantees "results contain the query verbatim" — these options
+  // just keep the candidate set tight.
   searchOptions: {
     boost: { title: 1.5, content: 1 },
     prefix: true,
-    fuzzy: 0.15,
+    fuzzy: false as const,
+    combineWith: 'AND' as const,
   },
 };
 
@@ -114,8 +120,15 @@ export class NoteSearchIndex {
   search(query: string, limit = 20): SearchResult[] {
     const q = query.trim();
     if (!q) return [];
+    // Exact matching: the query must appear verbatim (case-insensitive) in the title or body.
+    // MiniSearch only produces ranked candidates; whitespace in the query is normalized because
+    // the indexed body already collapsed runs of whitespace.
+    const needle = q.normalize('NFKC').toLowerCase().replace(/\s+/g, ' ');
+    const containsExact = (text: string) =>
+      text.normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').includes(needle);
     return this.index
       .search(q, MINI_SEARCH_OPTIONS.searchOptions)
+      .filter((r) => containsExact((r.title as string) ?? '') || containsExact((r.content as string) ?? ''))
       .slice(0, limit)
       .map((r) => ({
         id: r.id,

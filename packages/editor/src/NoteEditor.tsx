@@ -7,7 +7,7 @@ import { Markdown } from '@tiptap/markdown';
 import { Marked, marked as markedGlobal } from 'marked';
 import { EditorView, keymap, rectangularSelection } from '@codemirror/view';
 import { Prec } from '@codemirror/state';
-import { deleteLine } from '@codemirror/commands';
+import { deleteLine, indentWithTab } from '@codemirror/commands';
 import {
   search as cmSearch,
   SearchQuery,
@@ -202,6 +202,14 @@ export function NoteEditor({
       content: prepareContent(content),
       contentType: 'markdown',
       editorProps: {
+        // Tab types a literal tab character instead of moving browser focus.
+        handleKeyDown: (view, event) => {
+          if (event.key === 'Tab' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
+            view.dispatch(view.state.tr.insertText('\t').scrollIntoView());
+            return true;
+          }
+          return false;
+        },
         // Ctrl/Cmd+click opens the link. window.open is intercepted by the Electron main
         // process (setWindowOpenHandler) and routed to the system default browser; in the web
         // app it opens a normal new tab.
@@ -456,6 +464,8 @@ export function NoteEditor({
           keymap.of([
             { key: 'Mod-d', run: deleteLine },
             { key: 'Mod-f', run: () => true },
+            // Tab inserts a tab (indents a multi-line selection); Shift+Tab dedents.
+            indentWithTab,
           ]),
         ),
         EditorView.updateListener.of((update) => {

@@ -40,6 +40,38 @@ export function ChatPanel({
   const isAtBottomRef = useRef(true);
   const prevThreadLenRef = useRef(0);
   const prevPeerRef = useRef<string | null>(null);
+  // Custom right-click menu on a message bubble ("copy full message").
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; msg: ChatMessage } | null>(null);
+
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const close = () => setCtxMenu(null);
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Escape') close();
+    };
+    window.addEventListener('mousedown', close);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('mousedown', close);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [ctxMenu]);
+
+  const copyFullMessage = (msg: ChatMessage) => {
+    const parts = [msg.body ?? ''];
+    for (const att of msg.attachments ?? []) parts.push(`📎 ${att.fileName}`);
+    const text = parts.filter(Boolean).join('\n');
+    if (!text) return;
+    // execCommand keeps working where the async clipboard API is permission-blocked (Electron).
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  };
 
   const thread = messages.filter((m) => m.peerId === activePeerId);
 
@@ -159,6 +191,13 @@ export function ChatPanel({
                 className={`fn-chat__bubble fn-chat__bubble--${m.direction}${
                   !m.body && m.attachments?.length ? ' fn-chat__bubble--attachment' : ''
                 }`}
+                onContextMenu={(e) => {
+                  // With a text selection the (desktop) native copy menu takes over; the custom
+                  // "copy full message" menu handles the no-selection case.
+                  if (window.getSelection()?.toString().trim()) return;
+                  e.preventDefault();
+                  setCtxMenu({ x: e.clientX, y: e.clientY, msg: m });
+                }}
               >
                 <div className="fn-chat__bubble-head">
                   <button
@@ -254,6 +293,16 @@ export function ChatPanel({
             e.target.style.height = `${e.target.scrollHeight}px`;
           }}
           onKeyDown={(e) => {
+            if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+              // Type a literal tab character instead of moving focus.
+              e.preventDefault();
+              const el = e.currentTarget;
+              const start = el.selectionStart ?? el.value.length;
+              const end = el.selectionEnd ?? start;
+              setDraft(el.value.slice(0, start) + '\t' + el.value.slice(end));
+              requestAnimationFrame(() => el.setSelectionRange(start + 1, start + 1));
+              return;
+            }
             if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
               void handleSend();
@@ -265,6 +314,23 @@ export function ChatPanel({
           {sending ? t('chatPanel.sending') : t('chatPanel.send')}
         </button>
       </div>
+      {ctxMenu && (
+        <div
+          className="fn-chat__ctx-menu"
+          style={{ left: ctxMenu.x, top: ctxMenu.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              copyFullMessage(ctxMenu.msg);
+              setCtxMenu(null);
+            }}
+          >
+            {t('chatPanel.copyMessage')}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

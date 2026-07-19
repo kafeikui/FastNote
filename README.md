@@ -21,12 +21,12 @@ Encrypted notes + 1:1 end-to-end encrypted instant messaging. Built for personal
 ## Features
 
 **Notes**
-- Tree-structured explorer (folders/notes/tables), drag-to-reorder, nested directories
+- Tree-structured explorer (folders/notes/tables), drag-to-reorder, nested directories; creating a note/table/folder jumps the sidebar focus to the new item (its parent folder expands automatically)
 - Editor: Tiptap WYSIWYG (default) ↔ CodeMirror source mode, autosave
-- Table documents: column sort/filter, add/remove rows & columns (new rows/columns insert above/left or below/right of the selected cell, configurable); a selection stats bar (count/sum/average) for any dragged range, whole row, or whole column; spreadsheet-style formulas (`=SUM(A1:A3)`, `AVERAGE`, `COUNT`, `MIN`, `MAX`, `+ - * / ^`, whole-column references like `=SUM(C:C)`) — **after typing `=`, click another cell to insert its reference, drag to reference a multi-row/column range, or click a column letter for a whole-column reference**; per-column number formats (number/currency/decimals), one-click insert of the current time, one-click clear formatting; multi-cell copy and smart paste-splitting with customizable delimiters (tab/semicolon/comma/whitespace, multi-select); Shift+Enter for in-cell line breaks — multi-line cells round-trip through copy/paste with Excel-style quoting; Alt+Arrow to reorder rows/columns or swap adjacent cells, Shift+Arrow to move the selected cell and start editing it; Esc cancels the current cell edit or clears the selection; committing a formula (Enter / moving focus) auto-closes any unclosed parentheses; frozen header/first column, resizable rows/columns (uniform row height for all rows, rows shrink down to 12px, double-click a column edge to auto-fit content); per-cell bold/size/color/fill; export to CSV (plaintext) / `.fnxt` (encrypted), with matching import
+- Table documents: column sort/filter, add/remove rows & columns (new rows/columns insert above/left or below/right of the selected cell, configurable); a selection stats bar (count/sum/average) for any dragged range, whole row, or whole column; spreadsheet-style formulas (`=SUM(A1:A3)`, `AVERAGE`, `COUNT`, `MIN`, `MAX`, `+ - * / ^`, whole-column references like `=SUM(C:C)`) — **after typing `=`, click another cell to insert its reference, drag to reference a multi-row/column range, or click a column letter for a whole-column reference**; per-column number formats (number/currency/decimals), one-click insert of the current time, one-click clear formatting; multi-cell copy and smart paste-splitting with customizable delimiters (tab/semicolon/comma/whitespace, multi-select); Shift+Enter for in-cell line breaks — multi-line cells round-trip through copy/paste with Excel-style quoting; Alt+Arrow to reorder rows/columns or swap adjacent cells, Shift+Arrow to move the selected cell and start editing it (keyboard focus stays on the grid after Enter/Esc ends an edit, so these shortcuts keep working); Esc cancels the current cell edit or clears the selection; committing a formula (Enter / moving focus) auto-closes any unclosed parentheses; frozen header/first column, resizable rows/columns (uniform row height for all rows, rows shrink down to 12px, double-click a column edge to auto-fit content); per-cell bold/size/color/fill; export to CSV (plaintext) / `.fnxt` (encrypted), with matching import
 - Bulk folder import: preserves directory structure, extension-less files import as notes, `.csv` files import as tables
-- Local full-text search (encrypted index snapshot, never uploaded)
-- Two-group tab system with split view: drag-to-reorder tabs, preview (italic) vs. pinned tabs, persisted across restarts and lock/unlock
+- Local full-text search (encrypted index snapshot, never uploaded); results are **exact matches** — a note only matches when it contains the full query verbatim (case-insensitive) in its title or body
+- Two-group tab system with split view: drag-to-reorder tabs, preview (italic) vs. pinned tabs, persisted across restarts and lock/unlock; **each tab's scroll position is saved and restored when switching tabs**
 - Optional LaTeX math rendering (KaTeX, off by default), line numbers, JSON formatting, line-level shortcuts (Ctrl+D delete line, Alt+↑/↓ move line)
 - Customizable keyboard shortcuts (rename, lock, table repeat/undo/redo, delete, focus jumps) in Settings
 - Edit-focus history: edits, opening/selecting tabs, and cursor clicks are all recorded; Ctrl+Alt+←/→ (customizable) jumps to the previous/next focus — the target tab is activated and pinned, and reopened if it was closed
@@ -39,26 +39,29 @@ Encrypted notes + 1:1 end-to-end encrypted instant messaging. Built for personal
 
 **AI Workbench (optional, off unless you configure it)**
 - Chat with Claude models directly inside the app: bring your own Anthropic API key (encrypted with your master key, stored only in this vault)
-- Collapsible session tree in the sidebar with folders, rename, and drag-to-organize; conversations are encrypted at rest like notes
+- Collapsible session tree in the sidebar with folders, rename, and drag-to-organize; conversations are encrypted at rest like notes; new sessions/folders are created at the level of the focused item and receive focus (F2 renames right away), with a one-click expand/collapse-all toolbar button
 - Streaming responses with markdown rendering (LaTeX formulas included) and a stop button; switching sessions or back to notes keeps the reply streaming in the background
 - Attachments on requests: images / PDF / doc / docx / text files (all parsed locally, 8MB cap)
 - Optional web search during replies (Anthropic's server-side `web_search` tool — no extra client-side connections): live "searching the web" status, configurable per-reply search cap in Settings
 - Per-message management: delete, export as Markdown or a Word document; convert Q&A (a selected range or the whole session) into a note; send/receive timestamps on every message
 - Configurable `max_tokens` (up to 128k) in Settings; long generations show thinking progress and a patience hint
 - `api.anthropic.com` is the single CSP exception, and no request is ever made until you save a key and send a message
-- **Android app (Capacitor)**: a mobile shell (`apps/mobile`) focused on the AI assistant — vault unlock/creation, encrypted AI sessions, streaming replies, attachments, and Settings all reuse the same packages and vault format; "convert to note" becomes share/copy-as-Markdown on mobile
+- **Android app (Capacitor)**: a mobile shell (`apps/mobile`) focused on the AI assistant + chat — vault unlock/creation, encrypted AI sessions, streaming replies, attachments, and Settings all reuse the same packages and vault format; "convert to note" becomes share/copy-as-Markdown on mobile; the unlock screen supports cloud-account login (a fresh device adopts the account's vault salt automatically), enabling 1:1 end-to-end encrypted chat with the full message history synced down
 
 **Chat (1:1 end-to-end encrypted)**
 - Chat history is kept locally forever (until manually deleted), independent of cloud login state
+- **The full chat history syncs automatically after login/unlock** (ciphertext-blob push/pull, deduplicated by message id) — a new device logging into the same account sees the complete history
 - Attachments (image preview, file download, editable/removable, deleting a received attachment requires confirmation)
 - Session list + smart scroll (auto-follow when already at the bottom / floating "new message" indicator otherwise)
 - Unread notifications: nav-bar red dot + per-session unread counts + configurable sound/volume/bubble toggle
 - Multiline message composer: Shift+Enter inserts a newline, Enter sends
+- Right-click a message bubble to **copy the full message** (attachment names included); with text selected, the native copy menu still applies
 
 **Interface**
 - Five built-in UI themes (warm/elegant/business/fresh/simple), with a consistent selected(dark)/unselected(light) visual language across the main UI and unlock screen; the Simple theme is a white-on-light-gray palette echoing the Google Docs/Sheets default look, with a pure-white sheet area
 - No in-pane title bar for notes/tables (rename via the sidebar) — plus a compact table toolbar, a collapsible filter row, a single-line compact table header (long column names are ellipsized), and the row count folded into the stats bar, maximizing room for the content area
 - Smart select-all (Ctrl/⌘+A): when focus isn't in a text field, it selects the active content — the note text, every table cell, or the whole AI conversation — instead of the entire app UI
+- Tab types a tab character in notes (rendered & source mode; in source mode a multi-line selection indents, Shift+Tab dedents), table cells, the chat composer, and the AI composer — instead of moving browser focus
 - Network proxy (Settings → Account & Sync): the desktop app can reach the server through an HTTP or SOCKS5 proxy (covers the wss chat/collab channels), applied immediately on save; browsers don't let a page pick its own proxy, so on web configure a system/browser proxy instead
 - i18n: Chinese and English, switchable anytime in Settings, persisted locally
 - Tabbed Settings: General / Account & Sync / AI Assistant / Shortcuts / Storage
@@ -113,12 +116,12 @@ pnpm dev:server
 ```
 apps/web        — browser version (Vite + React)
 apps/desktop    — Electron desktop version (macOS / Windows / Linux)
-apps/mobile     — Android version (Capacitor WebView; AI-assistant-focused shell)
+apps/mobile     — Android version (Capacitor WebView; AI assistant + chat shell)
 packages/*      — business logic shared between Web / Electron / Android (crypto / storage / editor / im / sync / ui / i18n / …)
 server/         — self-hosted relay (Fastify + WebSocket, ciphertext-only)
 ```
 
-All shells **share** `packages/*` — only the shell differs. The desktop build additionally exposes native capabilities (e.g. choosing a local data directory) through a `window.fastnote` IPC bridge. The mobile shell keeps the identical encrypted-vault format (same IndexedDB layout inside the Android WebView) but currently ships only unlock + the AI assistant; notes/tables/chat/cloud-sync remain desktop/web features for now.
+All shells **share** `packages/*` — only the shell differs. The desktop build additionally exposes native capabilities (e.g. choosing a local data directory) through a `window.fastnote` IPC bridge. The mobile shell keeps the identical encrypted-vault format (same IndexedDB layout inside the Android WebView) and currently ships unlock + the AI assistant + end-to-end encrypted chat (with cloud-account login and chat-history sync); note/table editing and note cloud-sync remain desktop/web features for now.
 
 ## Building all three targets
 

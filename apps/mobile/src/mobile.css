@@ -51,6 +51,7 @@ body,
 }
 
 .fn-mobile__header-btn {
+  position: relative;
   min-width: 2.4rem;
   min-height: 2.4rem;
   border: 1px solid var(--border);
@@ -58,6 +59,28 @@ body,
   background: var(--surface);
   font-size: 1.05rem;
   cursor: pointer;
+}
+
+.fn-mobile__header-btn--active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* Unread chat counter on the view-switch button. */
+.fn-mobile__badge {
+  position: absolute;
+  top: -0.3rem;
+  right: -0.3rem;
+  min-width: 1rem;
+  height: 1rem;
+  padding: 0 0.2rem;
+  border-radius: 0.5rem;
+  background: #e5484d;
+  color: #fff;
+  font-size: 0.62rem;
+  line-height: 1rem;
+  text-align: center;
+  font-weight: 600;
 }
 
 .fn-mobile__main {
@@ -197,11 +220,35 @@ body,
 
 /* --- touch adaptations ---------------------------------------------------------- */
 
+/* --- chat view -------------------------------------------------------------------- */
+
+/* ChatPanel fills the main pane; the desktop min-height would overflow small screens. */
+.fn-mobile__main .fn-chat {
+  min-height: 0;
+  height: 100%;
+}
+
+.fn-mobile__main .fn-chat__composer {
+  padding-bottom: calc(0.5rem + env(safe-area-inset-bottom));
+}
+
+/* ChatSidebar inside the drawer: let the drawer own scrolling and full width. */
+.fn-mobile__drawer .fn-chat-sidebar {
+  width: 100%;
+  border-right: none;
+  height: auto;
+}
+
 @media (pointer: coarse) {
   /* Hover-gated affordances have no hover on touch — always show them. */
   .fn-ai-tree__actions {
     display: inline-flex;
   }
+
+  .fn-chat__delete {
+    opacity: 1;
+  }
+}
 
   .fn-ai-msg__actions {
     opacity: 1;

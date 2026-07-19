@@ -144,6 +144,8 @@ export const en: Dictionary = {
     empty: 'No sessions yet — click "New session" to start.',
     defaultSessionTitle: 'New session',
     defaultFolderTitle: 'New folder',
+    expandAll: 'Expand all',
+    collapseAll: 'Collapse all',
   },
   aiWorkbench: {
     emptyHint: 'Type a message to start chatting with Claude.',
@@ -337,6 +339,7 @@ export const en: Dictionary = {
     selectSessionHint: 'Select a chat on the left, or enter a username to start one',
     emptyThread: 'No messages yet — send the first one',
     deleteMessage: 'Delete this message',
+    copyMessage: 'Copy full message',
     attachBtn: 'Add attachment',
     composerPlaceholderActive: 'Type a message… (Shift+Enter for newline)',
     composerPlaceholderInactive: 'Select a chat first',
@@ -563,6 +566,7 @@ export const en: Dictionary = {
     sessions: 'Sessions',
     settings: 'Settings',
     lock: 'Lock',
+    chat: 'Chat',
     noSession: 'No session yet — create one to start chatting with Claude.',
     cloudNotSupported:
       'Cloud account login/sync is not supported in the mobile build yet; please use password unlock.',

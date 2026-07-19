@@ -1,10 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ApiClient,
   createVaultRegistryEntry,
   ensureLegacyVaultInRegistry,
+  loadChatSessions,
+  loadChatUnread,
   loadServerUrl,
+  loadSession,
   loadStorageNamespace,
   loadUiTheme,
+  saveChatSessions,
+  saveChatUnread,
+  saveServerUrl,
+  saveSession,
   saveStorageNamespace,
   saveVaultRegistry,
 } from '@fastnote/api';
@@ -13,11 +21,16 @@ import {
   deriveKeysFromPassword,
   encryptString,
   fromBase64,
+  generateIdentityKeypair,
   generateSalt,
   packEncrypted,
   toBase64,
   unpackEncrypted,
+  unwrapKey,
+  wrapKey,
 } from '@fastnote/crypto';
+import { IMClient, verifyExchangeKeypair } from '@fastnote/im';
+import { SyncClient } from '@fastnote/sync';
 import { createStorage } from '@fastnote/storage';
 import {
   AI_MAX_TOKENS_DEFAULT,
@@ -27,10 +40,18 @@ import {
   AI_WEB_SEARCH_USES_LIMIT,
   AI_WEB_SEARCH_USES_MIN,
   META_KEYS,
+  decodeChatWire,
+  serverUrlNeedsReload,
+  storedToChatMessage,
+  toStoredPayload,
   type AiAttachment,
   type AiMessage,
   type AiSessionNode,
   type AiSettings,
+  type ChatAttachmentRef,
+  type ChatMessage,
+  type ChatWireAttachment,
+  type UserSession,
 } from '@fastnote/shared';
 import {
   AiAttachmentError,
@@ -42,7 +63,15 @@ import {
   type AiChatMessage,
   type AiContentBlock,
 } from '@fastnote/ai';
-import { AiSessionTree, AiWorkbench, UnlockScreen, type VaultListItem } from '@fastnote/ui';
+import {
+  AiSessionTree,
+  AiWorkbench,
+  ChatPanel,
+  ChatSidebar,
+  UnlockScreen,
+  buildChatSessions,
+  type VaultListItem,
+} from '@fastnote/ui';
 import {
   I18nProvider,
   LOCALES,
@@ -55,6 +84,8 @@ import {
 } from '@fastnote/i18n';
 
 type VaultKeys = Awaited<ReturnType<typeof deriveKeysFromPassword>>;
+
+const CHAT_STATUS_RANK: Record<ChatMessage['status'], number> = { sent: 0, delivered: 1, read: 2 };
 
 interface AiRunState {
   sessionId: string;
@@ -118,9 +149,25 @@ export function MobileApp() {
   const [aiRunError, setAiRunError] = useState<{ sessionId: string; message: string } | null>(null);
   const aiAbortRef = useRef<AbortController | null>(null);
 
+  // --- chat / IM state ----------------------------------------------------------
+  const [session, setSession] = useState<UserSession | null>(null);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [activePeerId, setActivePeerId] = useState<string | null>(null);
+  const [activePeerName, setActivePeerName] = useState<string | null>(null);
+  const [unreadByPeer, setUnreadByPeer] = useState<Record<string, number>>({});
+  const [imConnected, setImConnected] = useState(false);
+  const imRef = useRef<IMClient | null>(null);
+  const sessionRef = useRef<UserSession | null>(null);
+  const activePeerRef = useRef<string | null>(null);
+
   // --- UI state ---------------------------------------------------------------
+  const [view, setView] = useState<'ai' | 'chat'>('ai');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  sessionRef.current = session;
+  activePeerRef.current = activePeerId;
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', loadUiTheme());
@@ -192,11 +239,485 @@ export function MobileApp() {
     setActiveAiSessionId(sessionsOnly[0]?.id ?? null);
   };
 
+  // --- chat / IM logic (a trimmed port of the desktop VaultApp wiring) -----------
+
+  // Read at call time (not render time): handleCloudLogin saves a new URL and then immediately
+  // connects, so a render-scoped constant would be stale.
+  const serverUrl = () => loadServerUrl();
+
+  /** Generates and stores the ed25519/x25519 identity keys on first use. */
+  const setupIdentityKeys = async (derived: VaultKeys) => {
+    const existing = await storage.getMeta(META_KEYS.identityPubkey);
+    if (existing) return;
+    const kp = generateIdentityKeypair();
+    await storage.setMeta(
+      META_KEYS.wrappedIdentityKey,
+      packEncrypted(wrapKey(derived.masterKey, kp.identityPrivateKey)),
+    );
+    await storage.setMeta(
+      META_KEYS.wrappedExchangeKey,
+      packEncrypted(wrapKey(derived.masterKey, kp.exchangePrivateKey)),
+    );
+    await storage.setMeta(META_KEYS.identityPubkey, toBase64(kp.identityPublicKey));
+    await storage.setMeta(META_KEYS.exchangePubkey, toBase64(kp.exchangePublicKey));
+  };
+
+  const loadExchangePrivate = async (masterKey: Uint8Array): Promise<Uint8Array | null> => {
+    const wrapped = await storage.getMeta(META_KEYS.wrappedExchangeKey);
+    if (!wrapped) return null;
+    return unwrapKey(masterKey, unpackEncrypted(wrapped));
+  };
+
+  const ensureLocalPubkeys = async (derived: VaultKeys) => {
+    await setupIdentityKeys(derived);
+    const identity = await storage.getMeta(META_KEYS.identityPubkey);
+    const exchange = await storage.getMeta(META_KEYS.exchangePubkey);
+    if (!identity || !exchange) throw new Error(t('vaultApp.localKeysNotReady'));
+    return { identity, exchange };
+  };
+
+  const persistChatMessage = async (message: ChatMessage) => {
+    const k = keysRef.current;
+    if (!k) return;
+    await storage.saveChatMessage(message, k.notesKey);
+    setChatMessages((prev) => {
+      if (prev.some((m) => m.id === message.id)) {
+        return prev.map((m) => (m.id === message.id ? message : m));
+      }
+      return [...prev, message].sort((a, b) => a.sentAt.localeCompare(b.sentAt));
+    });
+  };
+
+  /** Receipts only ever move a message's status forward (sent → delivered → read). */
+  const updateChatMessageStatus = (msgId: string, status: ChatMessage['status']) => {
+    const k = keysRef.current;
+    if (!k) return;
+    setChatMessages((prev) => {
+      let changed = false;
+      const next = prev.map((m) => {
+        if (m.id !== msgId || m.direction !== 'out' || CHAT_STATUS_RANK[status] <= CHAT_STATUS_RANK[m.status]) {
+          return m;
+        }
+        changed = true;
+        const updated = { ...m, status };
+        void storage.saveChatMessage(updated, k.notesKey);
+        return updated;
+      });
+      return changed ? next : prev;
+    });
+  };
+
+  const bumpUnread = (peerId: string) => {
+    setUnreadByPeer((prev) => {
+      const next = { ...prev, [peerId]: (prev[peerId] ?? 0) + 1 };
+      saveChatUnread(next, loadStorageNamespace());
+      return next;
+    });
+  };
+
+  const clearPeerUnread = (peerId: string) => {
+    setUnreadByPeer((prev) => {
+      if (!prev[peerId]) return prev;
+      const next = { ...prev };
+      delete next[peerId];
+      saveChatUnread(next, loadStorageNamespace());
+      return next;
+    });
+  };
+
+  const loadChatHistoryFor = async (derived: VaultKeys) => {
+    const messages = await storage.listChatMessagesDecrypted(derived.notesKey);
+    setChatMessages(messages);
+  };
+
+  const processIncomingChat = async (peerId: string, plaintext: string, msgId: string, sentAt: string) => {
+    const k = keysRef.current;
+    if (!k) return;
+    if (await storage.hasChatMessage(msgId)) return;
+
+    const wire = decodeChatWire(plaintext);
+    const refs: ChatAttachmentRef[] = [];
+    for (const att of wire.attachments ?? []) {
+      try {
+        refs.push(await storage.saveChatAttachmentFromWire(msgId, peerId, att, k.notesKey));
+      } catch (err) {
+        console.warn('[chat] failed to save incoming attachment', att.fileName, err);
+      }
+    }
+    const imSession = imRef.current?.getSession(peerId);
+    const msg = storedToChatMessage(
+      msgId,
+      peerId,
+      'in',
+      sentAt,
+      toStoredPayload({ ...wire, peerUsername: imSession?.peerUsername }, refs),
+    );
+    await persistChatMessage(msg);
+
+    const viewingThread = viewRef.current === 'chat' && activePeerRef.current === peerId;
+    if (!viewingThread) bumpUnread(peerId);
+    if (imSession && viewRef.current === 'chat' && (!activePeerRef.current || activePeerRef.current === peerId)) {
+      setActivePeerId(peerId);
+      setActivePeerName(imSession.peerUsername);
+      clearPeerUnread(peerId);
+    }
+  };
+
+  const initIM = async (derived: VaultKeys, userSession: UserSession) => {
+    const priv = await loadExchangePrivate(derived.masterKey);
+    if (!priv) throw new Error(t('vaultApp.chatKeyNotReady'));
+    const derivedPub = verifyExchangeKeypair(priv);
+    const storedPub = await storage.getMeta(META_KEYS.exchangePubkey);
+    if (storedPub !== derivedPub) await storage.setMeta(META_KEYS.exchangePubkey, derivedPub);
+    const { identity } = await ensureLocalPubkeys(derived);
+    await new ApiClient(serverUrl(), locale).updateKeys(userSession.token, identity, derivedPub);
+
+    imRef.current?.disconnect();
+    const client = new IMClient(serverUrl(), userSession.token, priv);
+    imRef.current = client;
+    const vaultNs = loadStorageNamespace();
+    for (const s of loadChatSessions(vaultNs)) client.loadSession(s);
+    const persistSessions = () => saveChatSessions(client.allSessions(), vaultNs);
+
+    client.setEnsurePeerSession(async (peerId: string) => {
+      try {
+        const peer = await new ApiClient(serverUrl(), locale).lookupUserById(userSession.token, peerId);
+        if (!peer.exchangePubkey) return false;
+        client.upsertSession(peer.userId, peer.username, peer.exchangePubkey);
+        persistSessions();
+        return true;
+      } catch (err) {
+        console.warn('[IM] ensurePeerSession failed', peerId, err);
+        return false;
+      }
+    });
+    client.setOnMessage(async (peerId, plaintext, msgId, sentAt) => {
+      await processIncomingChat(peerId, plaintext, msgId, sentAt);
+      persistSessions();
+    });
+    client.setOnDeliveryAck((_peerId, msgId) => updateChatMessageStatus(msgId, 'delivered'));
+    client.setOnReadAck((_peerId, msgId) => updateChatMessageStatus(msgId, 'read'));
+
+    const pullPending = async () => {
+      await client.pullPendingMessages(serverUrl(), userSession.token);
+      persistSessions();
+    };
+    client.setPendingFetcher(() => pullPending());
+    client.connect();
+    void pullPending().catch((err) => console.error('fetchPending failed', err));
+  };
+
+  /** Pull the full chat history from the server (messages synced by other devices). */
+  const syncChatHistory = async (userSession: UserSession, derived: VaultKeys) => {
+    try {
+      const client = new SyncClient(new ApiClient(serverUrl(), locale), userSession);
+      const { pulled } = await client.syncChatMessages(storage);
+      if (pulled > 0 && keysRef.current === derived) await loadChatHistoryFor(derived);
+    } catch (err) {
+      console.warn('[chat] history sync failed', err);
+    }
+  };
+
+  const ensureImReady = async (): Promise<IMClient> => {
+    const derived = keysRef.current;
+    const userSession = sessionRef.current;
+    if (!derived || !userSession) throw new Error(t('vaultApp.loginRequired'));
+    if (!imRef.current) await initIM(derived, userSession);
+    if (!imRef.current) throw new Error(t('vaultApp.messageServiceInitFailed'));
+    await imRef.current.waitForConnection();
+    return imRef.current;
+  };
+
+  const ensureChatPeerSession = async (peerId: string, peerName?: string | null) => {
+    const client = await ensureImReady();
+    const userSession = sessionRef.current;
+    if (!userSession) throw new Error(t('vaultApp.loginRequired'));
+    const api = new ApiClient(serverUrl(), locale);
+    const peer = peerName
+      ? await api.lookupUser(userSession.token, peerName)
+      : await api.lookupUserById(userSession.token, peerId);
+    if (!peer.exchangePubkey) {
+      throw new Error(t('vaultApp.peerKeyNotReady', { username: peer.username }));
+    }
+    client.upsertSession(peer.userId, peer.username, peer.exchangePubkey);
+    saveChatSessions(client.allSessions(), loadStorageNamespace());
+    return client;
+  };
+
+  const handleStartChat = async (username: string) => {
+    const userSession = sessionRef.current;
+    if (!userSession) throw new Error(t('vaultApp.loginRequired'));
+    const api = new ApiClient(serverUrl(), locale);
+    const peer = await api.lookupUser(userSession.token, username);
+    if (!peer.exchangePubkey) {
+      throw new Error(t('vaultApp.peerKeyNotReady', { username: peer.username }));
+    }
+    const client = await ensureImReady();
+    client.upsertSession(peer.userId, peer.username, peer.exchangePubkey);
+    saveChatSessions(client.allSessions(), loadStorageNamespace());
+    setActivePeerId(peer.userId);
+    setActivePeerName(peer.username);
+    setDrawerOpen(false);
+  };
+
+  const handleSendChat = async (body: string, files: File[]) => {
+    const k = keysRef.current;
+    if (!activePeerId || !k) return;
+    const client = await ensureChatPeerSession(activePeerId, activePeerName);
+    const messageId = crypto.randomUUID();
+    const wireAttachments: ChatWireAttachment[] = [];
+    for (const file of files) {
+      const buf = new Uint8Array(await file.arrayBuffer());
+      wireAttachments.push({
+        id: crypto.randomUUID(),
+        fileName: file.name,
+        description: '',
+        mimeType: file.type || 'application/octet-stream',
+        size: buf.byteLength,
+        dataB64: toBase64(buf),
+      });
+    }
+    const refs: ChatAttachmentRef[] = [];
+    for (const att of wireAttachments) {
+      refs.push(await storage.saveChatAttachmentFromWire(messageId, activePeerId, att, k.notesKey));
+    }
+    const payload = { v: 1 as const, body, attachments: wireAttachments };
+    await client.sendPayload(activePeerId, payload, messageId);
+    saveChatSessions(client.allSessions(), loadStorageNamespace());
+    await persistChatMessage({
+      id: messageId,
+      peerId: activePeerId,
+      peerUsername: activePeerName ?? undefined,
+      direction: 'out',
+      body,
+      attachments: refs,
+      sentAt: new Date().toISOString(),
+      status: 'sent',
+    });
+  };
+
+  const handleDeleteChatMessage = async (messageId: string) => {
+    const k = keysRef.current;
+    if (!k) return;
+    await storage.deleteChatMessage(messageId, k.notesKey);
+    setChatMessages((prev) => prev.filter((m) => m.id !== messageId));
+  };
+
+  /** Attachment "download" on mobile: Android share sheet when possible, clipboard-less fallback. */
+  const handleChatAttachmentDownload = async (attachmentId: string) => {
+    const k = keysRef.current;
+    if (!k) return;
+    const loaded = await storage.loadChatAttachmentDecrypted(attachmentId, k.notesKey);
+    if (!loaded) return;
+    const mime = loaded.meta.mimeType || 'application/octet-stream';
+    const file = new File([loaded.data.slice()], loaded.meta.fileName, { type: mime });
+    if (typeof navigator.share === 'function' && navigator.canShare?.({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file] });
+        return;
+      } catch {
+        // cancelled or unsupported — fall through to the anchor download
+      }
+    }
+    const url = URL.createObjectURL(new Blob([loaded.data.slice()], { type: mime }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = loaded.meta.fileName;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  };
+
+  const handleChatAttachmentPreview = async (attachmentId: string): Promise<Blob | null> => {
+    const k = keysRef.current;
+    if (!k) return null;
+    const loaded = await storage.loadChatAttachmentDecrypted(attachmentId, k.notesKey);
+    if (!loaded) return null;
+    return new Blob([loaded.data.slice()], { type: loaded.meta.mimeType || 'application/octet-stream' });
+  };
+
+  const handleChatAttachmentEdit = async (attachmentId: string, description: string) => {
+    const k = keysRef.current;
+    if (!k) return;
+    await storage.updateChatAttachmentDescription(attachmentId, description, k.notesKey);
+    setChatMessages((prev) =>
+      prev.map((m) => {
+        if (!m.attachments?.some((a) => a.id === attachmentId)) return m;
+        const attachments = m.attachments.map((a) => (a.id === attachmentId ? { ...a, description } : a));
+        const updated = { ...m, attachments };
+        void storage.saveChatMessage(updated, k.notesKey);
+        return updated;
+      }),
+    );
+  };
+
+  const handleChatAttachmentRemove = async (messageId: string, attachmentId: string) => {
+    const k = keysRef.current;
+    if (!k) return;
+    await storage.deleteChatAttachment(attachmentId);
+    setChatMessages((prev) =>
+      prev.map((m) => {
+        if (m.id !== messageId) return m;
+        const attachments = m.attachments?.filter((a) => a.id !== attachmentId) ?? [];
+        const updated = { ...m, attachments };
+        void storage.saveChatMessage(updated, k.notesKey);
+        return updated;
+      }),
+    );
+  };
+
+  /** Restores a persisted login (if any) after unlock and brings chat online in the background. */
+  const restoreChatAfterUnlock = (derived: VaultKeys) => {
+    void loadChatHistoryFor(derived).catch((err) => console.warn('[chat] history load failed', err));
+    setUnreadByPeer(loadChatUnread(loadStorageNamespace()));
+    const stored = loadSession(loadStorageNamespace());
+    if (!stored) return;
+    setSession(stored);
+    sessionRef.current = stored;
+    void (async () => {
+      try {
+        await initIM(derived, stored);
+        await syncChatHistory(stored, derived);
+      } catch (err) {
+        console.warn('[chat] IM init after unlock failed', err);
+      }
+    })();
+  };
+
+  /**
+   * Cloud login from the unlock screen. Unlike desktop this only enables chat (there is no note
+   * sync UI on mobile): resolve/verify the vault salt, log in, upload pubkeys, connect IM and
+   * pull the full chat history.
+   */
+  const handleCloudLogin = async ({
+    password,
+    username,
+    serverUrl: nextServerUrl,
+  }: {
+    password: string;
+    username: string;
+    serverUrl: string;
+  }) => {
+    saveServerUrl(nextServerUrl);
+    if (serverUrlNeedsReload(nextServerUrl)) {
+      // The CSP was written at page parse time for the old server origin; a reload re-runs the
+      // bootstrap against the freshly saved URL, after which the user can log in again.
+      if (window.confirm(t('vaultApp.serverUrlReloadConfirm'))) {
+        window.location.reload();
+        return;
+      }
+      throw new Error(t('vaultApp.serverUrlReloadConfirm'));
+    }
+    const api = new ApiClient(nextServerUrl, locale);
+
+    let saltB64 = await storage.getMeta(META_KEYS.salt);
+    let derived: VaultKeys;
+    if (!saltB64) {
+      // Brand-new device: adopt the account's vault salt so the derived proof matches.
+      const saltInfo = await api.getVaultSaltInfo(username);
+      if (saltInfo.status === 'user_not_found') throw new Error(t('vaultApp.cloudAccountNotFound'));
+      if (saltInfo.status === 'vault_salt_missing') throw new Error(t('vaultApp.vaultParamsMissing'));
+      saltB64 = saltInfo.vault_salt;
+      derived = await deriveKeysFromPassword(password, fromBase64(saltB64));
+      const proof = toBase64(derived.passwordVerifier);
+      const userSession = await api.login(username, proof);
+      await storage.setMeta(META_KEYS.salt, saltB64);
+      await storage.setMeta(META_KEYS.passwordVerifier, proof);
+      await setupIdentityKeys(derived);
+      saveSession(userSession, loadStorageNamespace());
+      setSession(userSession);
+      sessionRef.current = userSession;
+      keysRef.current = derived;
+      await loadAiState(derived);
+      setKeys(derived);
+      setIsFirstRun(false);
+      setVaultListItems((prev) =>
+        prev.map((v) => (v.id === activeVaultId ? { ...v, initialized: true, boundUsername: username.trim() } : v)),
+      );
+      await initIM(derived, userSession);
+      await syncChatHistory(userSession, derived);
+      await loadChatHistoryFor(derived);
+      return;
+    }
+
+    derived = await deriveKeysFromPassword(password, fromBase64(saltB64));
+    const verifier = await storage.getMeta(META_KEYS.passwordVerifier);
+    if (!verifier || toBase64(derived.passwordVerifier) !== verifier) {
+      throw new Error(t('vaultApp.wrongPassword'));
+    }
+    await setupIdentityKeys(derived);
+    const userSession = await api.login(username, toBase64(derived.passwordVerifier));
+    saveSession(userSession, loadStorageNamespace());
+    setSession(userSession);
+    sessionRef.current = userSession;
+    keysRef.current = derived;
+    await loadAiState(derived);
+    setKeys(derived);
+    setVaultListItems((prev) =>
+      prev.map((v) => (v.id === activeVaultId ? { ...v, boundUsername: username.trim() } : v)),
+    );
+    await initIM(derived, userSession);
+    await syncChatHistory(userSession, derived);
+    await loadChatHistoryFor(derived);
+  };
+
+  // Poll the WS connection state while the chat view is open.
+  useEffect(() => {
+    if (view !== 'chat' || !session) {
+      setImConnected(false);
+      return;
+    }
+    const tick = () => setImConnected(imRef.current?.isConnected() ?? false);
+    tick();
+    const id = setInterval(tick, 2000);
+    return () => clearInterval(id);
+  }, [view, session]);
+
+  // While a thread is open, read-ack whatever is still unread and flip it locally.
+  useEffect(() => {
+    const k = keysRef.current;
+    if (view !== 'chat' || !activePeerId || !k) return;
+    const unread = chatMessages.filter(
+      (m) => m.peerId === activePeerId && m.direction === 'in' && m.status !== 'read',
+    );
+    if (unread.length === 0) return;
+    for (const m of unread) imRef.current?.sendReadAck(activePeerId, m.id);
+    setChatMessages((prev) =>
+      prev.map((m) =>
+        m.peerId === activePeerId && m.direction === 'in' && m.status !== 'read' ? { ...m, status: 'read' } : m,
+      ),
+    );
+    void Promise.all(unread.map((m) => storage.saveChatMessage({ ...m, status: 'read' }, k.notesKey)));
+  }, [view, activePeerId, chatMessages, keys, storage]);
+
+  useEffect(() => {
+    if (view === 'chat' && activePeerId) clearPeerUnread(activePeerId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, activePeerId]);
+
+  const chatSessions = useMemo(
+    () =>
+      buildChatSessions(
+        chatMessages,
+        loadChatSessions(loadStorageNamespace()).map((s) => ({ peerId: s.peerId, peerName: s.peerUsername })),
+        activePeerId,
+        activePeerName,
+        t,
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [chatMessages, activePeerId, activePeerName, imConnected, t],
+  );
+
+  const totalUnread = useMemo(
+    () => Object.values(unreadByPeer).reduce((sum, n) => sum + n, 0),
+    [unreadByPeer],
+  );
+
   const handleCreateVault = async (password: string) => {
     const salt = generateSalt();
     await storage.setMeta(META_KEYS.salt, toBase64(salt));
     const derived = await deriveKeysFromPassword(password, salt);
     await storage.setMeta(META_KEYS.passwordVerifier, toBase64(derived.passwordVerifier));
+    await setupIdentityKeys(derived);
     keysRef.current = derived;
     await loadAiState(derived);
     setKeys(derived);
@@ -215,17 +736,28 @@ export function MobileApp() {
     keysRef.current = derived;
     await loadAiState(derived);
     setKeys(derived);
+    restoreChatAfterUnlock(derived);
   };
 
   const handleLock = () => {
     aiAbortRef.current?.abort();
+    imRef.current?.disconnect();
+    imRef.current = null;
     keysRef.current = null;
+    sessionRef.current = null;
     setKeys(null);
+    setSession(null);
     setAiSettings(null);
     setAiSessions([]);
     setActiveAiSessionId(null);
     setAiRun(null);
     setAiRunError(null);
+    setChatMessages([]);
+    setActivePeerId(null);
+    setActivePeerName(null);
+    setUnreadByPeer({});
+    setImConnected(false);
+    setView('ai');
     setDrawerOpen(false);
     setSettingsOpen(false);
   };
@@ -507,7 +1039,7 @@ export function MobileApp() {
             onCreateVaultEntry={createVaultEntry}
             onCreateVault={handleCreateVault}
             onUnlockLocal={handleUnlockLocal}
-            onCloudSync={() => Promise.reject(new Error(t('mobileApp.cloudNotSupported')))}
+            onCloudSync={handleCloudLogin}
           />
         </div>
       </I18nProvider>
@@ -527,9 +1059,27 @@ export function MobileApp() {
             ☰
           </button>
           <div className="fn-mobile__header-title">
-            {activeAiSession ? activeAiSession.title : t('aiPanel.title')}
+            {view === 'chat'
+              ? (activePeerName ?? t('mobileApp.chat'))
+              : activeAiSession
+                ? activeAiSession.title
+                : t('aiPanel.title')}
           </div>
           <div className="fn-mobile__header-actions">
+            <button
+              type="button"
+              className={`fn-mobile__header-btn${view === 'chat' ? ' fn-mobile__header-btn--active' : ''}`}
+              title={view === 'chat' ? t('aiPanel.title') : t('mobileApp.chat')}
+              onClick={() => {
+                setView((v) => (v === 'chat' ? 'ai' : 'chat'));
+                setDrawerOpen(false);
+              }}
+            >
+              {view === 'chat' ? '🤖' : '💬'}
+              {view !== 'chat' && totalUnread > 0 && (
+                <span className="fn-mobile__badge">{totalUnread > 99 ? '99+' : totalUnread}</span>
+              )}
+            </button>
             <button
               type="button"
               className="fn-mobile__header-btn"
@@ -550,7 +1100,19 @@ export function MobileApp() {
         </header>
 
         <main className="fn-mobile__main">
-          {activeAiSession ? (
+          {view === 'chat' ? (
+            <ChatPanel
+              messages={chatMessages}
+              activePeerId={activePeerId}
+              activePeerName={activePeerName}
+              onSend={handleSendChat}
+              onDeleteMessage={handleDeleteChatMessage}
+              onDownloadAttachment={handleChatAttachmentDownload}
+              onEditAttachment={handleChatAttachmentEdit}
+              onRemoveAttachment={handleChatAttachmentRemove}
+              onLoadAttachmentPreview={handleChatAttachmentPreview}
+            />
+          ) : activeAiSession ? (
             <AiWorkbench
               session={activeAiSession}
               configured={!!aiSettings?.apiKey}
@@ -588,19 +1150,38 @@ export function MobileApp() {
         {drawerOpen && (
           <div className="fn-mobile__drawer-backdrop" onClick={() => setDrawerOpen(false)}>
             <div className="fn-mobile__drawer" onClick={(e) => e.stopPropagation()}>
-              <div className="fn-mobile__drawer-title">{t('aiPanel.title')}</div>
-              <AiSessionTree
-                sessions={aiSessions}
-                activeId={activeAiSessionId}
-                onSelect={(id) => {
-                  setActiveAiSessionId(id);
-                  setDrawerOpen(false);
-                }}
-                onCreate={handleAiCreate}
-                onRename={handleAiRename}
-                onDelete={handleAiDelete}
-                onMove={handleAiMove}
-              />
+              <div className="fn-mobile__drawer-title">
+                {view === 'chat' ? t('mobileApp.chat') : t('aiPanel.title')}
+              </div>
+              {view === 'chat' ? (
+                <ChatSidebar
+                  sessions={chatSessions}
+                  activePeerId={activePeerId}
+                  sessionLoggedIn={!!session}
+                  imConnected={imConnected}
+                  unreadByPeer={unreadByPeer}
+                  onSelectPeer={(id, name) => {
+                    setActivePeerId(id);
+                    setActivePeerName(name);
+                    clearPeerUnread(id);
+                    setDrawerOpen(false);
+                  }}
+                  onStartChat={handleStartChat}
+                />
+              ) : (
+                <AiSessionTree
+                  sessions={aiSessions}
+                  activeId={activeAiSessionId}
+                  onSelect={(id) => {
+                    setActiveAiSessionId(id);
+                    setDrawerOpen(false);
+                  }}
+                  onCreate={handleAiCreate}
+                  onRename={handleAiRename}
+                  onDelete={handleAiDelete}
+                  onMove={handleAiMove}
+                />
+              )}
             </div>
           </div>
         )}

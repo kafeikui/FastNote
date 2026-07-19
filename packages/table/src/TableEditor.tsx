@@ -1033,6 +1033,8 @@ export function TableEditor({
         }
         skipFinalizeRef.current = true;
         (e.target as HTMLTextAreaElement).blur();
+        // Keep keyboard focus on the grid so shortcuts (Mod+A, F4, …) still land here.
+        containerRef.current?.focus();
         setSelAnchor(null);
         setSelFocus(null);
         setFocusCell(null);
@@ -1081,7 +1083,10 @@ export function TableEditor({
         setSelFocus({ rowIdx: rowIdx + 1, colIdx });
         focusCellInput(rowIdx + 1, colIdx);
       } else {
+        // Last row: end the edit but keep keyboard focus on the grid, otherwise focus falls to
+        // <body> and Shift+Arrow (move) / Alt+Arrow (swap) / Esc stop working after Enter.
         (e.target as HTMLTextAreaElement).blur();
+        containerRef.current?.focus();
       }
     },
     [displayRows.length, focusCellInput, emitChange, finalizeFormulaParens],

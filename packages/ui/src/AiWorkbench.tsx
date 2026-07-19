@@ -633,6 +633,16 @@ export function AiWorkbench({
               rows={3}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
+                if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+                  // Type a literal tab character instead of moving focus.
+                  e.preventDefault();
+                  const el = e.currentTarget;
+                  const start = el.selectionStart ?? el.value.length;
+                  const end = el.selectionEnd ?? start;
+                  setDraft(el.value.slice(0, start) + '\t' + el.value.slice(end));
+                  requestAnimationFrame(() => el.setSelectionRange(start + 1, start + 1));
+                  return;
+                }
                 if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                   e.preventDefault();
                   handleSend();

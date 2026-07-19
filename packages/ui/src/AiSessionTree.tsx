@@ -1,4 +1,4 @@
-import { useMemo, useState, type DragEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from 'react';
 import type { AiSessionNode } from '@fastnote/shared';
 import { useT } from '@fastnote/i18n';
 
@@ -56,8 +56,72 @@ export function AiSessionTree({
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+  // Last clicked node (folder or session) — the anchor for toolbar creation and F2 rename.
+  const [focusId, setFocusId] = useState<string | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
 
   const levels = useMemo(() => buildLevels(sessions, null), [sessions]);
+
+  // When a node is created, jump the tree focus to it (and reveal it if it landed inside a
+  // collapsed folder). AI sessions are local-only, so a grown list always means a user action.
+  const prevIdsRef = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    const prev = prevIdsRef.current;
+    prevIdsRef.current = new Set(sessions.map((s) => s.id));
+    if (!prev) return;
+    const added = sessions.filter((s) => !prev.has(s.id));
+    if (added.length !== 1) return;
+    const node = added[0]!;
+    setFocusId(node.id);
+    setCollapsed((cur) => {
+      const next = new Set(cur);
+      let pid = node.parentId;
+      while (pid) {
+        next.delete(pid);
+        pid = sessions.find((s) => s.id === pid)?.parentId ?? null;
+      }
+      return next.size === cur.size ? cur : next;
+    });
+    // Keyboard focus moves onto the tree so F2 renames the new node (not a sidebar note), and
+    // the new row scrolls into view on the next frame (after it has rendered).
+    rootRef.current?.focus();
+    requestAnimationFrame(() => {
+      rootRef.current
+        ?.querySelector(`[data-ai-node-id="${node.id}"]`)
+        ?.scrollIntoView({ block: 'nearest' });
+    });
+  }, [sessions]);
+
+  /** Toolbar creation target: inside the focused folder, or alongside the focused session. */
+  const createParentId = (): string | null => {
+    const anchor =
+      (focusId && sessions.find((s) => s.id === focusId)) ||
+      (activeId && sessions.find((s) => s.id === activeId)) ||
+      null;
+    if (!anchor) return null;
+    return anchor.kind === 'folder' ? anchor.id : anchor.parentId;
+  };
+
+  const startRename = (node: AiSessionNode) => {
+    setRenamingId(node.id);
+    setRenameDraft(node.title);
+  };
+
+  const handleTreeKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'F2' || renamingId) return;
+    const target = focusId ?? activeId;
+    const node = target ? sessions.find((s) => s.id === target) : undefined;
+    if (!node) return;
+    e.preventDefault();
+    e.stopPropagation();
+    startRename(node);
+  };
+
+  const allFolderIds = useMemo(
+    () => sessions.filter((s) => s.kind === 'folder').map((s) => s.id),
+    [sessions],
+  );
+  const anyExpanded = allFolderIds.some((id) => !collapsed.has(id));
 
   const toggleCollapse = (id: string) => {
     setCollapsed((prev) => {
@@ -100,11 +164,13 @@ export function AiSessionTree({
               className={[
                 'fn-ai-tree__row',
                 node.id === activeId ? 'fn-ai-tree__row--active' : '',
+                node.id === focusId && node.id !== activeId ? 'fn-ai-tree__row--focus' : '',
                 dropTargetId === node.id ? 'fn-ai-tree__row--drop' : '',
               ]
                 .filter(Boolean)
                 .join(' ')}
               style={{ paddingLeft: `${depth * 14 + 4}px` }}
+              data-ai-node-id={node.id}
               draggable={renamingId !== node.id}
               onDragStart={(e) => {
                 e.dataTransfer.setData(DRAG_MIME, node.id);
@@ -123,6 +189,7 @@ export function AiSessionTree({
               onDragLeave={isFolder ? () => setDropTargetId((cur) => (cur === node.id ? null : cur)) : undefined}
               onDrop={isFolder ? (e) => handleDrop(e, node.id) : undefined}
               onClick={() => {
+                setFocusId(node.id);
                 if (isFolder) toggleCollapse(node.id);
                 else onSelect(node.id);
               }}
@@ -159,10 +226,7 @@ export function AiSessionTree({
                 <button
                   type="button"
                   title={t('aiPanel.rename')}
-                  onClick={() => {
-                    setRenamingId(node.id);
-                    setRenameDraft(node.title);
-                  }}
+                  onClick={() => startRename(node)}
                 >
                   ✎
                 </button>
@@ -188,7 +252,17 @@ export function AiSessionTree({
 
   return (
     <div
+      ref={rootRef}
       className={`fn-ai-tree${dropTargetId === '__root__' ? ' fn-ai-tree--drop' : ''}`}
+      tabIndex={-1}
+      onKeyDown={handleTreeKeyDown}
+      onMouseDown={(e) => {
+        // Rows aren't focusable; keep keyboard focus on the tree itself so F2 works after a
+        // click (but never steal focus from the rename input or the toolbar buttons).
+        if (e.target instanceof HTMLElement && !e.target.closest('input, button')) {
+          e.currentTarget.focus();
+        }
+      }}
       onDragOver={(e) => {
         if (e.dataTransfer.types.includes(DRAG_MIME)) {
           e.preventDefault();
@@ -199,12 +273,24 @@ export function AiSessionTree({
       onDrop={(e) => handleDrop(e, null)}
     >
       <div className="fn-ai-tree__toolbar">
-        <button type="button" onClick={() => onCreate('session', null)}>
+        <button type="button" onClick={() => onCreate('session', createParentId())}>
           {t('aiPanel.newSession')}
         </button>
-        <button type="button" onClick={() => onCreate('folder', null)}>
+        <button type="button" onClick={() => onCreate('folder', createParentId())}>
           {t('aiPanel.newFolder')}
         </button>
+        {allFolderIds.length > 0 && (
+          <button
+            type="button"
+            className="fn-ai-tree__fold-btn"
+            title={anyExpanded ? t('aiPanel.collapseAll') : t('aiPanel.expandAll')}
+            onClick={() =>
+              setCollapsed(anyExpanded ? new Set(allFolderIds) : new Set())
+            }
+          >
+            {anyExpanded ? '⊟' : '⊞'}
+          </button>
+        )}
       </div>
       {levels.length === 0 ? (
         <p className="fn-ai-tree__empty">{t('aiPanel.empty')}</p>

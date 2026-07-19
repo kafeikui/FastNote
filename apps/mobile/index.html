@@ -7,11 +7,33 @@
       applied exactly once at parse time, so it must be written synchronously via document.write
       before any resource-loading tag. Inside the Capacitor WebView the app origin is
       https://localhost ('self'); connect-src additionally allows api.anthropic.com for the AI
-      Workbench (the mobile build has no cloud sync, so no server origin is added).
+      Workbench plus the user's configured FastNote server (chat login + message WebSocket),
+      read from the same `fastnote_server_url` localStorage key packages/api uses.
     -->
     <script>
       (function () {
-        var connectSrc = ["'self'", 'https://api.anthropic.com'].join(' ');
+        function originsForServerUrl(serverUrl) {
+          try {
+            var u = new URL(serverUrl);
+            var httpOrigin = u.protocol + '//' + u.host;
+            var wsProtocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+            var wsOrigin = wsProtocol + '//' + u.host;
+            return [httpOrigin, wsOrigin];
+          } catch (e) {
+            return [];
+          }
+        }
+        var serverUrl = 'http://localhost:8787';
+        try {
+          serverUrl = window.localStorage.getItem('fastnote_server_url') || serverUrl;
+        } catch (e) {
+          // localStorage unavailable — fall back to the default.
+        }
+        window.__FASTNOTE_CSP_SERVER_URL__ = serverUrl;
+        var connectSrc = ["'self'"]
+          .concat(originsForServerUrl(serverUrl))
+          .concat(['https://api.anthropic.com'])
+          .join(' ');
         var policy = [
           "default-src 'self'",
           "script-src 'self'",
