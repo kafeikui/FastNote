@@ -562,6 +562,7 @@ export const zh = {
     lock: '锁定',
     chat: '聊天',
     noSession: '暂无会话，新建一个开始与 Claude 对话。',
+    accountHint: '登录云账号后即可使用聊天功能。请使用与桌面端相同的服务器地址、用户名和主密码。',
     cloudNotSupported: '移动版暂不支持云账号登录同步，请使用"密码解锁"。',
     copiedAsMarkdown: '已将所选问答以 Markdown 格式复制到剪贴板。',
     copyFailed: '复制失败，请重试。',

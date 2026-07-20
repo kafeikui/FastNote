@@ -151,6 +151,7 @@ export function MobileApp() {
 
   // --- chat / IM state ----------------------------------------------------------
   const [session, setSession] = useState<UserSession | null>(null);
+  const [boundUsername, setBoundUsername] = useState<string | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [activePeerId, setActivePeerId] = useState<string | null>(null);
   const [activePeerName, setActivePeerName] = useState<string | null>(null);
@@ -179,6 +180,18 @@ export function MobileApp() {
       .then((salt) => setIsFirstRun(!salt))
       .catch(() => setIsFirstRun(true));
   }, [storage]);
+
+  // The vault's bound cloud username pre-fills the login form in settings.
+  useEffect(() => {
+    if (!keys) {
+      setBoundUsername(null);
+      return;
+    }
+    storage
+      .getMeta(META_KEYS.boundUsername)
+      .then((u) => setBoundUsername(u ?? null))
+      .catch(() => setBoundUsername(null));
+  }, [keys, storage]);
 
   // Probe each registered vault's namespace so the unlock screen can show its state.
   useEffect(() => {
@@ -622,6 +635,8 @@ export function MobileApp() {
       const userSession = await api.login(username, proof);
       await storage.setMeta(META_KEYS.salt, saltB64);
       await storage.setMeta(META_KEYS.passwordVerifier, proof);
+      await storage.setMeta(META_KEYS.boundUsername, username.trim());
+      setBoundUsername(username.trim());
       await setupIdentityKeys(derived);
       saveSession(userSession, loadStorageNamespace());
       setSession(userSession);
@@ -646,18 +661,34 @@ export function MobileApp() {
     }
     await setupIdentityKeys(derived);
     const userSession = await api.login(username, toBase64(derived.passwordVerifier));
+    await storage.setMeta(META_KEYS.boundUsername, username.trim());
+    setBoundUsername(username.trim());
     saveSession(userSession, loadStorageNamespace());
     setSession(userSession);
     sessionRef.current = userSession;
+    // Already-unlocked path (login from settings): keep the current AI state untouched.
+    const alreadyUnlocked = !!keysRef.current;
     keysRef.current = derived;
-    await loadAiState(derived);
-    setKeys(derived);
+    if (!alreadyUnlocked) {
+      await loadAiState(derived);
+      setKeys(derived);
+    }
     setVaultListItems((prev) =>
       prev.map((v) => (v.id === activeVaultId ? { ...v, boundUsername: username.trim() } : v)),
     );
     await initIM(derived, userSession);
     await syncChatHistory(userSession, derived);
     await loadChatHistoryFor(derived);
+  };
+
+  /** Logs out of the cloud account (chat goes offline); the vault stays unlocked. */
+  const handleLogout = () => {
+    saveSession(null, loadStorageNamespace());
+    setSession(null);
+    sessionRef.current = null;
+    imRef.current?.disconnect();
+    imRef.current = null;
+    setImConnected(false);
   };
 
   // Poll the WS connection state while the chat view is open.
@@ -1191,6 +1222,10 @@ export function MobileApp() {
             t={t}
             locale={locale}
             settings={aiSettings}
+            session={session}
+            boundUsername={boundUsername}
+            onLogin={handleCloudLogin}
+            onLogout={handleLogout}
             onSaveSettings={async (next) => {
               const k = keysRef.current;
               if (!k) return;
@@ -1216,12 +1251,27 @@ interface MobileSettingsProps {
   t: TFunction;
   locale: Locale;
   settings: AiSettings | null;
+  session: UserSession | null;
+  boundUsername: string | null;
+  onLogin: (args: { password: string; username: string; serverUrl: string }) => Promise<void>;
+  onLogout: () => void;
   onSaveSettings: (settings: AiSettings) => Promise<void>;
   onChangeLocale: (locale: Locale) => void;
   onClose: () => void;
 }
 
-function MobileSettings({ t, locale, settings, onSaveSettings, onChangeLocale, onClose }: MobileSettingsProps) {
+function MobileSettings({
+  t,
+  locale,
+  settings,
+  session,
+  boundUsername,
+  onLogin,
+  onLogout,
+  onSaveSettings,
+  onChangeLocale,
+  onClose,
+}: MobileSettingsProps) {
   const [apiKey, setApiKey] = useState(settings?.apiKey ?? '');
   const knownModel = CLAUDE_MODELS.some((m) => m.id === (settings?.model ?? DEFAULT_CLAUDE_MODEL));
   const [model, setModel] = useState(knownModel ? (settings?.model ?? DEFAULT_CLAUDE_MODEL) : '__custom__');
@@ -1232,6 +1282,39 @@ function MobileSettings({ t, locale, settings, onSaveSettings, onChangeLocale, o
     settings?.webSearchMaxUses ?? AI_WEB_SEARCH_USES_DEFAULT,
   );
   const [saved, setSaved] = useState(false);
+
+  // --- cloud account (chat) ---------------------------------------------------
+  const [loginServerUrl, setLoginServerUrl] = useState(() => loadServerUrl());
+  const [loginUsername, setLoginUsername] = useState(boundUsername ?? '');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+
+  const handleLogin = async () => {
+    if (loginBusy) return;
+    if (!loginServerUrl.trim()) {
+      setLoginError(t('unlockScreen.errorServerUrlRequired'));
+      return;
+    }
+    if (!loginUsername.trim()) {
+      setLoginError(t('unlockScreen.errorUsernameRequired'));
+      return;
+    }
+    setLoginBusy(true);
+    setLoginError(null);
+    try {
+      await onLogin({
+        serverUrl: loginServerUrl.trim(),
+        username: loginUsername.trim(),
+        password: loginPassword,
+      });
+      setLoginPassword('');
+    } catch (err) {
+      setLoginError(err instanceof Error && err.message ? err.message : t('unlockScreen.errorGeneric'));
+    } finally {
+      setLoginBusy(false);
+    }
+  };
 
   const handleSave = async () => {
     const resolvedModel = model === '__custom__' ? customModel.trim() || DEFAULT_CLAUDE_MODEL : model;
@@ -1271,6 +1354,60 @@ function MobileSettings({ t, locale, settings, onSaveSettings, onChangeLocale, o
             ))}
           </select>
         </label>
+
+        <div className="fn-mobile__settings-section">{t('settingsModal.tabs.account')}</div>
+
+        {session ? (
+          <>
+            <p className="fn-mobile__hint">
+              {t('settingsModal.accountLabel', { username: session.username })}
+            </p>
+            <button type="button" className="fn-mobile__save" onClick={onLogout}>
+              {t('settingsModal.logout')}
+            </button>
+          </>
+        ) : (
+          <>
+            <p className="fn-mobile__hint">{t('mobileApp.accountHint')}</p>
+            <label className="fn-mobile__field">
+              <span>{t('settingsModal.serverUrlLabel')}</span>
+              <input
+                value={loginServerUrl}
+                autoComplete="off"
+                onChange={(e) => setLoginServerUrl(e.target.value)}
+                placeholder={t('unlockScreen.serverUrlPlaceholder')}
+              />
+            </label>
+            <label className="fn-mobile__field">
+              <span>{t('unlockScreen.usernamePlaceholder')}</span>
+              <input
+                value={loginUsername}
+                autoComplete="username"
+                onChange={(e) => setLoginUsername(e.target.value)}
+                placeholder={t('unlockScreen.usernamePlaceholder')}
+              />
+            </label>
+            <label className="fn-mobile__field">
+              <span>{t('unlockScreen.masterPasswordPlaceholder')}</span>
+              <input
+                type="password"
+                value={loginPassword}
+                autoComplete="current-password"
+                onChange={(e) => setLoginPassword(e.target.value)}
+                placeholder={t('unlockScreen.masterPasswordPlaceholder')}
+              />
+            </label>
+            {loginError && <p className="fn-unlock__error">{loginError}</p>}
+            <button
+              type="button"
+              className="fn-mobile__save"
+              disabled={loginBusy}
+              onClick={() => void handleLogin()}
+            >
+              {loginBusy ? t('unlockScreen.loggingIn') : t('unlockScreen.loginAndSync')}
+            </button>
+          </>
+        )}
 
         <div className="fn-mobile__settings-section">{t('settingsModal.ai.legend')}</div>
 

@@ -568,6 +568,8 @@ export const en: Dictionary = {
     lock: 'Lock',
     chat: 'Chat',
     noSession: 'No session yet — create one to start chatting with Claude.',
+    accountHint:
+      'Log in to your cloud account to use chat. Use the same server URL, username and master password as on desktop.',
     cloudNotSupported:
       'Cloud account login/sync is not supported in the mobile build yet; please use password unlock.',
     copiedAsMarkdown: 'The selected Q&A has been copied to the clipboard as Markdown.',
