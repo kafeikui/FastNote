@@ -50,16 +50,26 @@ export interface ChatBlobRecord {
   updated_at: string;
 }
 
+/** A durable per-account copy of one AI Workbench session/folder as an opaque encrypted blob,
+ * merged across devices with last-writer-wins on `updated_at` (tombstones for deletions). */
+export interface AiBlobRecord {
+  session_id: string;
+  ciphertext: string;
+  deleted: number;
+  updated_at: string;
+}
+
 interface RelayData {
   users: UserRecord[];
   note_blobs: Array<NoteBlobRecord & { user_id: string }>;
   attachment_blobs: Array<AttachmentBlobRecord & { user_id: string }>;
   message_queue: MessageQueueRecord[];
   chat_blobs: Array<ChatBlobRecord & { user_id: string }>;
+  ai_blobs: Array<AiBlobRecord & { user_id: string }>;
 }
 
 function emptyData(): RelayData {
-  return { users: [], note_blobs: [], attachment_blobs: [], message_queue: [], chat_blobs: [] };
+  return { users: [], note_blobs: [], attachment_blobs: [], message_queue: [], chat_blobs: [], ai_blobs: [] };
 }
 
 export class JsonRelayStore {
@@ -83,6 +93,7 @@ export class JsonRelayStore {
         attachment_blobs: parsed.attachment_blobs ?? [],
         message_queue: parsed.message_queue ?? [],
         chat_blobs: parsed.chat_blobs ?? [],
+        ai_blobs: parsed.ai_blobs ?? [],
       };
     } catch {
       return emptyData();
@@ -117,12 +128,13 @@ export class JsonRelayStore {
       this.data.note_blobs.length === 0 &&
       this.data.attachment_blobs.length === 0 &&
       this.data.message_queue.length === 0 &&
-      this.data.chat_blobs.length === 0
+      this.data.chat_blobs.length === 0 &&
+      this.data.ai_blobs.length === 0
     );
   }
 
-  importAll(data: RelayData): void {
-    this.data = data;
+  importAll(data: Omit<RelayData, 'ai_blobs'> & Partial<Pick<RelayData, 'ai_blobs'>>): void {
+    this.data = { ...data, ai_blobs: data.ai_blobs ?? [] };
     this.writeNow();
   }
 
@@ -305,6 +317,40 @@ export class JsonRelayStore {
   listChatMessages(userId: string): ChatBlobRecord[] {
     return this.data.chat_blobs
       .filter((c) => c.user_id === userId)
+      .map(({ user_id: _uid, ...rest }) => rest);
+  }
+
+  /** LWW upsert: a push older than what's stored is ignored (a later pull supplies the newer copy). */
+  upsertAiSession(
+    userId: string,
+    sessionId: string,
+    ciphertext: string,
+    deleted: boolean,
+    updatedAt: string,
+  ): void {
+    const existing = this.data.ai_blobs.find(
+      (a) => a.user_id === userId && a.session_id === sessionId,
+    );
+    if (existing) {
+      if (updatedAt < existing.updated_at) return;
+      existing.ciphertext = ciphertext;
+      existing.deleted = deleted ? 1 : 0;
+      existing.updated_at = updatedAt;
+    } else {
+      this.data.ai_blobs.push({
+        user_id: userId,
+        session_id: sessionId,
+        ciphertext,
+        deleted: deleted ? 1 : 0,
+        updated_at: updatedAt,
+      });
+    }
+    this.scheduleSave();
+  }
+
+  listAiSessions(userId: string): AiBlobRecord[] {
+    return this.data.ai_blobs
+      .filter((a) => a.user_id === userId)
       .map(({ user_id: _uid, ...rest }) => rest);
   }
 }

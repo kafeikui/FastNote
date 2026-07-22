@@ -1,4 +1,4 @@
-import type { NoteNode, SyncNotePayload } from '@fastnote/shared';
+import type { AiMessage, AiSessionKind, AiSessionNode, NoteNode, SyncNotePayload } from '@fastnote/shared';
 import {
   decryptJson,
   encryptJson,
@@ -63,6 +63,18 @@ export interface SyncResult {
   attachmentsPulled: number;
   chatPushed: number;
   chatPulled: number;
+  aiPushed: number;
+  aiPulled: number;
+}
+
+/** Wire shape of one AI session/folder inside the encrypted blob. */
+interface AiSessionSyncPayload {
+  parent_id: string | null;
+  kind: AiSessionKind;
+  title: string;
+  messages: AiMessage[];
+  sort_order: number;
+  updated_at: string;
 }
 
 export class SyncClient {
@@ -84,6 +96,8 @@ export class SyncClient {
     let attachmentsPulled = 0;
     let chatPushed = 0;
     let chatPulled = 0;
+    let aiPushed = 0;
+    let aiPulled = 0;
     const localMap = new Map(notes.map((n) => [n.id, n]));
 
     // Push deletion tombstones first, then hard-delete the local tombstone rows: once the server
@@ -189,11 +203,24 @@ export class SyncClient {
       const chat = await this.syncChatMessages(storage);
       chatPushed = chat.pushed;
       chatPulled = chat.pulled;
+      const ai = await this.syncAiSessions(storage, notesKey);
+      aiPushed = ai.pushed;
+      aiPulled = ai.pulled;
     }
 
     return {
       notes: Array.from(localMap.values()),
-      result: { pushed, pulled, conflicts, attachmentsPushed, attachmentsPulled, chatPushed, chatPulled },
+      result: {
+        pushed,
+        pulled,
+        conflicts,
+        attachmentsPushed,
+        attachmentsPulled,
+        chatPushed,
+        chatPulled,
+        aiPushed,
+        aiPulled,
+      },
     };
   }
 
@@ -276,6 +303,73 @@ export class SyncClient {
     for (const item of remoteItems) {
       if (await storage.hasChatMessage(item.message_id)) continue;
       await storage.saveChatMessageFromRemote(item);
+      pulled++;
+    }
+
+    return { pushed, pulled };
+  }
+
+  /**
+   * AI Workbench session sync. Each session/folder travels as one opaque blob encrypted with the
+   * vault's notes key (the server never sees plaintext), merged whole-node last-writer-wins on
+   * `updatedAt` — fine-grained message merging isn't needed because a session is only ever
+   * appended to from one device at a time in practice. Deletions propagate via tombstones: the
+   * local row is kept as a tombstone until pushed, and remote tombstones drop the local copy
+   * unless it has been edited more recently.
+   */
+  async syncAiSessions(
+    storage: StorageAdapter,
+    notesKey: Uint8Array,
+  ): Promise<{ pushed: number; pulled: number }> {
+    let pushed = 0;
+    let pulled = 0;
+
+    const pending = await storage.listPendingAiSessions(notesKey);
+    for (const { session, deleted } of pending) {
+      const payload: AiSessionSyncPayload = {
+        parent_id: session.parentId,
+        kind: session.kind,
+        title: session.title,
+        messages: session.messages,
+        sort_order: session.sortOrder,
+        updated_at: session.updatedAt,
+      };
+      await this.api.pushAiSession(this.session.token, session.id, {
+        ciphertext: encodeWireCiphertext(encryptJson(notesKey, payload)),
+        updated_at: session.updatedAt,
+        deleted,
+      });
+      await storage.markAiSessionSynced(session.id);
+      pushed++;
+    }
+
+    const remoteItems = await this.api.pullAiSessions(this.session.token);
+    for (const item of remoteItems) {
+      const local = await storage.getAiSessionSyncMeta(item.session_id);
+      if (item.deleted) {
+        // Drop the local copy unless it was edited after the deletion (LWW keeps the edit; the
+        // push loop above has already re-uploaded it in that case).
+        if (local && local.updatedAt <= item.updated_at) {
+          await storage.purgeAiSession(item.session_id);
+          pulled++;
+        }
+        continue;
+      }
+      if (local && (local.deleted || item.updated_at <= local.updatedAt)) continue;
+      const payload = decryptJson<AiSessionSyncPayload>(
+        notesKey,
+        decodeWireCiphertext(item.ciphertext),
+      );
+      const node: AiSessionNode = {
+        id: item.session_id,
+        parentId: payload.parent_id,
+        kind: payload.kind,
+        title: payload.title,
+        messages: payload.messages ?? [],
+        sortOrder: payload.sort_order,
+        updatedAt: payload.updated_at,
+      };
+      await storage.saveAiSessionFromRemote(node, notesKey);
       pulled++;
     }
 

@@ -8,7 +8,53 @@ import {
   type EncryptedPayload,
 } from '@fastnote/crypto';
 import { translate, type Locale } from '@fastnote/i18n';
-import { cellDisplayValue } from './formula';
+import {
+  cellDisplayValue,
+  isFormulaValue,
+  rewriteFormulaRefsForDelete,
+  rewriteFormulaRefsForInsert,
+} from './formula';
+
+/** Applies a formula-reference rewriter to every formula cell of the document. */
+function rewriteDocFormulas(doc: TableDocument, rewriteOne: (raw: string) => string): TableDocument {
+  let anyChanged = false;
+  const rows = doc.rows.map((r) => {
+    let changed = false;
+    const cells = { ...r.cells };
+    for (const key of Object.keys(cells)) {
+      const v = cells[key];
+      if (v && isFormulaValue(v)) {
+        const nv = rewriteOne(v);
+        if (nv !== v) {
+          cells[key] = nv;
+          changed = true;
+        }
+      }
+    }
+    if (!changed) return r;
+    anyChanged = true;
+    return { ...r, cells };
+  });
+  return anyChanged ? { ...doc, rows } : doc;
+}
+
+/** Shifts formula references in every cell after a row/column insertion at `insertIndex`. */
+function rewriteDocFormulasForInsert(
+  doc: TableDocument,
+  kind: 'row' | 'col',
+  insertIndex: number,
+): TableDocument {
+  return rewriteDocFormulas(doc, (raw) => rewriteFormulaRefsForInsert(raw, kind, insertIndex));
+}
+
+/** Adjusts formula references in every cell after deleting the row/column at `deleteIndex`. */
+function rewriteDocFormulasForDelete(
+  doc: TableDocument,
+  kind: 'row' | 'col',
+  deleteIndex: number,
+): TableDocument {
+  return rewriteDocFormulas(doc, (raw) => rewriteFormulaRefsForDelete(raw, kind, deleteIndex));
+}
 
 export function createEmptyTable(locale: Locale = 'zh'): TableDocument {
   const colA: TableColumn = { id: crypto.randomUUID(), name: translate(locale, 'tableUtils.defaultColumnA') };
@@ -267,11 +313,13 @@ export function addColumn(doc: TableDocument, locale: Locale = 'zh', index?: num
   const columns = [...doc.columns];
   const at = index === undefined ? columns.length : Math.max(0, Math.min(index, columns.length));
   columns.splice(at, 0, col);
-  return {
+  const next = {
     ...doc,
     columns,
     rows: doc.rows.map((r) => ({ ...r, cells: { ...r.cells, [col.id]: '' } })),
   };
+  // References to columns at/after the insertion point shift one letter to the right.
+  return rewriteDocFormulasForInsert(next, 'col', at);
 }
 
 /** Appends a row, or inserts it at `index` (before the row currently there) when given. */
@@ -281,32 +329,39 @@ export function addRow(doc: TableDocument, index?: number): TableDocument {
   const rows = [...doc.rows];
   const at = index === undefined ? rows.length : Math.max(0, Math.min(index, rows.length));
   rows.splice(at, 0, { id: crypto.randomUUID(), cells });
-  return { ...doc, rows };
+  // References to rows at/after the insertion point shift one row down.
+  return rewriteDocFormulasForInsert({ ...doc, rows }, 'row', at);
 }
 
 export function removeColumn(doc: TableDocument, columnId: string): TableDocument {
   if (doc.columns.length <= 1) return doc;
-  return {
+  const removedIndex = doc.columns.findIndex((c) => c.id === columnId);
+  if (removedIndex < 0) return doc;
+  const next: TableDocument = {
     ...doc,
     columns: doc.columns.filter((c) => c.id !== columnId),
     rows: doc.rows.map((r) => {
       const cells = { ...r.cells };
       delete cells[columnId];
-      const next: TableRow = { ...r, cells };
+      const nextRow: TableRow = { ...r, cells };
       if (r.styles && columnId in r.styles) {
         const styles = { ...r.styles };
         delete styles[columnId];
-        if (Object.keys(styles).length === 0) delete next.styles;
-        else next.styles = styles;
+        if (Object.keys(styles).length === 0) delete nextRow.styles;
+        else nextRow.styles = styles;
       }
-      return next;
+      return nextRow;
     }),
   };
+  return rewriteDocFormulasForDelete(next, 'col', removedIndex);
 }
 
 export function removeRow(doc: TableDocument, rowId: string): TableDocument {
   if (doc.rows.length <= 1) return doc;
-  return { ...doc, rows: doc.rows.filter((r) => r.id !== rowId) };
+  const removedIndex = doc.rows.findIndex((r) => r.id === rowId);
+  if (removedIndex < 0) return doc;
+  const next = { ...doc, rows: doc.rows.filter((r) => r.id !== rowId) };
+  return rewriteDocFormulasForDelete(next, 'row', removedIndex);
 }
 
 export function updateCell(

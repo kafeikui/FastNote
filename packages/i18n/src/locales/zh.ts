@@ -284,6 +284,11 @@ export const zh = {
     realStoragePathLabel: '真实存储位置（本机实际保存加密数据的目录）',
     realStoragePathHint: '这是应用在本机用户数据目录下实际写入加密笔记/聊天记录/附件的位置（Electron/Chromium 的 IndexedDB 数据库文件），macOS/Windows/Ubuntu 三端路径各不相同；里面是数据库内部文件，不建议手动编辑，仅用于确认数据确实落盘或做整体备份。',
     openFolder: '在文件管理器中打开',
+    searchIndexLabel: '全局搜索索引',
+    searchIndexHint:
+      '如果全局搜索出现重复结果或指向不存在的文档，说明本地索引缓存已过期，可在此清除缓存并重建。重建在后台进行，笔记较多时可能需要数秒。',
+    rebuildSearchIndex: '清除缓存并重建索引',
+    searchIndexRebuildStarted: '已开始后台重建 ✓',
     accountLabel: '账号：{username}',
     notLoggedIn: '未登录',
     loginOrRegister: '登录 / 注册',

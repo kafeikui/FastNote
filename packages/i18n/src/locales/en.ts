@@ -287,6 +287,11 @@ export const en: Dictionary = {
     realStoragePathLabel: 'Real storage location (where this device actually saves encrypted data)',
     realStoragePathHint: "This is where the app actually writes encrypted notes/chat/attachments on this device's user data folder (Electron/Chromium's IndexedDB database files) — the path differs across macOS/Windows/Ubuntu. It contains internal database files; avoid editing them manually. Use this only to confirm data is really persisted or to back up the whole folder.",
     openFolder: 'Open in file manager',
+    searchIndexLabel: 'Global search index',
+    searchIndexHint:
+      'If global search shows duplicate results or entries pointing at documents that no longer exist, the local index cache has gone stale — clear it and rebuild here. The rebuild runs in the background and may take a few seconds for large vaults.',
+    rebuildSearchIndex: 'Clear cache & rebuild index',
+    searchIndexRebuildStarted: 'Background rebuild started ✓',
     accountLabel: 'Account: {username}',
     notLoggedIn: 'Not signed in',
     loginOrRegister: 'Log in / Sign up',

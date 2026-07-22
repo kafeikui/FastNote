@@ -71,6 +71,185 @@ function parseColOnlyToken(word: string): number | null {
   return /^[A-Z]+$/.test(word) ? letterToColumnIndex(word) : null;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Reference rewriting after structural edits (row/column insert & delete).
+//
+// References are rewritten as *units*: a lone cell ref (`C5`) or a whole range (`B1:B6`, `C:C`,
+// `C1:C`) with both endpoints together, because ranges need boundary semantics a token-by-token
+// shift can't express (a range must absorb a row inserted just below its last row, and shrink —
+// or turn into #REF! — when a row inside it is deleted).
+
+/** One endpoint of a reference: `row === null` for column-only endpoints (the C in C:C). */
+interface RefEndpoint {
+  col: number;
+  row: number | null;
+}
+
+type RefUnit =
+  | { type: 'cell'; col: number; row: number }
+  | { type: 'range'; a: RefEndpoint; b: RefEndpoint };
+
+/** Sentinel returned by a unit rewriter when the referenced row/column was deleted. */
+const REF_ERROR = '#REF!';
+
+function formatEndpoint(e: RefEndpoint): string {
+  return columnLetter(e.col) + (e.row === null ? '' : String(e.row + 1));
+}
+
+function formatUnit(unit: RefUnit): string {
+  if (unit.type === 'cell') return columnLetter(unit.col) + String(unit.row + 1);
+  return `${formatEndpoint(unit.a)}:${formatEndpoint(unit.b)}`;
+}
+
+/**
+ * Scans a formula for reference units and pipes each through `rewrite`; the callback returns a
+ * changed unit, the string `REF_ERROR`, or null to keep the original text. Function names
+ * (letters followed by `(`) and stray words are left untouched.
+ */
+function rewriteFormulaRefs(
+  raw: string,
+  rewrite: (unit: RefUnit) => RefUnit | typeof REF_ERROR | null,
+): string {
+  const re = /[A-Za-z]+[0-9]*/g;
+  const tokens: Array<{ start: number; end: number; letters: string; digits: string }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(raw)) !== null) {
+    const letters = /^[A-Za-z]+/.exec(m[0])![0];
+    tokens.push({ start: m.index, end: m.index + m[0].length, letters, digits: m[0].slice(letters.length) });
+  }
+  const endpointOf = (tok: (typeof tokens)[number]): RefEndpoint => ({
+    col: letterToColumnIndex(tok.letters.toUpperCase()),
+    row: tok.digits ? parseInt(tok.digits, 10) - 1 : null,
+  });
+  let out = '';
+  let last = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i]!;
+    const next = tokens[i + 1];
+    const isFnName = !tok.digits && /^\s*\(/.test(raw.slice(tok.end));
+    // `A1:B6` / `C:C` / `C1:C` — the two tokens joined by a lone colon form one range unit.
+    const joinsNext = next !== undefined && /^\s*:\s*$/.test(raw.slice(tok.end, next.start));
+    let unit: RefUnit | null = null;
+    let unitEnd = tok.end;
+    if (!isFnName && joinsNext) {
+      unit = { type: 'range', a: endpointOf(tok), b: endpointOf(next!) };
+      unitEnd = next!.end;
+      i++;
+    } else if (tok.digits) {
+      const e = endpointOf(tok);
+      unit = { type: 'cell', col: e.col, row: e.row! };
+    }
+    if (!unit) continue;
+    const result = rewrite(unit);
+    if (result === null) continue;
+    out += raw.slice(last, tok.start) + (result === REF_ERROR ? REF_ERROR : formatUnit(result));
+    last = unitEnd;
+  }
+  return out + raw.slice(last);
+}
+
+/**
+ * Rewrites references after a row/column insertion at `insertIndex` (0-based splice position).
+ *
+ * Lone cell refs shift when at/after the insertion point. Range endpoints use spreadsheet
+ * "absorb" semantics on the row axis: the start only shifts when the insertion is strictly above
+ * it, and the end also extends when the row is inserted directly below it — so `=SUM(B1:B6)`
+ * becomes `=SUM(B1:B7)` whether the new row lands above B1, inside the range, or right after B6.
+ * Column insertion uses the plain shift (a new column next to a range is a new data series, not
+ * part of it). Non-formula values are returned unchanged.
+ */
+export function rewriteFormulaRefsForInsert(
+  raw: string,
+  kind: 'row' | 'col',
+  insertIndex: number,
+): string {
+  if (!isFormulaValue(raw)) return raw;
+  const i = insertIndex;
+  return rewriteFormulaRefs(raw, (unit) => {
+    if (unit.type === 'cell') {
+      if (kind === 'col') return unit.col >= i ? { ...unit, col: unit.col + 1 } : null;
+      return unit.row >= i ? { ...unit, row: unit.row + 1 } : null;
+    }
+    const a = { ...unit.a };
+    const b = { ...unit.b };
+    let changed = false;
+    if (kind === 'col') {
+      if (a.col >= i) (a.col += 1), (changed = true);
+      if (b.col >= i) (b.col += 1), (changed = true);
+    } else if (a.row !== null && b.row !== null) {
+      const [lo, hi] = a.row <= b.row ? [a, b] : [b, a];
+      if (i < lo.row!) (lo.row! += 1), (changed = true);
+      if (i <= hi.row! + 1) (hi.row! += 1), (changed = true);
+    } else {
+      // Mixed form (C1:C): the bounded endpoint is the start; the open end always covers the
+      // new row anyway (the evaluator treats these as whole-column).
+      for (const e of [a, b]) {
+        if (e.row !== null && i < e.row) (e.row += 1), (changed = true);
+      }
+    }
+    return changed ? { type: 'range', a, b } : null;
+  });
+}
+
+/**
+ * Rewrites references after deleting the row/column at `deleteIndex`. Refs past the deleted
+ * index shift back; a lone ref to the deleted row/column becomes `#REF!` (shown as the cell's
+ * result, like spreadsheets do); ranges shrink when the deletion falls inside them and become
+ * `#REF!` only when nothing is left. Non-formula values are returned unchanged.
+ */
+export function rewriteFormulaRefsForDelete(
+  raw: string,
+  kind: 'row' | 'col',
+  deleteIndex: number,
+): string {
+  if (!isFormulaValue(raw)) return raw;
+  const d = deleteIndex;
+  return rewriteFormulaRefs(raw, (unit) => {
+    if (unit.type === 'cell') {
+      if (kind === 'col') {
+        if (unit.col === d) return REF_ERROR;
+        return unit.col > d ? { ...unit, col: unit.col - 1 } : null;
+      }
+      if (unit.row === d) return REF_ERROR;
+      return unit.row > d ? { ...unit, row: unit.row - 1 } : null;
+    }
+    const a = { ...unit.a };
+    const b = { ...unit.b };
+    let changed = false;
+    if (kind === 'col') {
+      const [lo, hi] = a.col <= b.col ? [a, b] : [b, a];
+      if (d < lo.col) {
+        // Deleted column is left of the range: the whole range shifts.
+        lo.col -= 1;
+        hi.col -= 1;
+        changed = true;
+      } else if (d <= hi.col) {
+        // Deleted column is inside the range: shrink — unless it was the only column.
+        if (hi.col === lo.col) return REF_ERROR;
+        hi.col -= 1;
+        changed = true;
+      }
+    } else if (a.row !== null && b.row !== null) {
+      const [lo, hi] = a.row <= b.row ? [a, b] : [b, a];
+      if (d < lo.row!) {
+        lo.row! -= 1;
+        hi.row! -= 1;
+        changed = true;
+      } else if (d <= hi.row!) {
+        if (hi.row === lo.row) return REF_ERROR;
+        hi.row! -= 1;
+        changed = true;
+      }
+    } else {
+      // Mixed form (C1:C): shift the bounded start when a row above it was deleted.
+      for (const e of [a, b]) {
+        if (e.row !== null && d < e.row) (e.row -= 1), (changed = true);
+      }
+    }
+    return changed ? { type: 'range', a, b } : null;
+  });
+}
+
 export class FormulaEvalError extends Error {
   code: string;
   constructor(code: string) {
@@ -114,6 +293,10 @@ function tokenize(src: string): Token[] {
       i++;
       continue;
     }
+    // Left behind by rewriteFormulaRefsForDelete when a referenced row/column was removed.
+    if (ch === '#' && src.slice(i).toUpperCase().startsWith('#REF!')) {
+      throw new FormulaEvalError('#REF!');
+    }
     throw new FormulaEvalError('#ERROR!');
   }
   return tokens;
@@ -135,6 +318,12 @@ interface EvalContext {
   doc: TableDocument;
   refs: RefMaps;
   visiting: Set<string>;
+  /**
+   * `rowId:colId` key of the cell whose formula is currently being evaluated. Whole-column
+   * ranges (C:C and mixed C1:C) skip this cell so `=SUM(B:B)` can live inside column B without
+   * counting itself or tripping the circular check.
+   */
+  current?: string;
 }
 
 /** Resolves a cell to a number, recursively evaluating nested formulas. Returns null for blank/non-numeric cells. */
@@ -149,9 +338,12 @@ function resolveCellOrNull(ctx: EvalContext, col: number, row: number): number |
   if (!raw.trim()) return null;
   if (isFormulaValue(raw)) {
     ctx.visiting.add(key);
+    const prevCurrent = ctx.current;
+    ctx.current = key;
     try {
       return evaluateExpression(raw.trim().slice(1), ctx);
     } finally {
+      ctx.current = prevCurrent;
       ctx.visiting.delete(key);
     }
   }
@@ -164,7 +356,7 @@ function resolveCellStrict(ctx: EvalContext, col: number, row: number): number {
   return value;
 }
 
-function expandRange(ctx: EvalContext, a: CellRef, b: CellRef): number[] {
+function expandRange(ctx: EvalContext, a: CellRef, b: CellRef, skipSelf = false): number[] {
   const colStart = Math.min(a.col, b.col);
   const colEnd = Math.max(a.col, b.col);
   const rowStart = Math.min(a.row, b.row);
@@ -172,6 +364,10 @@ function expandRange(ctx: EvalContext, a: CellRef, b: CellRef): number[] {
   const values: number[] = [];
   for (let r = rowStart; r <= rowEnd; r++) {
     for (let c = colStart; c <= colEnd; c++) {
+      if (skipSelf && ctx.current !== undefined) {
+        const key = `${ctx.refs.rowIdByIndex[r]}:${ctx.refs.colIdByIndex[c]}`;
+        if (key === ctx.current) continue;
+      }
       const v = resolveCellOrNull(ctx, c, r);
       if (v !== null) values.push(v);
     }
@@ -334,12 +530,13 @@ class Parser {
           if (!endRef && endCol === null) throw new FormulaEvalError('#ERROR!');
           if (maybeRef && endRef) return expandRange(this.ctx, maybeRef, endRef);
           // Whole-column semantics (C:C, A:C, and mixed forms like C1:C): the range covers
-          // every row of the involved columns.
+          // every row of the involved columns — except the formula's own cell, so a total like
+          // =SUM(B:B) can sit inside column B without counting itself.
           const lastRow = this.ctx.doc.rows.length - 1;
           if (lastRow < 0) return [];
           const startCol = maybeRef ? maybeRef.col : maybeCol!;
           const endColIdx = endRef ? endRef.col : endCol!;
-          return expandRange(this.ctx, { col: startCol, row: 0 }, { col: endColIdx, row: lastRow });
+          return expandRange(this.ctx, { col: startCol, row: 0 }, { col: endColIdx, row: lastRow }, true);
         }
         this.pos = savedPos;
       }
@@ -375,7 +572,8 @@ export interface FormulaResult {
 /** Evaluates the formula stored in a given cell (raw value must start with '='). */
 export function evaluateCellFormula(doc: TableDocument, rowId: string, colId: string): FormulaResult {
   const refs = buildRefMaps(doc);
-  const ctx: EvalContext = { doc, refs, visiting: new Set([`${rowId}:${colId}`]) };
+  const self = `${rowId}:${colId}`;
+  const ctx: EvalContext = { doc, refs, visiting: new Set([self]), current: self };
   const rowObj = doc.rows.find((r) => r.id === rowId);
   const raw = rowObj?.cells[colId] ?? '';
   try {

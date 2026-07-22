@@ -43,6 +43,13 @@ export interface SyncChatMessageItem {
   ciphertext: string;
 }
 
+export interface SyncAiSessionItem {
+  session_id: string;
+  ciphertext: string;
+  deleted: boolean;
+  updated_at: string;
+}
+
 /**
  * Thrown when an authenticated endpoint answers 401 — the stored JWT is expired (7-day server
  * TTL) or was invalidated by a JWT_SECRET change. Callers treat this as "session expired": drop
@@ -343,6 +350,33 @@ export class ApiClient {
     this.assertAuthed(res);
     if (!res.ok) throw await this.httpError(res, "GET /sync/chat", "apiClient.syncPullFailed");
     const data = (await res.json()) as { items: SyncChatMessageItem[] };
+    return data.items;
+  }
+
+  async pushAiSession(
+    token: string,
+    sessionId: string,
+    body: { ciphertext: string; updated_at: string; deleted?: boolean },
+  ): Promise<void> {
+    const res = await fetch(this.url(`/api/v1/sync/ai/${sessionId}`), {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(body),
+    });
+    this.assertAuthed(res);
+    if (!res.ok) throw await this.httpError(res, `PUT /sync/ai/${sessionId}`, "apiClient.syncPushFailed");
+  }
+
+  async pullAiSessions(token: string): Promise<SyncAiSessionItem[]> {
+    const res = await fetch(this.url("/api/v1/sync/ai"), {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertAuthed(res);
+    if (!res.ok) throw await this.httpError(res, "GET /sync/ai", "apiClient.syncPullFailed");
+    const data = (await res.json()) as { items: SyncAiSessionItem[] };
     return data.items;
   }
 

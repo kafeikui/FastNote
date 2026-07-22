@@ -213,6 +213,37 @@ app.get('/api/v1/sync/chat', async (req, reply) => {
   };
 });
 
+// AI Workbench sessions: opaque encrypted blobs (encrypted client-side with the vault's notes
+// key — the server never sees plaintext), merged last-writer-wins on `updated_at`.
+app.put<{
+  Params: { sessionId: string };
+  Body: { ciphertext: string; updated_at: string; deleted?: boolean };
+}>('/api/v1/sync/ai/:sessionId', async (req, reply) => {
+  const userId = authUser(req.headers.authorization);
+  if (!userId) return reply.code(401).send({ error: 'unauthorized' });
+  const { sessionId } = req.params;
+  const { ciphertext, updated_at, deleted } = req.body ?? {};
+  if (!ciphertext || !updated_at) {
+    return reply.code(400).send({ error: 'missing fields' });
+  }
+  store.upsertAiSession(userId, sessionId, ciphertext, !!deleted, updated_at);
+  return { ok: true };
+});
+
+app.get('/api/v1/sync/ai', async (req, reply) => {
+  const userId = authUser(req.headers.authorization);
+  if (!userId) return reply.code(401).send({ error: 'unauthorized' });
+  const rows = store.listAiSessions(userId);
+  return {
+    items: rows.map((r) => ({
+      session_id: r.session_id,
+      ciphertext: r.ciphertext,
+      deleted: r.deleted === 1,
+      updated_at: r.updated_at,
+    })),
+  };
+});
+
 app.get('/health', async () => ({ status: 'ok' }));
 
 app.put<{ Body: { identity_pubkey: string; exchange_pubkey: string } }>(

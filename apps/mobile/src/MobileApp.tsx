@@ -426,6 +426,13 @@ export function MobileApp() {
       const client = new SyncClient(new ApiClient(serverUrl(), locale), userSession);
       const { pulled } = await client.syncChatMessages(storage);
       if (pulled > 0 && keysRef.current === derived) await loadChatHistoryFor(derived);
+      // AI sessions ride the same account sync (encrypted whole-node blobs, LWW).
+      const ai = await client.syncAiSessions(storage, derived.notesKey);
+      if (ai.pulled > 0 && keysRef.current === derived) {
+        const list = await storage.listAiSessions(derived.notesKey);
+        setAiSessions(list);
+        setActiveAiSessionId((cur) => (cur && list.some((n) => n.id === cur) ? cur : null));
+      }
     } catch (err) {
       console.warn('[chat] history sync failed', err);
     }
@@ -772,6 +779,10 @@ export function MobileApp() {
 
   const handleLock = () => {
     aiAbortRef.current?.abort();
+    if (aiPushTimerRef.current) {
+      clearTimeout(aiPushTimerRef.current);
+      aiPushTimerRef.current = null;
+    }
     imRef.current?.disconnect();
     imRef.current = null;
     keysRef.current = null;
@@ -794,9 +805,28 @@ export function MobileApp() {
   };
 
   // --- AI session CRUD ----------------------------------------------------------
+
+  /** Debounced background push of locally-changed AI sessions (no-op while logged out). */
+  const aiPushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleAiSessionPush = () => {
+    if (aiPushTimerRef.current) clearTimeout(aiPushTimerRef.current);
+    aiPushTimerRef.current = setTimeout(() => {
+      aiPushTimerRef.current = null;
+      const k = keysRef.current;
+      const s = sessionRef.current;
+      if (!k || !s) return;
+      const client = new SyncClient(new ApiClient(serverUrl(), locale), s);
+      void client.syncAiSessions(storage, k.notesKey).catch((err) => {
+        console.warn('[ai] session sync failed (will retry on next sync)', err);
+      });
+    }, 5000);
+  };
+
   const persistAiSession = (node: AiSessionNode) => {
     const k = keysRef.current;
-    if (k) void storage.saveAiSession(node, k.notesKey);
+    if (!k) return;
+    void storage.saveAiSession(node, k.notesKey);
+    scheduleAiSessionPush();
   };
 
   const handleAiCreate = (kind: 'folder' | 'session', parentId: string | null) => {
@@ -855,6 +885,7 @@ export function MobileApp() {
     setAiSessions((prev) => prev.filter((s) => !doomed.has(s.id)));
     for (const doomedId of doomed) void storage.deleteAiSession(doomedId);
     setActiveAiSessionId((cur) => (cur && doomed.has(cur) ? null : cur));
+    scheduleAiSessionPush();
   };
 
   const handleAiMessagesChange = (sessionId: string, messages: AiMessage[]) => {

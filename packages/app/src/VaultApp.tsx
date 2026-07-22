@@ -291,6 +291,8 @@ export function VaultApp() {
   // Re-renders the logs modal after clearing (the buffer itself lives outside React).
   const [, setLogsTick] = useState(0);
   const [session, setSession] = useState<UserSession | null>(() => loadSession(loadStorageNamespace()));
+  const sessionRef = useRef<UserSession | null>(null);
+  sessionRef.current = session;
   // True after any authenticated call answered 401: the stored token is dead (7-day server TTL
   // or JWT_SECRET rotation), so the "logged in" state it represented is a lie. We drop the
   // session immediately and show a banner prompting a fresh login instead.
@@ -940,6 +942,22 @@ export function VaultApp() {
     [loadSearchSnapshotAsync, rebuildSearchIndex],
   );
 
+  /**
+   * Settings-triggered maintenance: drops the persisted snapshot + fingerprint (which may have
+   * gone stale and be serving entries for documents that no longer exist), then rebuilds the
+   * index from the live notes in the background. The fresh snapshot is written at the next lock.
+   */
+  const handleRebuildSearchIndex = useCallback(() => {
+    const k = keysRef.current;
+    if (!k) return;
+    void (async () => {
+      await storage.setMeta(META_KEYS.searchIndexSnapshot, '');
+      await storage.setMeta(META_KEYS.searchIndexFingerprint, '');
+      prepareSearchIndexInBackground(k, notesRef.current);
+      console.info('[FastNote] search index cache cleared, rebuild started');
+    })();
+  }, [storage, prepareSearchIndexInBackground]);
+
   const loadExchangePrivate = async (masterKey: Uint8Array) => {
     const wrapped = await storage.getMeta(META_KEYS.wrappedExchangeKey);
     if (!wrapped) return null;
@@ -1165,6 +1183,12 @@ export function VaultApp() {
               const client = new SyncClient(new ApiClient(serverUrl, locale), sessionAtUnlock);
               const { pulled } = await client.syncChatMessages(storage);
               if (pulled > 0 && keysRef.current === derived) await loadChatHistory(derived);
+              const ai = await client.syncAiSessions(storage, derived.notesKey);
+              if (ai.pulled > 0 && keysRef.current === derived) {
+                const aiList = await storage.listAiSessions(derived.notesKey);
+                setAiSessions(aiList);
+                setActiveAiSessionId((cur) => (cur && aiList.some((n) => n.id === cur) ? cur : null));
+              }
             } catch (err) {
               console.warn('[FastNote] chat: history sync after unlock failed', err);
             }
@@ -1225,6 +1249,10 @@ export function VaultApp() {
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     try {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+      if (aiPushTimerRef.current) {
+        clearTimeout(aiPushTimerRef.current);
+        aiPushTimerRef.current = null;
+      }
       if (keys) await saveSearchSnapshot(keys.indexKey, notes);
       imRef.current?.disconnect();
       imRef.current = null;
@@ -2045,10 +2073,40 @@ export function VaultApp() {
 
   // --- AI Workbench session tree -------------------------------------------------------------
 
+  /**
+   * Debounced background push of locally-changed AI sessions, so edits reach the account without
+   * waiting for a manual sync. Also applies anything pulled back (LWW) to the tree. No-op while
+   * logged out — pending rows are picked up by the next login/unlock/manual sync.
+   */
+  const aiPushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleAiSessionPush = () => {
+    if (aiPushTimerRef.current) clearTimeout(aiPushTimerRef.current);
+    aiPushTimerRef.current = setTimeout(() => {
+      aiPushTimerRef.current = null;
+      const k = keysRef.current;
+      const s = sessionRef.current;
+      if (!k || !s) return;
+      void (async () => {
+        try {
+          const client = new SyncClient(new ApiClient(serverUrl, locale), s);
+          const { pulled } = await client.syncAiSessions(storage, k.notesKey);
+          if (pulled > 0 && keysRef.current === k) {
+            const list = await storage.listAiSessions(k.notesKey);
+            setAiSessions(list);
+            setActiveAiSessionId((cur) => (cur && list.some((n) => n.id === cur) ? cur : null));
+          }
+        } catch (err) {
+          console.warn('[FastNote] ai: session sync failed (will retry on next sync)', err);
+        }
+      })();
+    }, 5000);
+  };
+
   const persistAiSession = (node: AiSessionNode) => {
     const k = keysRef.current;
     if (!k) return;
     void storage.saveAiSession(node, k.notesKey);
+    scheduleAiSessionPush();
   };
 
   const handleAiPanelToggle = () => {
@@ -2129,6 +2187,7 @@ export function VaultApp() {
     setAiSessions((prev) => prev.filter((s) => !doomed.has(s.id)));
     for (const doomedId of doomed) void storage.deleteAiSession(doomedId);
     setActiveAiSessionId((cur) => (cur && doomed.has(cur) ? null : cur));
+    scheduleAiSessionPush();
   };
 
   const handleAiMessagesChange = (sessionId: string, messages: AiMessage[]) => {
@@ -2868,6 +2927,15 @@ export function VaultApp() {
         const client = new SyncClient(api, s);
         const { pulled } = await client.syncChatMessages(storage);
         if (pulled > 0 && keysRef.current) await loadChatHistory(keysRef.current);
+        const k = keysRef.current;
+        if (k) {
+          const ai = await client.syncAiSessions(storage, k.notesKey);
+          if (ai.pulled > 0 && keysRef.current === k) {
+            const aiList = await storage.listAiSessions(k.notesKey);
+            setAiSessions(aiList);
+            setActiveAiSessionId((cur) => (cur && aiList.some((n) => n.id === cur) ? cur : null));
+          }
+        }
       } catch (err) {
         console.warn('[FastNote] chat: history sync after login failed', err);
       }
@@ -2890,6 +2958,13 @@ export function VaultApp() {
       }
       await saveSearchSnapshot(keys.indexKey, result.notes);
       await loadChatHistory(keys);
+      if (result.result.aiPulled > 0) {
+        // AI sessions pulled from another device: refresh the tree, keeping the active session
+        // when it still exists.
+        const list = await storage.listAiSessions(keys.notesKey);
+        setAiSessions(list);
+        setActiveAiSessionId((cur) => (cur && list.some((s) => s.id === cur) ? cur : null));
+      }
       const { pushed, pulled, conflicts, attachmentsPushed, attachmentsPulled } = result.result;
       setSyncStatus(
         t('vaultApp.syncResult', {
@@ -3035,10 +3110,18 @@ export function VaultApp() {
   };
   const contentForGroup = (group: TabGroupState) =>
     notes.find((n) => n.id === group.activeTabId && isEditableContentNode(n)) ?? null;
-  const searchResults = useMemo(
-    () => (searchQuery ? searchIndexRef.current.search(searchQuery) : []),
-    [searchQuery, searchTick],
-  );
+  const searchResults = useMemo(() => {
+    if (!searchQuery) return [];
+    // A stale snapshot can contain entries for documents that no longer exist (e.g. deleted on
+    // another device); never surface those — and never show the same note twice.
+    const liveIds = new Set(notes.filter((n) => !n.deleted).map((n) => n.id));
+    const seen = new Set<string>();
+    return searchIndexRef.current.search(searchQuery).filter((r) => {
+      if (!liveIds.has(r.id) || seen.has(r.id)) return false;
+      seen.add(r.id);
+      return true;
+    });
+  }, [searchQuery, searchTick, notes]);
 
   /**
    * After a global-search result is opened: switch that note's group to the source view and open
@@ -3821,6 +3904,7 @@ export function VaultApp() {
           }}
           onSync={() => void handleSync()}
           onAbout={() => { setShowSettings(false); setShowAbout(true); }}
+          onRebuildSearchIndex={handleRebuildSearchIndex}
         />
       )}
       {showAuth && <AuthModal onClose={() => setShowAuth(false)} onRegister={handleRegister} onLogin={handleLogin} />}

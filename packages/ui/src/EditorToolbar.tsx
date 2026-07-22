@@ -50,10 +50,14 @@ export function EditorToolbar({ editor, mode, enableMath = false }: EditorToolba
   const confirmPending = (value: string) => {
     const v = value.trim();
     setPending(null);
-    if (!v) return;
     if (pending === 'link') {
-      editor.chain().focus().setLink({ href: v }).run();
-    } else if (pending === 'inlineMath') {
+      // Confirming an empty URL removes the link (the natural way to "unlink" from this bar).
+      if (!v) editor.chain().focus().unsetLink().run();
+      else editor.chain().focus().setLink({ href: v }).run();
+      return;
+    }
+    if (!v) return;
+    if (pending === 'inlineMath') {
       editor.chain().focus().insertInlineMath({ latex: v }).run();
     } else if (pending === 'blockMath') {
       editor.chain().focus().insertBlockMath({ latex: v }).run();

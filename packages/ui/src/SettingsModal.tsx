@@ -77,6 +77,8 @@ interface SettingsModalProps {
   onLogout: () => void;
   onSync: () => void;
   onAbout: () => void;
+  /** Drops the persisted search-index snapshot and rebuilds the index from the live notes. */
+  onRebuildSearchIndex: () => void;
 }
 
 export function SettingsModal({
@@ -112,6 +114,7 @@ export function SettingsModal({
   onLogout,
   onSync,
   onAbout,
+  onRebuildSearchIndex,
 }: SettingsModalProps) {
   const t = useT();
   const [tab, setTab] = useState<SettingsTab>('general');
@@ -133,6 +136,7 @@ export function SettingsModal({
   const [aiSaved, setAiSaved] = useState(false);
   const [proxyDraft, setProxyDraft] = useState<ProxySettings>(proxySettings);
   const [proxySaved, setProxySaved] = useState(false);
+  const [indexRebuildStarted, setIndexRebuildStarted] = useState(false);
 
   const SHORTCUT_LABELS: Record<ShortcutAction, string> = {
     renameNote: t('settingsModal.shortcuts.renameNote'),
@@ -539,6 +543,25 @@ export function SettingsModal({
             <p className="fn-unlock__hint">{t('settingsModal.realStoragePathHint')}</p>
           </label>
         )}
+        <hr />
+        <label className="fn-field">
+          <span>{t('settingsModal.searchIndexLabel')}</span>
+          <p className="fn-unlock__hint">{t('settingsModal.searchIndexHint')}</p>
+          <div className="fn-modal__actions">
+            <button
+              type="button"
+              onClick={() => {
+                onRebuildSearchIndex();
+                setIndexRebuildStarted(true);
+                setTimeout(() => setIndexRebuildStarted(false), 2500);
+              }}
+            >
+              {indexRebuildStarted
+                ? t('settingsModal.searchIndexRebuildStarted')
+                : t('settingsModal.rebuildSearchIndex')}
+            </button>
+          </div>
+        </label>
     </>
   );
 

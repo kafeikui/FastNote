@@ -65,6 +65,11 @@ interface StoredAiSession {
   payloadNonce: string;
   sortOrder: number;
   updatedAt: string;
+  /** Already pushed to the cloud AI-blob store. Undefined on rows created before cloud sync
+   * existed — which is exactly the "not yet synced" default we want. */
+  synced?: boolean;
+  /** Deletion tombstone, kept until the deletion has been pushed to the server. */
+  deleted?: boolean;
 }
 
 interface FastNoteDB extends DBSchema {
@@ -206,6 +211,16 @@ export interface StorageAdapter {
   listAiSessions(notesKey: Uint8Array): Promise<AiSessionNode[]>;
   saveAiSession(session: AiSessionNode, notesKey: Uint8Array): Promise<void>;
   deleteAiSession(id: string): Promise<void>;
+  /** Not-yet-pushed AI sessions (edits and deletion tombstones alike). */
+  listPendingAiSessions(notesKey: Uint8Array): Promise<Array<{ session: AiSessionNode; deleted: boolean }>>;
+  /** Marks a session as pushed; tombstone rows are hard-deleted (the server remembers). */
+  markAiSessionSynced(id: string): Promise<void>;
+  /** Local sync metadata for pull-merge decisions (null when the row doesn't exist). */
+  getAiSessionSyncMeta(id: string): Promise<{ updatedAt: string; deleted: boolean } | null>;
+  /** Writes a session pulled from the server (arrives already newer — LWW decided by the caller). */
+  saveAiSessionFromRemote(session: AiSessionNode, notesKey: Uint8Array): Promise<void>;
+  /** Hard-deletes a row without leaving a tombstone (remote deletions). */
+  purgeAiSession(id: string): Promise<void>;
 }
 
 function pack(payload: EncryptedPayload): { enc: string; nonce: string } {
@@ -828,28 +843,34 @@ export class WebStorageAdapter implements StorageAdapter {
     await db.delete('chat_attachments_local', id);
   }
 
+  private async decodeAiRow(row: StoredAiSession, notesKey: Uint8Array): Promise<AiSessionNode> {
+    return {
+      id: row.id,
+      parentId: row.parentId,
+      kind: row.kind,
+      title: await decryptStringNative(notesKey, unpack(row.titleEnc, row.titleNonce)),
+      messages:
+        row.kind === 'session'
+          ? (JSON.parse(
+              await decryptStringNative(notesKey, unpack(row.payloadEnc, row.payloadNonce)),
+            ) as AiMessage[])
+          : [],
+      sortOrder: row.sortOrder,
+      updatedAt: row.updatedAt,
+    };
+  }
+
   async listAiSessions(notesKey: Uint8Array): Promise<AiSessionNode[]> {
     const db = await this.getDb();
     const rows = await db.getAll('ai_sessions_local');
-    return Promise.all(
-      rows.map(async (row) => ({
-        id: row.id,
-        parentId: row.parentId,
-        kind: row.kind,
-        title: await decryptStringNative(notesKey, unpack(row.titleEnc, row.titleNonce)),
-        messages:
-          row.kind === 'session'
-            ? (JSON.parse(
-                await decryptStringNative(notesKey, unpack(row.payloadEnc, row.payloadNonce)),
-              ) as AiMessage[])
-            : [],
-        sortOrder: row.sortOrder,
-        updatedAt: row.updatedAt,
-      })),
-    );
+    return Promise.all(rows.filter((row) => !row.deleted).map((row) => this.decodeAiRow(row, notesKey)));
   }
 
-  async saveAiSession(session: AiSessionNode, notesKey: Uint8Array): Promise<void> {
+  async saveAiSession(
+    session: AiSessionNode,
+    notesKey: Uint8Array,
+    opts?: { synced?: boolean },
+  ): Promise<void> {
     const title = pack(await encryptStringNative(notesKey, session.title));
     const payload = pack(
       await encryptStringNative(notesKey, JSON.stringify(session.kind === 'session' ? session.messages : [])),
@@ -865,10 +886,58 @@ export class WebStorageAdapter implements StorageAdapter {
       payloadNonce: payload.nonce,
       sortOrder: session.sortOrder,
       updatedAt: session.updatedAt,
+      synced: opts?.synced ?? false,
     });
   }
 
   async deleteAiSession(id: string): Promise<void> {
+    const db = await this.getDb();
+    // Tombstone rather than hard delete, so cloud sync can propagate the deletion; the row is
+    // purged once the tombstone has been pushed (markAiSessionSynced).
+    const row = await db.get('ai_sessions_local', id);
+    if (!row) return;
+    await db.put('ai_sessions_local', {
+      ...row,
+      deleted: true,
+      synced: false,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  async listPendingAiSessions(
+    notesKey: Uint8Array,
+  ): Promise<Array<{ session: AiSessionNode; deleted: boolean }>> {
+    const db = await this.getDb();
+    const rows = await db.getAll('ai_sessions_local');
+    return Promise.all(
+      rows
+        .filter((row) => row.synced !== true)
+        .map(async (row) => ({
+          session: await this.decodeAiRow(row, notesKey),
+          deleted: row.deleted === true,
+        })),
+    );
+  }
+
+  async markAiSessionSynced(id: string): Promise<void> {
+    const db = await this.getDb();
+    const row = await db.get('ai_sessions_local', id);
+    if (!row) return;
+    if (row.deleted) await db.delete('ai_sessions_local', id);
+    else await db.put('ai_sessions_local', { ...row, synced: true });
+  }
+
+  async getAiSessionSyncMeta(id: string): Promise<{ updatedAt: string; deleted: boolean } | null> {
+    const db = await this.getDb();
+    const row = await db.get('ai_sessions_local', id);
+    return row ? { updatedAt: row.updatedAt, deleted: row.deleted === true } : null;
+  }
+
+  async saveAiSessionFromRemote(session: AiSessionNode, notesKey: Uint8Array): Promise<void> {
+    await this.saveAiSession(session, notesKey, { synced: true });
+  }
+
+  async purgeAiSession(id: string): Promise<void> {
     const db = await this.getDb();
     await db.delete('ai_sessions_local', id);
   }
