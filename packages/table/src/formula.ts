@@ -21,10 +21,15 @@ export function parseNumericValue(raw: string): number | null {
 /** Formats a numeric value according to a column's number format (thousand separators + fixed decimals). */
 export function formatColumnNumber(n: number, format: TableColumnFormat): string {
   const decimals = Math.min(Math.max(format.decimals ?? 2, 0), 6);
-  const formatted = n.toLocaleString('en-US', {
+  // Percent: 0.5 displays as 50% (Excel semantics — the raw value stays a plain ratio).
+  // The ×100 result is snapped to 15 significant digits so binary float artifacts don't flip
+  // the rounding (1.2345 → 123.44999… → would show 123.4% instead of 123.5%).
+  const scaled = format.kind === 'percent' ? Number((n * 100).toPrecision(15)) : n;
+  const formatted = scaled.toLocaleString('en-US', {
     minimumFractionDigits: decimals,
     maximumFractionDigits: decimals,
   });
+  if (format.kind === 'percent') return `${formatted}%`;
   return format.kind === 'currency' ? `${format.symbol ?? '$'}${formatted}` : formatted;
 }
 

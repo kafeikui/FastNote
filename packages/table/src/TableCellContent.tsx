@@ -40,6 +40,10 @@ interface TableCellContentProps {
   selected?: boolean;
   onCellMouseDown?: (e: MouseEvent) => void;
   onCellMouseEnter?: () => void;
+  /** Double click enters edit mode (Excel-style; single click only selects). */
+  onCellDoubleClick?: (e: MouseEvent) => void;
+  /** Right click opens the grid context menu (copy / copy values / paste / clear). */
+  onCellContextMenu?: (e: MouseEvent) => void;
   rowIdx?: number;
   colIdx?: number;
   rowId: string;
@@ -67,6 +71,8 @@ function TableCellContent({
   selected,
   onCellMouseDown,
   onCellMouseEnter,
+  onCellDoubleClick,
+  onCellContextMenu,
   rowIdx,
   colIdx,
   rowId,
@@ -134,6 +140,8 @@ function TableCellContent({
       className={wrapperClass}
       onMouseDown={onCellMouseDown}
       onMouseEnter={onCellMouseEnter}
+      onDoubleClick={onCellDoubleClick}
+      onContextMenu={onCellContextMenu}
       onDragOver={handleCellDragOver}
       onDrop={handleCellDrop}
       data-row-idx={rowIdx}
@@ -196,6 +204,11 @@ function TableCellContent({
             style={textStyle}
             rows={Math.max(1, shown.split('\n').length)}
             value={shown}
+            // Excel-style: idle cells are read-only (single click selects; editing starts on
+            // double click / Enter / typing). Read-only also keeps the desktop app's native
+            // context menu away so the grid's own right-click menu can take over; once
+            // focused, the cell becomes editable and text-level menus work as usual.
+            readOnly={!editing}
             onFocus={() => {
               setEditing(true);
               onFocus();

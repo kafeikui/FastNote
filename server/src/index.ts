@@ -63,7 +63,7 @@ app.post<{ Body: { username: string; password_proof: string; identity_pubkey?: s
     } catch {
       return reply.code(409).send({ error: 'username taken' });
     }
-    const token = jwt.sign({ sub: id, username }, JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ sub: id, username }, JWT_SECRET, { expiresIn: '30d' });
     return { user_id: id, device_id: randomUUID(), token };
   },
 );
@@ -76,7 +76,7 @@ app.post<{ Body: { username: string; password_proof: string } }>(
     if (!row || row.password_verifier !== password_proof) {
       return reply.code(401).send({ error: 'invalid credentials' });
     }
-    const token = jwt.sign({ sub: row.id, username }, JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ sub: row.id, username }, JWT_SECRET, { expiresIn: '30d' });
     return { user_id: row.id, device_id: randomUUID(), token };
   },
 );

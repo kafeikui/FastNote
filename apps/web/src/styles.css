@@ -2239,6 +2239,46 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   border-radius: calc(var(--radius) - 2px);
 }
 
+/* Idle (read-only) cells behave like spreadsheet cells: no text cursor until editing starts. */
+.fn-table-cell__text[readonly] {
+  cursor: default;
+  user-select: none;
+}
+
+/* Right-click menu on grid cells (copy / copy values / paste / clear). */
+.fn-table__ctx-menu {
+  position: fixed;
+  z-index: 200;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 0.25rem;
+  min-width: 9rem;
+}
+
+.fn-table__ctx-menu button {
+  display: block;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.85rem;
+  padding: 0.35rem 0.75rem;
+  border-radius: calc(var(--radius) - 2px);
+  cursor: pointer;
+  text-align: left;
+}
+
+.fn-table__ctx-menu button:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.fn-table__ctx-menu button:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
 .fn-table__col-head-row {
   display: flex;
   align-items: center;

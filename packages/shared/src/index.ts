@@ -45,7 +45,7 @@ export interface SyncNotePayload {
 
 /** Column-level numeric display format; raw cell values stay untouched. */
 export interface TableColumnFormat {
-  kind: 'number' | 'currency';
+  kind: 'number' | 'currency' | 'percent';
   /** Fixed number of decimal places (0-6). */
   decimals: number;
   /** Currency prefix symbol (only used when kind is 'currency'). */
@@ -70,6 +70,10 @@ export interface TableCellStyle {
   color?: string;
   /** Cell background fill, CSS color string. */
   fill?: string;
+  /** Horizontal text alignment; unset means the default (left, right for formulas). */
+  align?: 'left' | 'center' | 'right';
+  /** Vertical alignment of the cell content; unset means the default (middle). */
+  valign?: 'top' | 'middle' | 'bottom';
 }
 
 export interface TableRow {

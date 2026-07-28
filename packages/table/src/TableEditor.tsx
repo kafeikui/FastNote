@@ -541,12 +541,27 @@ export function TableEditor({
     return { start, length: refText.length, text: refText, anchor };
   };
 
+  /** True when the given grid cell's textarea currently has focus (i.e. is being edited). */
+  const isEditingCell = (rowIdx: number, colIdx: number): boolean => {
+    const el = document.activeElement;
+    return (
+      el instanceof HTMLTextAreaElement &&
+      Number(el.dataset.rowIdx) === rowIdx &&
+      Number(el.dataset.colIdx) === colIdx
+    );
+  };
+
   // Main button only: a right-click must keep the current multi-cell selection (so the context
   // menu's Copy targets it) and must never arm drag-select — the context menu swallows the
   // matching mouseup, which would leave isSelecting stuck on until the next click drags out a
   // bogus selection.
   const handleCellMouseDown = (e: MouseEvent, rowIdx: number, colIdx: number) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0) {
+      // Right/middle click must not focus the cell's textarea — focusing is what enters edit
+      // mode, which would swap the grid's context menu for the native text menu.
+      if (!isEditingCell(rowIdx, colIdx)) e.preventDefault();
+      return;
+    }
     const fe = activeFormulaEdit();
     if (fe && (fe.rowIdx !== rowIdx || fe.colIdx !== colIdx)) {
       // Keep focus (and the caret) inside the formula cell; insert a reference instead.
@@ -556,9 +571,50 @@ export function TableEditor({
       formulaPickRef.current = { textarea: fe.textarea, rowId: fe.rowId, colId: fe.colId, ...written };
       return;
     }
+    // Clicking inside the cell that's already being edited keeps native caret placement.
+    if (isEditingCell(rowIdx, colIdx)) return;
+    // Attachment chips keep their native interactions (click actions, HTML5 drag reordering).
+    if ((e.target as HTMLElement).closest?.('.fn-embed-attach')) {
+      setSelAnchor({ rowIdx, colIdx });
+      setSelFocus({ rowIdx, colIdx });
+      return;
+    }
+    // Excel-style: a single click only selects. Block the mousedown from focusing the cell's
+    // textarea, commit any other cell's edit (blur), and keep keyboard focus on the grid so
+    // arrows / Enter / Del / typing keep working.
+    e.preventDefault();
+    const active = document.activeElement;
+    if (active instanceof HTMLTextAreaElement && active.dataset.rowIdx !== undefined) active.blur();
+    containerRef.current?.focus();
+    if (e.shiftKey && selAnchor) {
+      // Shift+click extends the selection from the anchor, spreadsheet-style.
+      setSelFocus({ rowIdx, colIdx });
+      return;
+    }
     setSelAnchor({ rowIdx, colIdx });
     setSelFocus({ rowIdx, colIdx });
     setIsSelecting(true);
+  };
+
+  /** Enters edit mode on a cell: selects it, focuses its textarea and places the caret. */
+  const startEditCell = useCallback((rowIdx: number, colIdx: number, caret: 'end' | 'all' = 'end') => {
+    setSelAnchor({ rowIdx, colIdx });
+    setSelFocus({ rowIdx, colIdx });
+    requestAnimationFrame(() => {
+      const el = tableWrapRef.current?.querySelector<HTMLTextAreaElement>(
+        `textarea[data-row-idx="${rowIdx}"][data-col-idx="${colIdx}"]`,
+      );
+      if (!el) return;
+      el.focus();
+      if (caret === 'all') el.select();
+      else el.setSelectionRange(el.value.length, el.value.length);
+    });
+  }, []);
+
+  const handleCellDoubleClick = (e: MouseEvent, rowIdx: number, colIdx: number) => {
+    if (isEditingCell(rowIdx, colIdx)) return; // already editing: native word-select applies
+    if ((e.target as HTMLElement).closest?.('.fn-embed-attach')) return; // chips: own actions
+    startEditCell(rowIdx, colIdx, 'end');
   };
 
   const handleCellMouseEnter = (rowIdx: number, colIdx: number) => {
@@ -718,6 +774,8 @@ export function TableEditor({
       fontSize: undefined,
       color: undefined,
       fill: undefined,
+      align: undefined,
+      valign: undefined,
     });
     const wholeColumns =
       selectionRange !== null &&
@@ -729,17 +787,29 @@ export function TableEditor({
     emitChange(next);
   };
 
+  /** Cell that toolbar insertions target: the selected cell (Excel-style single-click
+   *  selection), falling back to the last edited cell. */
+  const insertTargetCell = (): { rowId: string; colId: string } | null => {
+    if (selFocus) {
+      const row = displayRows[selFocus.rowIdx];
+      const col = doc.columns[selFocus.colIdx];
+      if (row && col) return { rowId: row.id, colId: col.id };
+    }
+    return focusCell;
+  };
+
   const insertLocalTime = () => {
-    if (!focusCell) {
+    const target = insertTargetCell();
+    if (!target) {
       alert(t('tableEditor.selectCellFirst'));
       return;
     }
-    const row = docRef.current.rows.find((r) => r.id === focusCell.rowId);
-    const cur = row?.cells[focusCell.colId] ?? '';
+    const row = docRef.current.rows.find((r) => r.id === target.rowId);
+    const cur = row?.cells[target.colId] ?? '';
     if (isFormulaValue(cur)) return;
     const now = formatLocalTime(new Date());
     const next = cur.trim() ? `${cur.trim()} ${now}` : now;
-    emitChange(updateCell(docRef.current, focusCell.rowId, focusCell.colId, next));
+    emitChange(updateCell(docRef.current, target.rowId, target.colId, next));
   };
 
   const textStyleFor = (style: TableCellStyle | undefined): CSSProperties | undefined => {
@@ -748,6 +818,7 @@ export function TableEditor({
     if (style.bold) out.fontWeight = 700;
     if (style.fontSize) out.fontSize = `${style.fontSize}px`;
     if (style.color) out.color = style.color;
+    if (style.align) out.textAlign = style.align;
     return Object.keys(out).length > 0 ? out : undefined;
   };
 
@@ -853,19 +924,8 @@ export function TableEditor({
   const rowHeightFor = (rowId: string, docHeight?: number): number | undefined =>
     liveRowHeight?.rowId === rowId ? liveRowHeight.height : docHeight;
 
-  // Multi-cell paste: parses tab/comma/whitespace-separated clipboard text into a grid anchored
-  // at the focused cell, growing the table as needed. Single values keep the browser default.
-  const handleGridPaste = (e: ClipboardEvent<HTMLDivElement>) => {
-    if (!isPlainView) return;
-    const target = e.target as HTMLElement;
-    const rowAttr = target.dataset?.rowIdx;
-    const colAttr = target.dataset?.colIdx;
-    if (rowAttr === undefined || colAttr === undefined) return;
-    const grid = parsePasteGrid(e.clipboardData.getData('text/plain'), delims);
-    if (!grid) return;
-    e.preventDefault();
-    const startRow = Number(rowAttr);
-    const startCol = Number(colAttr);
+  /** Writes a parsed grid into the table starting at (startRow, startCol), growing it as needed. */
+  const applyGridAt = (startRow: number, startCol: number, grid: string[][]) => {
     const width = Math.max(...grid.map((r) => r.length));
     let next = docRef.current;
     while (startCol + width > next.columns.length) next = addColumn(next, locale);
@@ -882,16 +942,116 @@ export function TableEditor({
     emitChange({ ...next, rows });
   };
 
+  // Multi-cell paste: parses tab/comma/whitespace-separated clipboard text into a grid anchored
+  // at the target cell, growing the table as needed. While editing a cell, single values keep
+  // the browser default (insert at caret); with only a selection, they replace the anchor cell.
+  const handleGridPaste = (e: ClipboardEvent<HTMLDivElement>) => {
+    if (!isPlainView) return;
+    const target = e.target as HTMLElement;
+    if (target instanceof HTMLInputElement) return; // filter/rename/symbol inputs: native paste
+    const text = e.clipboardData.getData('text/plain');
+    const rowAttr = target.dataset?.rowIdx;
+    const colAttr = target.dataset?.colIdx;
+    if (rowAttr !== undefined && colAttr !== undefined) {
+      const grid = parsePasteGrid(text, delims);
+      if (!grid) return;
+      e.preventDefault();
+      applyGridAt(Number(rowAttr), Number(colAttr), grid);
+      return;
+    }
+    // No cell being edited (grid container focused): paste replaces content at the selection.
+    const range = selectionRangeRef.current;
+    if (!range || !text) return;
+    e.preventDefault();
+    applyGridAt(range.rowStart, range.colStart, parsePasteGrid(text, delims) ?? [[text]]);
+  };
+
+  /** Context-menu Paste: replaces content starting at the selection's top-left cell. */
+  const pasteIntoSelection = async () => {
+    const range = selectionRangeRef.current;
+    if (!range || !isPlainView) return;
+    let text = '';
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      // Clipboard read denied (e.g. the desktop app) — fall back to the internal copy buffer.
+    }
+    if (!text) text = internalClipboardRef.current ?? '';
+    if (!text) {
+      alert(t('tableEditor.pasteUnavailable'));
+      return;
+    }
+    applyGridAt(range.rowStart, range.colStart, parsePasteGrid(text, delims) ?? [[text]]);
+  };
+
+  /** Clears the values of every cell in the current selection (Del / context-menu Clear). */
+  const clearSelectedCells = useCallback(() => {
+    const range = selectionRangeRef.current;
+    if (!range) return;
+    let next = docRef.current;
+    let changed = false;
+    for (let r = range.rowStart; r <= range.rowEnd; r++) {
+      const row = displayRowsRef.current[r];
+      if (!row) continue;
+      for (let c = range.colStart; c <= range.colEnd; c++) {
+        const col = docRef.current.columns[c];
+        if (!col) continue;
+        if ((next.rows.find((x) => x.id === row.id)?.cells[col.id] ?? '') !== '') {
+          next = updateCell(next, row.id, col.id, '');
+          changed = true;
+        }
+      }
+    }
+    if (changed) emitChange(next);
+  }, [emitChange]);
+
+  // ---- Right-click context menu (copy / copy values / paste / clear) ------------------------
+
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
+
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const close = () => setCtxMenu(null);
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Escape') close();
+    };
+    // The menu itself stops mousedown propagation so its buttons still receive their click.
+    window.addEventListener('mousedown', close);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('mousedown', close);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [ctxMenu]);
+
+  const handleCellContextMenu = (e: MouseEvent, rowIdx: number, colIdx: number) => {
+    // While editing this cell, keep the native text menu (cut/copy/paste inside the textarea).
+    if (isEditingCell(rowIdx, colIdx)) return;
+    e.preventDefault();
+    // Right-clicking outside the current selection retargets it to the clicked cell.
+    if (!isCellSelected(rowIdx, colIdx)) {
+      setSelAnchor({ rowIdx, colIdx });
+      setSelFocus({ rowIdx, colIdx });
+    }
+    containerRef.current?.focus();
+    setCtxMenu({ x: e.clientX, y: e.clientY });
+  };
+
   // Multi-cell copy: a selection spanning more than one cell is copied as tab-separated values
   // (rows newline-separated) — pasteable into Excel/Sheets and back into this table
   // (handleGridPaste splits on tabs first). Formula cells copy their computed value.
   // Copying part of one cell's text still works naturally: clicking into a cell collapses the
   // range to that single cell, so buildRangeTsv() returns null and native copy takes over.
-  /** TSV of the current multi-cell selection, or null when the selection is a single cell/empty. */
-  const buildRangeTsv = (): string | null => {
+  /**
+   * TSV of the current selection. `mode: 'values'` copies computed formula results (the
+   * default, and what Ctrl+C does); `mode: 'raw'` copies formula source so formulas survive a
+   * paste back into a table. Returns null for an empty selection, and — unless `allowSingle`
+   * (context-menu copy) — for single-cell selections, where native copy takes over.
+   */
+  const buildRangeTsv = (mode: 'values' | 'raw' = 'values', allowSingle = false): string | null => {
     const range = selectionRange;
     if (!range) return null;
-    if (range.rowStart === range.rowEnd && range.colStart === range.colEnd) return null;
+    if (!allowSingle && range.rowStart === range.rowEnd && range.colStart === range.colEnd) return null;
     const delimChar = copyDelimiterChar(delims);
     const lines: string[] = [];
     for (let r = range.rowStart; r <= range.rowEnd; r++) {
@@ -905,7 +1065,10 @@ export function TableEditor({
           continue;
         }
         const raw = row.cells[col.id] ?? '';
-        const value = isFormulaValue(raw) ? evaluateCellFormula(doc, row.id, col.id).display : raw;
+        const value =
+          mode === 'values' && isFormulaValue(raw)
+            ? evaluateCellFormula(doc, row.id, col.id).display
+            : raw;
         // Quote cells containing line breaks/delimiters so they round-trip as one cell.
         cells.push(encodeCellForCopy(value, delimChar));
       }
@@ -914,12 +1077,22 @@ export function TableEditor({
     return lines.join('\n');
   };
 
+  /**
+   * Last text this grid copied. The context menu's Paste prefers the real clipboard, but the
+   * renderer may be denied clipboard-read (the desktop app denies all clipboard permissions);
+   * this buffer keeps copy → paste working within the app in that case.
+   */
+  const internalClipboardRef = useRef<string | null>(null);
+
   /** Copy-event path (Ctrl+C inside a cell input, or Copy from a context menu). */
   const handleGridCopy = (e: ClipboardEvent<HTMLDivElement>) => {
+    // Toolbar/filter/rename inputs keep their native copy behavior.
+    if (document.activeElement instanceof HTMLInputElement) return;
     const tsv = buildRangeTsv();
     if (tsv !== null) {
       e.preventDefault();
       e.clipboardData.setData('text/plain', tsv);
+      internalClipboardRef.current = tsv;
       return;
     }
     // Single cell: when the whole multi-line value is selected (focusing a cell selects all),
@@ -938,17 +1111,12 @@ export function TableEditor({
     }
   };
 
-  /**
-   * Keydown fallback for when no cell input is focused (e.g. a whole row/column was selected via
-   * its header) — pressing Mod+C then fires no copy event at all, so we copy through a hidden
-   * textarea + execCommand('copy') (the app's permissionless clipboard-write path).
-   */
-  const copyRangeViaExecCommand = (): boolean => {
-    const tsv = buildRangeTsv();
-    if (tsv === null) return false;
+  /** Writes text to the clipboard through a hidden textarea + execCommand('copy') — the app's
+   *  permissionless clipboard-write path (works despite denied clipboard permissions). */
+  const copyTextToClipboard = (text: string) => {
     const prevFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const ta = document.createElement('textarea');
-    ta.value = tsv;
+    ta.value = text;
     ta.style.position = 'fixed';
     ta.style.opacity = '0';
     document.body.appendChild(ta);
@@ -956,17 +1124,33 @@ export function TableEditor({
     document.execCommand('copy');
     ta.remove();
     prevFocus?.focus();
+    internalClipboardRef.current = text;
+  };
+
+  /**
+   * Keydown fallback for when no cell input is focused (a selected-but-not-editing cell, a
+   * whole row/column selected via its header, or the grid itself holding focus) — pressing
+   * Mod+C then fires no copy event at all. Copies computed values, single cells included
+   * (Excel-style selection means a lone selected cell has no text focus to copy natively).
+   */
+  const copyRangeViaExecCommand = (): boolean => {
+    const tsv = buildRangeTsv('values', true);
+    if (tsv === null) return false;
+    copyTextToClipboard(tsv);
     return true;
   };
 
   const selectColumn = (colIdx: number) => {
     if (displayRows.length === 0) return;
+    // Move keyboard focus to the grid so arrows / Del / copy shortcuts act on the selection.
+    containerRef.current?.focus();
     setSelAnchor({ rowIdx: 0, colIdx });
     setSelFocus({ rowIdx: displayRows.length - 1, colIdx });
   };
 
   const selectRow = (rowIdx: number) => {
     if (doc.columns.length === 0) return;
+    containerRef.current?.focus();
     setSelAnchor({ rowIdx, colIdx: 0 });
     setSelFocus({ rowIdx, colIdx: doc.columns.length - 1 });
   };
@@ -985,13 +1169,20 @@ export function TableEditor({
   /** Set by the Esc-revert path so the following blur doesn't re-finalize the reverted formula. */
   const skipFinalizeRef = useRef(false);
 
-  /** Commits a formula's missing closing parens when the edit ends (Enter / focus moved away). */
+  /**
+   * Tidies a formula when the edit ends (Enter / focus moved away): strips thousand-separator
+   * commas typed inside numbers (`=1,000+5` → `=1000+5`; grouping must be strict 3-digit so
+   * argument commas like `SUM(A1,B2)` are untouched) and appends any missing closing parens.
+   * This only rewrites the stored source — column number formatting is a separate display layer.
+   */
   const finalizeFormulaParens = useCallback(
     (rowId: string, colId: string) => {
       const raw = docRef.current.rows.find((r) => r.id === rowId)?.cells[colId] ?? '';
       if (!isFormulaValue(raw)) return;
-      const missing = (raw.match(/\(/g) ?? []).length - (raw.match(/\)/g) ?? []).length;
-      if (missing > 0) emitChange(updateCell(docRef.current, rowId, colId, raw + ')'.repeat(missing)));
+      let next = raw.replace(/\d{1,3}(?:,\d{3})+(?:\.\d+)?/g, (m) => m.replace(/,/g, ''));
+      const missing = (next.match(/\(/g) ?? []).length - (next.match(/\)/g) ?? []).length;
+      if (missing > 0) next += ')'.repeat(missing);
+      if (next !== raw) emitChange(updateCell(docRef.current, rowId, colId, next));
     },
     [emitChange],
   );
@@ -1076,17 +1267,17 @@ export function TableEditor({
       e.preventDefault();
       const ids = cellIds();
       if (ids) finalizeFormulaParens(ids.rowId, ids.colId);
-      // Move to the same column on the next visible row, spreadsheet-style. The selection
-      // outline follows along — focusCellInput alone only moves the text caret.
+      // Excel-style: Enter commits the edit and moves the *selection* down one row without
+      // opening the next cell for editing (press Enter again — or type — to edit it). Keyboard
+      // focus returns to the grid so arrows / Del / typing keep working.
+      (e.target as HTMLTextAreaElement).blur();
+      containerRef.current?.focus();
       if (rowIdx + 1 < displayRows.length) {
         setSelAnchor({ rowIdx: rowIdx + 1, colIdx });
         setSelFocus({ rowIdx: rowIdx + 1, colIdx });
-        focusCellInput(rowIdx + 1, colIdx);
       } else {
-        // Last row: end the edit but keep keyboard focus on the grid, otherwise focus falls to
-        // <body> and Shift+Arrow (move) / Alt+Arrow (swap) / Esc stop working after Enter.
-        (e.target as HTMLTextAreaElement).blur();
-        containerRef.current?.focus();
+        setSelAnchor({ rowIdx, colIdx });
+        setSelFocus({ rowIdx, colIdx });
       }
     },
     [displayRows.length, focusCellInput, emitChange, finalizeFormulaParens],
@@ -1110,17 +1301,24 @@ export function TableEditor({
 
   const insertAttachmentText = useCallback(
     (ref: string) => {
-      if (!focusCell) {
+      let target: { rowId: string; colId: string } | null = null;
+      if (selFocus) {
+        const row = displayRows[selFocus.rowIdx];
+        const col = doc.columns[selFocus.colIdx];
+        if (row && col) target = { rowId: row.id, colId: col.id };
+      }
+      if (!target) target = focusCell;
+      if (!target) {
         alert(t('tableEditor.selectCellFirst'));
         return;
       }
-      const row = doc.rows.find((r) => r.id === focusCell.rowId);
-      const cur = row?.cells[focusCell.colId] ?? '';
+      const row = doc.rows.find((r) => r.id === target.rowId);
+      const cur = row?.cells[target.colId] ?? '';
       if (isFormulaValue(cur)) return;
       const next = cur.trim() ? `${cur.trim()} ${ref}` : ref;
-      emitChange(updateCell(doc, focusCell.rowId, focusCell.colId, next));
+      emitChange(updateCell(doc, target.rowId, target.colId, next));
     },
-    [doc, focusCell, emitChange, t],
+    [doc, focusCell, selFocus, displayRows, emitChange, t],
   );
 
   const insertAttachment = (att: NoteAttachment) => {
@@ -1286,6 +1484,9 @@ export function TableEditor({
       const fromCol = doc.columns[range.colStart];
       const toCol = doc.columns[targetCol];
       if (!fromRow || !toRow || !fromCol || !toCol) return false;
+      // Whether the swap started from inside the cell's editor (vs. a mere selection) decides
+      // if the moved cell should stay in edit mode afterwards.
+      const wasEditing = isEditingCell(range.rowStart, range.colStart);
       emitChange(
         swapCells(
           docRef.current,
@@ -1295,13 +1496,36 @@ export function TableEditor({
       );
       setSelAnchor({ rowIdx: targetRow, colIdx: targetCol });
       setSelFocus({ rowIdx: targetRow, colIdx: targetCol });
-      requestAnimationFrame(() => focusCellInput(targetRow, targetCol));
+      if (wasEditing) requestAnimationFrame(() => focusCellInput(targetRow, targetCol));
       return true;
     }
     return false;
   };
 
   const handleContainerKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    // Keys that drive the grid (arrows / Enter / Del / typing) only apply when the key wasn't
+    // pressed inside an interactive element — while editing a cell (or using a filter input /
+    // toolbar select or button) they keep their native behavior. This checks the event target
+    // (the element focused when the key was pressed), not document.activeElement: the cell-level
+    // Enter handler blurs the cell and refocuses the grid *before* the event bubbles up here,
+    // so activeElement would wrongly report "grid" and re-open the just-committed cell.
+    const targetEl = e.target;
+    const inTextField =
+      targetEl instanceof HTMLInputElement ||
+      targetEl instanceof HTMLTextAreaElement ||
+      targetEl instanceof HTMLSelectElement ||
+      targetEl instanceof HTMLButtonElement;
+    const arrowKey =
+      e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight';
+    const clampPos = (rowIdx: number, colIdx: number): CellPos => ({
+      rowIdx: Math.min(Math.max(rowIdx, 0), displayRows.length - 1),
+      colIdx: Math.min(Math.max(colIdx, 0), doc.columns.length - 1),
+    });
+    const arrowDelta = (key: string) => ({
+      dr: key === 'ArrowUp' ? -1 : key === 'ArrowDown' ? 1 : 0,
+      dc: key === 'ArrowLeft' ? -1 : key === 'ArrowRight' ? 1 : 0,
+    });
+
     // Esc with a selection but no cell being edited (e.g. a row/column selected via its
     // header): drop the selection entirely. The editing case is handled in handleCellKeyDown,
     // which stops propagation.
@@ -1312,30 +1536,30 @@ export function TableEditor({
       setFocusCell(null);
       return;
     }
-    // Shift+Arrow with a selection but no focused cell input: move the selection to the
-    // adjacent cell and start editing it (mirrors the in-cell behavior).
-    if (
-      e.shiftKey &&
-      !e.ctrlKey &&
-      !e.metaKey &&
-      !e.altKey &&
-      (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') &&
-      selFocus &&
-      !(document.activeElement instanceof HTMLTextAreaElement &&
-        (document.activeElement as HTMLTextAreaElement).dataset.rowIdx !== undefined)
-    ) {
-      const targetRow = Math.min(
-        Math.max(selFocus.rowIdx + (e.key === 'ArrowUp' ? -1 : e.key === 'ArrowDown' ? 1 : 0), 0),
-        displayRows.length - 1,
-      );
-      const targetCol = Math.min(
-        Math.max(selFocus.colIdx + (e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0), 0),
-        doc.columns.length - 1,
-      );
+    // Excel-style keyboard selection (only when the grid itself holds focus):
+    // plain arrows move the selected cell, Shift+Arrow extends the selection from the anchor.
+    if (arrowKey && !e.ctrlKey && !e.metaKey && !e.altKey && selFocus && !inTextField) {
       e.preventDefault();
-      setSelAnchor({ rowIdx: targetRow, colIdx: targetCol });
-      setSelFocus({ rowIdx: targetRow, colIdx: targetCol });
-      focusCellInput(targetRow, targetCol);
+      const { dr, dc } = arrowDelta(e.key);
+      const target = clampPos(selFocus.rowIdx + dr, selFocus.colIdx + dc);
+      if (e.shiftKey) {
+        setSelFocus(target);
+      } else {
+        setSelAnchor(target);
+        setSelFocus(target);
+      }
+      return;
+    }
+    // Enter with a selected cell starts editing it (caret at the end, Excel F2-style).
+    if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && selFocus && !inTextField) {
+      e.preventDefault();
+      startEditCell(selFocus.rowIdx, selFocus.colIdx, 'end');
+      return;
+    }
+    // Del (Backspace on mac keyboards) clears the contents of the selected cells.
+    if ((e.key === 'Delete' || e.key === 'Backspace') && selectionRange && !inTextField) {
+      e.preventDefault();
+      clearSelectedCells();
       return;
     }
     if (
@@ -1394,11 +1618,39 @@ export function TableEditor({
       !(document.activeElement instanceof HTMLTextAreaElement)
     ) {
       if (copyRangeViaExecCommand()) e.preventDefault();
+      return;
+    }
+    // Excel-style type-to-edit: with a cell selected (grid focused), typing a printable
+    // character replaces the cell's content and starts editing. (IME input can't start on the
+    // non-editable grid — double-click or press Enter first for composed input.)
+    if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey && selFocus && !inTextField) {
+      const row = displayRowsRef.current[selFocus.rowIdx];
+      const col = docRef.current.columns[selFocus.colIdx];
+      if (!row || !col) return;
+      e.preventDefault();
+      const prev = docRef.current.rows.find((r) => r.id === row.id)?.cells[col.id] ?? '';
+      const pos = { rowIdx: selFocus.rowIdx, colIdx: selFocus.colIdx };
+      emitChange(updateCell(docRef.current, row.id, col.id, e.key));
+      startEditCell(pos.rowIdx, pos.colIdx, 'end');
+      // startEditCell's focus handler snapshots the *typed* char as the Esc-revert value;
+      // restore the true pre-edit value afterwards (rAFs run in registration order).
+      requestAnimationFrame(() => {
+        editStartValueRef.current = { rowId: row.id, colId: col.id, value: prev };
+      });
     }
   };
 
   return (
-    <div className="fn-table-editor" ref={containerRef} tabIndex={-1} onKeyDown={handleContainerKeyDown}>
+    <div
+      className="fn-table-editor"
+      ref={containerRef}
+      tabIndex={-1}
+      onKeyDown={handleContainerKeyDown}
+      // On the container (not the table wrap) so copy/paste also fire when the grid itself
+      // holds focus (Excel-style selection without an editing cell).
+      onPaste={handleGridPaste}
+      onCopy={handleGridCopy}
+    >
       <div className="fn-table-editor__tools">
         <button type="button" onClick={handleAddColumn}>
           {t('tableEditor.addColumn')}
@@ -1575,6 +1827,32 @@ export function TableEditor({
             </div>
           )}
         </div>
+        <select
+          className="fn-table-fmt__size"
+          title={t('tableEditor.alignH')}
+          value={anchorStyle.align ?? ''}
+          onChange={(e) =>
+            applyStyle({ align: (e.target.value || undefined) as TableCellStyle['align'] })
+          }
+        >
+          <option value="">{t('tableEditor.alignHDefault')}</option>
+          <option value="left">{t('tableEditor.alignLeft')}</option>
+          <option value="center">{t('tableEditor.alignCenter')}</option>
+          <option value="right">{t('tableEditor.alignRight')}</option>
+        </select>
+        <select
+          className="fn-table-fmt__size"
+          title={t('tableEditor.alignV')}
+          value={anchorStyle.valign ?? ''}
+          onChange={(e) =>
+            applyStyle({ valign: (e.target.value || undefined) as TableCellStyle['valign'] })
+          }
+        >
+          <option value="">{t('tableEditor.alignVDefault')}</option>
+          <option value="top">{t('tableEditor.alignTop')}</option>
+          <option value="middle">{t('tableEditor.alignMiddle')}</option>
+          <option value="bottom">{t('tableEditor.alignBottom')}</option>
+        </select>
         <button type="button" title={t('tableEditor.clearFormatting')} onClick={clearFormatting}>
           <span className="fn-table-fmt__clear">T</span>
         </button>
@@ -1610,7 +1888,7 @@ export function TableEditor({
           title={t('tableEditor.numberFormat')}
           value={anchorColFormat?.kind ?? ''}
           onChange={(e) => {
-            const kind = e.target.value as '' | 'number' | 'currency';
+            const kind = e.target.value as '' | 'number' | 'currency' | 'percent';
             applyColumnFormat((cur) =>
               kind === '' ? undefined : { kind, decimals: cur?.decimals ?? 2, symbol: cur?.symbol ?? '$' },
             );
@@ -1619,6 +1897,7 @@ export function TableEditor({
           <option value="">{t('tableEditor.numberFormatNone')}</option>
           <option value="number">{t('tableEditor.numberFormatNumber')}</option>
           <option value="currency">{t('tableEditor.numberFormatCurrency')}</option>
+          <option value="percent">{t('tableEditor.numberFormatPercent')}</option>
         </select>
         {anchorColFormat && (
           <select
@@ -1635,15 +1914,6 @@ export function TableEditor({
               </option>
             ))}
           </select>
-        )}
-        {anchorColFormat?.kind === 'currency' && (
-          <input
-            className="fn-table-fmt__symbol"
-            title={t('tableEditor.currencySymbol')}
-            value={anchorColFormat.symbol ?? '$'}
-            maxLength={4}
-            onChange={(e) => applyColumnFormat((cur) => (cur ? { ...cur, symbol: e.target.value } : cur))}
-          />
         )}
         <div className="fn-table-palette-wrap">
           <button
@@ -1677,6 +1947,7 @@ export function TableEditor({
           </button>
           {showHelp && (
             <div className="fn-table-palette fn-table-help-pop">
+              <p>{t('tableEditor.helpExcel')}</p>
               <p>{t('tableEditor.formulaHint')}</p>
               <p>{t('tableEditor.helpFormulaRef')}</p>
               {repeatActionShortcut && (
@@ -1729,7 +2000,7 @@ export function TableEditor({
           </>
         )}
       </div>
-      <div className="fn-table-wrap" ref={tableWrapRef} onPaste={handleGridPaste} onCopy={handleGridCopy}>
+      <div className="fn-table-wrap" ref={tableWrapRef}>
         <table className="fn-table">
           <thead>
             <tr>
@@ -1913,11 +2184,18 @@ export function TableEditor({
                   ]
                     .filter(Boolean)
                     .join(' ');
+                  const tdStyle: CSSProperties | undefined =
+                    cellStyle?.fill || cellStyle?.valign
+                      ? {
+                          ...(cellStyle?.fill ? { background: cellStyle.fill } : {}),
+                          ...(cellStyle?.valign ? { verticalAlign: cellStyle.valign } : {}),
+                        }
+                      : undefined;
                   return (
                     <td
                       key={col.id}
                       className={tdClass}
-                      style={cellStyle?.fill ? { background: cellStyle.fill } : undefined}
+                      style={tdStyle}
                       onMouseEnter={() => handleCellMouseEnter(rowIdx, colIdx)}
                     >
                       <TableCellContent
@@ -1943,6 +2221,8 @@ export function TableEditor({
                         selected={isCellSelected(rowIdx, colIdx)}
                         onCellMouseDown={(e) => handleCellMouseDown(e, rowIdx, colIdx)}
                         onCellMouseEnter={() => handleCellMouseEnter(rowIdx, colIdx)}
+                        onCellDoubleClick={(e) => handleCellDoubleClick(e, rowIdx, colIdx)}
+                        onCellContextMenu={(e) => handleCellContextMenu(e, rowIdx, colIdx)}
                         rowIdx={rowIdx}
                         colIdx={colIdx}
                         rowId={row.id}
@@ -1968,6 +2248,54 @@ export function TableEditor({
           </tbody>
         </table>
       </div>
+      {ctxMenu && (
+        <div
+          className="fn-table__ctx-menu"
+          style={{ top: ctxMenu.y, left: ctxMenu.x }}
+          // Keep the window-level dismiss listener from eating the buttons' clicks.
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              const text = buildRangeTsv('raw', true);
+              if (text !== null) copyTextToClipboard(text);
+              setCtxMenu(null);
+            }}
+          >
+            {t('tableEditor.ctxCopy')}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const text = buildRangeTsv('values', true);
+              if (text !== null) copyTextToClipboard(text);
+              setCtxMenu(null);
+            }}
+          >
+            {t('tableEditor.ctxCopyValues')}
+          </button>
+          <button
+            type="button"
+            disabled={!isPlainView}
+            onClick={() => {
+              setCtxMenu(null);
+              void pasteIntoSelection();
+            }}
+          >
+            {t('tableEditor.ctxPaste')}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              clearSelectedCells();
+              setCtxMenu(null);
+            }}
+          >
+            {t('tableEditor.ctxClear')}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
