@@ -19,6 +19,7 @@ function toPayload(note: NoteNode): SyncNotePayload {
     node_type: note.nodeType,
     sort_order: note.sortOrder,
     deleted: note.deleted,
+    trashed: note.trashed === true,
     updated_at: note.updatedAt,
   };
 }
@@ -36,6 +37,7 @@ function fromPayload(noteId: string, payload: SyncNotePayload, version: number, 
     contentHash: hashContent(payload.content_md),
     syncStatus: 'synced',
     deleted: payload.deleted,
+    trashed: payload.trashed === true,
     updatedAt: payload.updated_at,
   };
 }
@@ -74,6 +76,8 @@ interface AiSessionSyncPayload {
   title: string;
   messages: AiMessage[];
   sort_order: number;
+  /** Recycle-bin flag; optional so blobs from older clients decode as "not trashed". */
+  trashed?: boolean;
   updated_at: string;
 }
 
@@ -332,6 +336,7 @@ export class SyncClient {
         title: session.title,
         messages: session.messages,
         sort_order: session.sortOrder,
+        trashed: session.trashed === true,
         updated_at: session.updatedAt,
       };
       await this.api.pushAiSession(this.session.token, session.id, {
@@ -367,6 +372,7 @@ export class SyncClient {
         title: payload.title,
         messages: payload.messages ?? [],
         sortOrder: payload.sort_order,
+        trashed: payload.trashed === true,
         updatedAt: payload.updated_at,
       };
       await storage.saveAiSessionFromRemote(node, notesKey);

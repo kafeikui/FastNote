@@ -14,6 +14,11 @@ export interface NoteNode {
   contentHash: string;
   syncStatus: SyncStatus;
   deleted: boolean;
+  /**
+   * In the recycle bin: hidden from the tree/search/tabs but fully recoverable (content intact,
+   * unlike `deleted`, which is a cleared sync tombstone). Syncs like any other edit.
+   */
+  trashed?: boolean;
   updatedAt: string;
 }
 
@@ -40,6 +45,8 @@ export interface SyncNotePayload {
   node_type: NodeType;
   sort_order: number;
   deleted: boolean;
+  /** Recycle-bin flag; optional so blobs from older clients decode as "not trashed". */
+  trashed?: boolean;
   updated_at: string;
 }
 
@@ -59,6 +66,10 @@ export interface TableColumn {
   width?: number;
   /** Numeric display format; unset means show raw values. */
   format?: TableColumnFormat;
+  /** Presentation of the header name cell (currently align/valign); unset means defaults. */
+  headerStyle?: TableCellStyle;
+  /** Default style for every cell in the column (per-cell and row-level styles win). */
+  cellStyle?: TableCellStyle;
 }
 
 /** Per-cell presentation overrides; absent keys mean "default". */
@@ -83,6 +94,8 @@ export interface TableRow {
   height?: number;
   /** Cell styles keyed by column id (parallel to `cells`). */
   styles?: Record<string, TableCellStyle>;
+  /** Default style for every cell in the row (per-cell styles win; row beats column). */
+  style?: TableCellStyle;
 }
 
 export interface TableDocument {
@@ -213,6 +226,8 @@ export interface AiSessionNode {
   /** Full conversation history; always empty for folders. */
   messages: AiMessage[];
   sortOrder: number;
+  /** In the recycle bin: hidden from the tree but recoverable; syncs like any other edit. */
+  trashed?: boolean;
   updatedAt: string;
 }
 

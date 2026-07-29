@@ -70,6 +70,8 @@ interface StoredAiSession {
   synced?: boolean;
   /** Deletion tombstone, kept until the deletion has been pushed to the server. */
   deleted?: boolean;
+  /** Recycle-bin flag; optional so pre-existing rows read as "not trashed". */
+  trashed?: boolean;
 }
 
 interface FastNoteDB extends DBSchema {
@@ -114,6 +116,8 @@ interface StoredNote {
   contentHash: string;
   syncStatus: 'synced' | 'pending' | 'conflict';
   deleted: number;
+  /** Recycle-bin flag (1 = trashed); optional so pre-existing rows read as "not trashed". */
+  trashed?: number;
   updatedAt: string;
 }
 
@@ -290,6 +294,7 @@ function toNodeStub(r: StoredNote): NoteNode {
     contentHash: r.contentHash,
     syncStatus: r.syncStatus,
     deleted: r.deleted === 1,
+    trashed: r.trashed === 1,
     updatedAt: r.updatedAt,
   };
 }
@@ -313,6 +318,7 @@ async function toStoredRow(note: NoteNode, notesKey: Uint8Array): Promise<Stored
     contentHash: note.contentHash,
     syncStatus: note.syncStatus,
     deleted: note.deleted ? 1 : 0,
+    trashed: note.trashed ? 1 : 0,
     updatedAt: note.updatedAt,
   };
 }
@@ -856,6 +862,7 @@ export class WebStorageAdapter implements StorageAdapter {
             ) as AiMessage[])
           : [],
       sortOrder: row.sortOrder,
+      trashed: row.trashed === true,
       updatedAt: row.updatedAt,
     };
   }
@@ -887,6 +894,7 @@ export class WebStorageAdapter implements StorageAdapter {
       sortOrder: session.sortOrder,
       updatedAt: session.updatedAt,
       synced: opts?.synced ?? false,
+      trashed: session.trashed === true,
     });
   }
 

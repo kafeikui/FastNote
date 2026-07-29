@@ -381,6 +381,24 @@
 - `packages/i18n`：新增 `vaultApp.serverUrlReloadConfirm`（中英文）。
 - `docs/ARCHITECTURE.md` §CSP 段落、`memory-bank/systemPatterns.md` §7 已同步改写，记录了"meta CSP 不能运行时更新"这个教训。
 
+## 本次会话的实质性变更（表头重构 + 回收站，2026-07-04）
+
+- **表头两行结构**（`packages/table/src/TableEditor.tsx`）：
+  - 第一行为控制行：列号按钮（加宽，`flex: 1`）、新的排序按钮（↕/↑/↓，替代原"点击列名排序"）、删除列按钮；✎ 编辑按钮已移除。筛选输入和列宽拖拽手柄保留在第一行（名称行也有一份手柄）。
+  - 第二行为列名行（`fn-table__name-row`/`fn-table__name-cell`）：像单元格一样单击选中（新状态 `selHeaderCol`）、Ctrl+C 复制列名、Del 清空列名（`commitRename` 现在允许空名）、双击或回车进入编辑（`renamingCol` 增加 `selectAll` 标志，编辑框全选）、直接输入字符即开始改名（type-to-edit）、左右方向键在表头间移动、下方向键落入第一行数据格、Esc 取消选中。
+  - 两行表头都是 sticky：第一行高度用 ResizeObserver 测量写入 `--fn-head1-h`（挂在 `.fn-table-wrap` 上），第二行 `top: var(--fn-head1-h)`。**注意不要给第二行 th 写 `position: relative`，会覆盖 sticky。**
+  - 表头选中与网格选区互斥：`handleCellMouseDown`/`selectColumn`/`selectRow` 都会清 `selHeaderCol`。
+  - **整列/整行对齐 + 表头↔首行互转（2026-07-29 第二批）**：`TableColumn.cellStyle?: TableCellStyle`（列级默认样式）与 `TableRow.style?: TableCellStyle`（行级默认样式）加入 shared；渲染优先级 **单元格 > 行 > 列**（TableEditor 单元格渲染处合并出有效样式，`anchorStyle` 也改为有效样式合并）。工具栏对齐下拉在**整列选中**（selectionRange 覆盖全部 displayRows）时走 `applyColumnCellStyle`（写列默认 + 清该列所有单元格级同名 key，未来新行自动继承），**整行选中**走 `applyRowCellStyle`，全选时先列后清行级 key 防遮蔽；其他选区仍走单元格级 `applyStyle`。`clearFormatting` 在整列/整行选区时同时清对应级别默认。注意：bold/fontSize 等仍只有单元格级，`autoFitColumn` 测量不用改。新增 `demoteHeaderToFirstRow`（表头作首行：列名下放为新首行、列名清空、headerStyle → 该行单元格样式、`rewriteDocFormulasForInsert('row', 0)`）；`promoteFirstRowToHeader` 补了 `rewriteDocFormulasForDelete('row', 0)` 和首行 align/valign 吸收进 headerStyle。**语义备忘**：重写后引用统一大写；范围引用在顶部插入按吸收语义扩展（`B1:B3`→`B1:B4`，与"第 1 行上方插行"一致，SUM 忽略文本行，promote/demote 往返可逆）；单引用正常平移（`B1`→`B2`）。i18n 新键 `tableEditor.headerToFirstRow(Hint)`。tsx 冒烟 21 断言全过（跑法：`cd packages/table && ../../apps/web/node_modules/.bin/tsx <test>.mjs`，根 node_modules 没有 tsx、apps/web 里有）。
+  - **表头多选/对齐/右键（2026-07-29 追加）**：`selHeaderCol` 已重构为范围 `selHeader: { anchor, focus }`（派生 `headerRange` memo，`selHeaderRef` 供事件回调读取）。支持拖动（`isHeaderSelecting` + onMouseEnter）与 Shift+点击/Shift+左右键扩展多选。`TableColumn` 新增 `headerStyle?: TableCellStyle`（`packages/shared`），utils 新增 `setHeaderStyle(doc, colIds, patch)`（合并语义同 `applyCellStyle`，空对象整体丢弃）；工具栏两个对齐下拉在表头有选中时改写 `headerStyle`（`applyAlignStyle`/`alignStyleSource`），否则照旧作用于单元格。渲染：th 上内联 `verticalAlign`，`.fn-table__name-text` 上内联 `textAlign`。右键菜单复用 `ctxMenu`，状态加了 `kind: 'cell' | 'header'`（`handleHeaderContextMenu`：点在已有多选内保留选区，否则单选该列）；表头菜单项 = 复制（多列名按当前复制分隔符 join，走 `copyHeaderNames`，同时写 `internalClipboardRef`）/ 粘贴（`pasteIntoHeader` → `applyHeaderPasteText`，`parsePasteGrid` 取第一行按列铺开，**不受排序/筛选限制**，Ctrl+V 走 `handleGridPaste` 的表头分支）/ 删除（`clearHeaderNames` 清空范围内所有列名）。Del/Ctrl+C 键盘路径同样支持范围。列名编辑中 Ctrl+A 只全选编辑框内容：`handleContainerKeyDown` 的 Mod+A 分支对 `.fn-table__rename-input` 提前 return。
+- **下拉填充支持小写引用**（`packages/table/src/fill.ts`）：`CELL_REF` 改为 `/([A-Za-z]+)(\d+)/g`，`=sum(b1:b6)` 下拉时行号也会平移，大小写原样保留；整列引用（`c:c`）无行号不受影响。
+- **表格 Del 不再误删 sidebar 文件**（`packages/app/src/VaultApp.tsx` 全局 keydown）：`deleteSelected` 快捷键新增两个 guard——`!e.defaultPrevented`（表格已处理过的 Del 不再触发）和 `!target.closest('.fn-table-editor')`（焦点在表格内时一律不删侧栏文件）。
+- **回收站（笔记 + AI 两个 sidebar）**：
+  - 数据模型：`NoteNode.trashed?: boolean` / `AiSessionNode.trashed?: boolean`（`packages/shared`）。与 `deleted`（清空明文的同步墓碑）不同，`trashed` 保留全部内容、按普通编辑同步（`SyncNotePayload.trashed` / `AiSessionSyncPayload.trashed`，旧客户端 blob 解码为 undefined → 未回收）。存储行：`StoredNote.trashed?: number`、`StoredAiSession.trashed?: boolean`，IndexedDB 无需迁移。
+  - 笔记侧（`VaultApp.tsx`）：sidebar 删除按钮与 Del 快捷键现在调用 `handleTrashMany`（整棵子树标记 trashed；应用户要求**保留确认弹窗**，文案改为"将移入回收站，可随时还原"）；`handleRestoreFromTrash`（还原子树，原父节点丢失/仍在回收站时挂回根）；`handleEmptyTrash`/单项永久删除走原 `handleDeleteMany`（墓碑/硬删）。跨库转移的 move 仍直接用 `handleDeleteMany`（真删除）。
+  - 搜索/标签页对 trashed 隐身：`upsertSearch` 遇 trashed 改为 remove（覆盖回收、还原、远端 pull 全部路径）；`rebuildSearchIndex`/`prepareSearchIndexInBackground` 构建时过滤 trashed（fingerprint 仍按全量 id:version 计算，保存/加载两侧一致）；`searchResults`、`restoreTabState`、`pruneStaleTabs`、焦点历史导航都排除 trashed。
+  - AI 侧：`handleAiDelete` 改为标记 trashed（+ 清 activeAiSessionId），`handleAiRestore`/`handleAiDeleteForever`/`handleAiEmptyTrash` 同笔记语义；`MobileApp.tsx` 有同一套镜像实现。
+  - UI：新组件 `packages/ui/src/TrashSection.tsx`（两个树共用；折叠标题 + 数量 + 清空按钮，条目行 ↩ 还原 / × 永久删除；删除、清空、永久删除都有确认，还原没有）。`NoteTree`/`AiSessionTree` 内部过滤 trashed 构树，回收站只列 trashed 子树的根（父节点不是 trashed 的），还原/清空随根带走整棵子树。新 i18n 组 `trash.*`，新 CSS 组 `.fn-trash*`。
+
 ## 活跃的技术决策 / 约定（后续开发请遵守）
 
 - **新增持久化设置**一律走 `packages/api/src/index.ts` 的 `loadXxx`/`saveXxx` 命名对模式，`VaultApp.tsx` 里用 `useState(() => loadXxx())` 初始化。

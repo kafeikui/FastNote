@@ -2279,6 +2279,112 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   cursor: default;
 }
 
+/* Recycle bin section at the bottom of the notes / AI sidebars. */
+.fn-trash {
+  margin-top: 0.5rem;
+  border-top: 1px dashed var(--border);
+  padding-top: 0.25rem;
+}
+
+.fn-trash__header {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.fn-trash__toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0.25rem 0.3rem;
+  font-size: 0.8rem;
+  text-align: left;
+}
+
+.fn-trash__toggle:hover {
+  color: var(--text);
+}
+
+.fn-trash__chevron {
+  width: 0.8rem;
+}
+
+.fn-trash__empty-btn {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 4px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.72rem;
+  padding: 0.12rem 0.4rem;
+  margin-right: 0.3rem;
+}
+
+.fn-trash__empty-btn:hover {
+  border-color: #c0392b;
+  color: #c0392b;
+}
+
+.fn-trash__none {
+  color: var(--muted);
+  font-size: 0.75rem;
+  padding: 0.1rem 0.5rem 0.3rem;
+  margin: 0;
+}
+
+.fn-trash__list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0.3rem;
+}
+
+.fn-trash__row {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.15rem 0.3rem 0.15rem 0.6rem;
+  font-size: 0.8rem;
+  border-radius: 4px;
+}
+
+.fn-trash__row:hover {
+  background: var(--bg-soft);
+}
+
+.fn-trash__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.fn-trash__actions {
+  display: flex;
+  gap: 0.15rem;
+}
+
+.fn-trash__actions button {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--muted);
+  padding: 0 0.2rem;
+  font-size: 0.85rem;
+}
+
+.fn-trash__actions button:hover {
+  color: var(--accent);
+}
+
 .fn-table__col-head-row {
   display: flex;
   align-items: center;
@@ -2286,16 +2392,18 @@ body.fn-resizing-note .fn-note-resize-handle::after {
 }
 
 .fn-table__col-letter {
-  flex-shrink: 0;
+  /* Takes the space the inline name used to occupy — a wide click target for column select. */
+  flex: 1;
+  min-width: 2.4rem;
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--bg-soft);
   color: var(--muted);
   cursor: pointer;
-  font-size: 0.68rem;
+  font-size: 0.72rem;
   font-weight: 700;
   line-height: 1;
-  padding: 0.15rem 0.35rem;
+  padding: 0.18rem 0.35rem;
 }
 
 .fn-table__col-letter:hover {
@@ -2303,19 +2411,56 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   color: var(--accent);
 }
 
-.fn-table__sort {
-  flex: 1;
-  /* Long column names never wrap the header taller; they get ellipsized instead. */
-  min-width: 0;
-  border: none;
+.fn-table__sort-btn {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
   background: transparent;
+  color: var(--muted);
   cursor: pointer;
-  font-weight: 600;
+  font-size: 0.72rem;
+  line-height: 1;
+  padding: 0.15rem 0.3rem;
+}
+
+.fn-table__sort-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Second header row: the column name shown as a selectable/editable pseudo-cell. */
+.fn-table__name-row th {
+  /* Sticks right below the controls row (kept sticky by the base .fn-table th rule); the
+     offset is the controls row's measured height. */
+  top: var(--fn-head1-h, 1.9rem);
   padding: 0;
+  border-bottom: 2px solid var(--border);
+  vertical-align: middle;
+}
+
+.fn-table th.fn-table__name-cell {
+  cursor: default;
+}
+
+.fn-table__name-text {
+  padding: 0.2rem 0.35rem;
+  font-weight: 600;
+  font-size: 0.85rem;
   text-align: left;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-height: 1.35rem;
+}
+
+.fn-table th.fn-table__name-cell--sel {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.fn-table__name-row .fn-table__rename-input {
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .fn-table__rownum-col {
@@ -2345,7 +2490,6 @@ body.fn-resizing-note .fn-note-resize-handle::after {
 }
 
 .fn-table__col-del,
-.fn-table__col-rename,
 .fn-table-editor__tools button,
 .fn-table-export button,
 .fn-import-btn {
@@ -2357,13 +2501,7 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   font-size: 0.8rem;
 }
 
-.fn-table__col-rename {
-  flex-shrink: 0;
-  padding: 0.1rem 0.3rem;
-  color: var(--muted);
-}
-
-/* Inline column rename input (replaces the sort button while editing). */
+/* Inline column rename input (replaces the name cell's text while editing). */
 .fn-table__rename-input {
   flex: 1;
   min-width: 0;
@@ -2373,11 +2511,6 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   background: var(--surface) !important;
   font-weight: 600;
   font-size: 0.9rem;
-}
-
-.fn-table__col-rename:hover {
-  color: var(--accent);
-  border-color: var(--accent);
 }
 
 .fn-table-editor__tools button.active {

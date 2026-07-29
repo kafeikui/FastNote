@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type DragEvent } from 'react';
 import type { NoteNode } from '@fastnote/shared';
 import { buildTree, type TreeDropPosition, type TreeItem } from '@fastnote/shared';
 import { useT, type TFunction } from '@fastnote/i18n';
+import { TrashSection } from './TrashSection';
 
 const DRAG_MIME = 'application/x-fastnote-node';
 
@@ -26,7 +27,14 @@ interface NoteTreeProps {
   onCreateTable: (parentId: string | null) => void;
   onImportFolder?: (parentId: string | null) => void;
   onRename: (id: string, title: string) => void;
+  /** Moves the node (with its subtree) into the recycle bin. */
   onDelete: (id: string) => void;
+  /** Restores a recycle-bin entry back into the tree. */
+  onRestore?: (id: string) => void;
+  /** Permanently deletes one recycle-bin entry (with its subtree). */
+  onDeleteForever?: (id: string) => void;
+  /** Permanently deletes everything in the recycle bin. */
+  onEmptyTrash?: () => void;
   onMove: (dragId: string, targetId: string | null, position: TreeDropPosition) => void;
   /** Opens the cross-vault transfer dialog for this node (plus the current multi-selection). */
   onTransfer?: (id: string) => void;
@@ -291,6 +299,7 @@ function TreeNode({
             type="button"
             title={t('noteTree.delete')}
             onClick={() => {
+              // Confirmed, though recoverable: the node moves into the recycle bin.
               if (confirm(t('noteTree.deleteConfirm', { name: node.title || defaultTitle }))) onDelete(node.id);
             }}
           >
@@ -351,6 +360,9 @@ export function NoteTree({
   onImportFolder,
   onRename,
   onDelete,
+  onRestore,
+  onDeleteForever,
+  onEmptyTrash,
   onMove,
   onTransfer,
   renameRequestId,
@@ -361,7 +373,37 @@ export function NoteTree({
   const t = useT();
   const [rootDrop, setRootDrop] = useState(false);
   const [draggingId, setDraggingId] = useState<string | null>(null);
-  const tree = buildTree(notes);
+  const tree = buildTree(notes.filter((n) => !n.trashed));
+
+  // Recycle bin: only the roots of trashed subtrees are listed — restoring/purging a root
+  // takes its descendants with it.
+  const byId = new Map(notes.map((n) => [n.id, n]));
+  const trashedCount = notes.filter((n) => n.trashed).length;
+  const trashItems = notes
+    .filter((n) => n.trashed && (!n.parentId || !byId.get(n.parentId)?.trashed))
+    .map((n) => ({
+      id: n.id,
+      title:
+        n.title ||
+        t(
+          n.nodeType === 'folder'
+            ? 'noteTree.untitledFolder'
+            : n.nodeType === 'table'
+              ? 'noteTree.untitledTable'
+              : 'noteTree.untitledNote',
+        ),
+      icon: n.nodeType === 'folder' ? '📁' : n.nodeType === 'table' ? '📊' : '📝',
+    }));
+  const trashSection =
+    onRestore && onDeleteForever && onEmptyTrash ? (
+      <TrashSection
+        items={trashItems}
+        emptyCount={trashedCount}
+        onRestore={onRestore}
+        onDeleteForever={onDeleteForever}
+        onEmpty={onEmptyTrash}
+      />
+    ) : null;
 
   // Auto-scroll the sidebar while dragging a node near its top/bottom edge, so nodes can be
   // dropped onto targets that are currently scrolled out of view. Capture phase: the per-node
@@ -413,6 +455,7 @@ export function NoteTree({
             {t('noteTree.newTable')}
           </button>
         </div>
+        {trashSection}
       </div>
     );
   }
@@ -458,6 +501,7 @@ export function NoteTree({
           />
         ))}
       </ul>
+      {trashSection}
     </div>
   );
 }

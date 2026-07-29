@@ -854,6 +854,12 @@ export function VaultApp() {
   );
 
   const upsertSearch = (note: NoteNode) => {
+    // Trashed notes are invisible to search; treating the upsert as a removal keeps every save
+    // path (trash, restore, remote sync pull) consistent without special-casing callers.
+    if (note.trashed) {
+      removeFromSearch(note.id);
+      return;
+    }
     searchDirtyRef.current = true;
     if (!searchReadyRef.current) {
       pendingSearchOpsRef.current.push({ type: 'upsert', note });
@@ -881,7 +887,7 @@ export function VaultApp() {
     searchReadyRef.current = true;
     pendingSearchOpsRef.current = [];
     searchIndexRef.current.rebuild(
-      items.map((n) => ({ ...n, contentMd: noteSearchBody(n) })),
+      items.filter((n) => !n.trashed).map((n) => ({ ...n, contentMd: noteSearchBody(n) })),
     );
     searchDirtyRef.current = true;
     setSearchTick((n) => n + 1);
@@ -908,7 +914,7 @@ export function VaultApp() {
           const fromSnapshot = built !== null;
           if (!built) {
             built = await NoteSearchIndex.buildAsync(
-              decrypted.map((n) => ({ ...n, contentMd: noteSearchBody(n) })),
+              decrypted.filter((n) => !n.trashed).map((n) => ({ ...n, contentMd: noteSearchBody(n) })),
             );
           }
           if (searchGenRef.current !== gen || keysRef.current !== derived) return;
@@ -1101,7 +1107,9 @@ export function VaultApp() {
   }, []);
 
   const restoreTabState = useCallback((decrypted: NoteNode[]) => {
-    const survivingIds = new Set(decrypted.filter((n) => isEditableContentNode(n)).map((n) => n.id));
+    const survivingIds = new Set(
+      decrypted.filter((n) => isEditableContentNode(n) && !n.trashed).map((n) => n.id),
+    );
     const stored = loadTabState(loadStorageNamespace());
     const filteredGroups: TabGroupState[] = stored.groups.map((g) => {
       const tabs = g.tabs.filter((tb) => survivingIds.has(tb.id));
@@ -1110,7 +1118,7 @@ export function VaultApp() {
     });
     let finalGroups = filteredGroups.length > 0 ? filteredGroups : defaultTabState().groups;
     if (!finalGroups.some((g) => g.tabs.length > 0)) {
-      const firstId = decrypted.find((n) => isEditableContentNode(n))?.id;
+      const firstId = decrypted.find((n) => isEditableContentNode(n) && !n.trashed)?.id;
       finalGroups = firstId
         ? [{ id: 'g1', tabs: [{ id: firstId, pinned: false }], activeTabId: firstId }]
         : [{ id: 'g1', tabs: [], activeTabId: null }];
@@ -1304,7 +1312,7 @@ export function VaultApp() {
   modalOpenRef.current = showSettings || showAuth || showAbout;
   const tRef = useRef(t);
   tRef.current = t;
-  const handleDeleteManyRef = useRef<(ids: string[]) => Promise<void>>(async () => {});
+  const handleTrashManyRef = useRef<(ids: string[]) => Promise<void>>(async () => {});
   const formatJsonByGroupRef = useRef<Record<string, (() => boolean) | null>>({});
 
   // Focus history: content/title edits, tab clicks, and cursor clicks inside a page all record
@@ -1437,13 +1445,20 @@ export function VaultApp() {
         return;
       }
       // Delete the sidebar selection — but never while the user is typing in an input or editor,
-      // where Delete/Backspace must keep its normal text-editing meaning.
-      if (matchesShortcut(e, bindings.deleteSelected) && !isTypingTarget(e.target)) {
+      // where Delete/Backspace must keep its normal text-editing meaning, and never when the key
+      // was already handled (or pressed) inside a table editor, where Del clears cells/headers.
+      if (
+        matchesShortcut(e, bindings.deleteSelected) &&
+        !isTypingTarget(e.target) &&
+        !e.defaultPrevented &&
+        !(e.target instanceof Element && e.target.closest('.fn-table-editor'))
+      ) {
         const ids = [...treeSelectedIdsRef.current];
         if (ids.length === 0) return;
         e.preventDefault();
+        // Confirmed, though recoverable: the items land in the recycle bin.
         if (confirm(tRef.current('vaultApp.deleteSelectedConfirm', { count: ids.length }))) {
-          void handleDeleteManyRef.current(ids);
+          void handleTrashManyRef.current(ids);
         }
       }
     };
@@ -2048,7 +2063,7 @@ export function VaultApp() {
     while (idx >= 0 && idx < h.length) {
       const id = h[idx];
       const node = notesRef.current.find((n) => n.id === id);
-      if (node && !node.deleted && isEditableContentNode(node)) {
+      if (node && !node.deleted && !node.trashed && isEditableContentNode(node)) {
         editHistoryIdxRef.current = idx;
         openNote(id, { pin: true });
         setAppView('notes');
@@ -2171,19 +2186,82 @@ export function VaultApp() {
     );
   };
 
-  const handleAiDelete = (id: string) => {
-    // Deleting a folder removes its whole subtree.
-    const doomed = new Set<string>([id]);
+  /** Collects an AI node plus its whole subtree (folders cascade). */
+  const collectAiSubtree = (id: string): Set<string> => {
+    const out = new Set<string>([id]);
     let grew = true;
     while (grew) {
       grew = false;
       for (const s of aiSessions) {
-        if (s.parentId && doomed.has(s.parentId) && !doomed.has(s.id)) {
-          doomed.add(s.id);
+        if (s.parentId && out.has(s.parentId) && !out.has(s.id)) {
+          out.add(s.id);
           grew = true;
         }
       }
     }
+    return out;
+  };
+
+  /** Deleting from the sidebar moves the node (with its subtree) into the recycle bin. */
+  const handleAiDelete = (id: string) => {
+    const doomed = collectAiSubtree(id);
+    const now = new Date().toISOString();
+    setAiSessions((prev) =>
+      prev.map((s) => {
+        if (!doomed.has(s.id) || s.trashed) return s;
+        const next = { ...s, trashed: true, updatedAt: now };
+        persistAiSession(next);
+        return next;
+      }),
+    );
+    setActiveAiSessionId((cur) => (cur && doomed.has(cur) ? null : cur));
+  };
+
+  /** Restores a recycle-bin entry (and its trashed subtree); orphans re-attach at the root. */
+  const handleAiRestore = (id: string) => {
+    const target = aiSessions.find((s) => s.id === id);
+    if (!target?.trashed) return;
+    const restoring = new Set<string>([id]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const s of aiSessions) {
+        if (s.trashed && s.parentId && restoring.has(s.parentId) && !restoring.has(s.id)) {
+          restoring.add(s.id);
+          grew = true;
+        }
+      }
+    }
+    const parent = target.parentId ? aiSessions.find((s) => s.id === target.parentId) : undefined;
+    const parentOk = target.parentId === null || (parent && !parent.trashed);
+    const now = new Date().toISOString();
+    setAiSessions((prev) =>
+      prev.map((s) => {
+        if (!restoring.has(s.id)) return s;
+        const next = {
+          ...s,
+          trashed: false,
+          parentId: s.id === id && !parentOk ? null : s.parentId,
+          updatedAt: now,
+        };
+        persistAiSession(next);
+        return next;
+      }),
+    );
+  };
+
+  /** Permanently deletes one recycle-bin entry (tombstone, so the deletion syncs). */
+  const handleAiDeleteForever = (id: string) => {
+    const doomed = collectAiSubtree(id);
+    setAiSessions((prev) => prev.filter((s) => !doomed.has(s.id)));
+    for (const doomedId of doomed) void storage.deleteAiSession(doomedId);
+    setActiveAiSessionId((cur) => (cur && doomed.has(cur) ? null : cur));
+    scheduleAiSessionPush();
+  };
+
+  /** Permanently deletes everything in the AI recycle bin. */
+  const handleAiEmptyTrash = () => {
+    const doomed = new Set(aiSessions.filter((s) => s.trashed).map((s) => s.id));
     setAiSessions((prev) => prev.filter((s) => !doomed.has(s.id)));
     for (const doomedId of doomed) void storage.deleteAiSession(doomedId);
     setActiveAiSessionId((cur) => (cur && doomed.has(cur) ? null : cur));
@@ -2505,12 +2583,89 @@ export function VaultApp() {
       const next = new Set([...prev].filter((id) => !doomed.has(id)));
       return next;
     });
-    pruneStaleTabs(new Set(remaining.filter((n) => isEditableContentNode(n)).map((n) => n.id)));
+    pruneStaleTabs(
+      new Set(remaining.filter((n) => isEditableContentNode(n) && !n.trashed).map((n) => n.id)),
+    );
     void syncAttachmentsIfOnline();
   };
 
-  const handleDelete = async (id: string) => handleDeleteMany([id]);
-  handleDeleteManyRef.current = handleDeleteMany;
+  /** Collects `ids` plus every descendant, walking the full notes list (trashed included). */
+  const collectSubtree = (ids: string[]): Set<string> => {
+    const out = new Set<string>();
+    const queue = [...ids];
+    while (queue.length > 0) {
+      const id = queue.pop()!;
+      if (out.has(id)) continue;
+      out.add(id);
+      notes.forEach((n) => {
+        if (n.parentId === id) queue.push(n.id);
+      });
+    }
+    return out;
+  };
+
+  /**
+   * Moves nodes (with their subtrees) into the recycle bin. Unlike a real deletion this keeps
+   * the content intact and syncs as a normal edit, so it's recoverable on every device.
+   */
+  const handleTrashMany = async (ids: string[]) => {
+    if (!keys || ids.length === 0) return;
+    const doomed = collectSubtree(ids);
+    const next = notes.map((n) => {
+      if (!doomed.has(n.id) || n.trashed) return n;
+      const updated = buildUpdated(n, { trashed: true });
+      void persistNote(updated); // persistNote's upsertSearch drops trashed notes from the index
+      return updated;
+    });
+    setSearchTick((n) => n + 1);
+    setNotes(next);
+    setTreeSelectedIds((prev) => {
+      if (![...prev].some((id) => doomed.has(id))) return prev;
+      return new Set([...prev].filter((id) => !doomed.has(id)));
+    });
+    pruneStaleTabs(new Set(next.filter((n) => isEditableContentNode(n) && !n.trashed).map((n) => n.id)));
+  };
+
+  /**
+   * Restores a recycle-bin entry (and its trashed subtree). When the original parent is gone or
+   * itself still in the bin, the node re-attaches at the root instead of staying orphaned.
+   */
+  const handleRestoreFromTrash = async (id: string) => {
+    if (!keys) return;
+    const byId = new Map(notes.map((n) => [n.id, n]));
+    const target = byId.get(id);
+    if (!target?.trashed) return;
+    const restoring = new Set<string>([id]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const n of notes) {
+        if (n.trashed && n.parentId && restoring.has(n.parentId) && !restoring.has(n.id)) {
+          restoring.add(n.id);
+          grew = true;
+        }
+      }
+    }
+    const parent = target.parentId ? byId.get(target.parentId) : undefined;
+    const parentOk = target.parentId === null || (parent && !parent.trashed && !parent.deleted);
+    const next = notes.map((n) => {
+      if (!restoring.has(n.id)) return n;
+      const patch: Partial<NoteNode> = { trashed: false };
+      if (n.id === id && !parentOk) patch.parentId = null;
+      const updated = buildUpdated(n, patch);
+      void persistNote(updated);
+      return updated;
+    });
+    setSearchTick((n) => n + 1);
+    setNotes(next);
+  };
+
+  /** Permanently deletes everything in the recycle bin (real tombstone/hard-delete path). */
+  const handleEmptyTrash = async () => {
+    await handleDeleteMany(notes.filter((n) => n.trashed).map((n) => n.id));
+  };
+
+  handleTrashManyRef.current = handleTrashMany;
 
   // --- Cross-vault transfer ------------------------------------------------------------------
 
@@ -3113,8 +3268,9 @@ export function VaultApp() {
   const searchResults = useMemo(() => {
     if (!searchQuery) return [];
     // A stale snapshot can contain entries for documents that no longer exist (e.g. deleted on
-    // another device); never surface those — and never show the same note twice.
-    const liveIds = new Set(notes.filter((n) => !n.deleted).map((n) => n.id));
+    // another device) or that sit in the recycle bin; never surface those — and never show the
+    // same note twice.
+    const liveIds = new Set(notes.filter((n) => !n.deleted && !n.trashed).map((n) => n.id));
     const seen = new Set<string>();
     return searchIndexRef.current.search(searchQuery).filter((r) => {
       if (!liveIds.has(r.id) || seen.has(r.id)) return false;
@@ -3763,6 +3919,9 @@ export function VaultApp() {
                     onCreate={handleAiCreate}
                     onRename={handleAiRename}
                     onDelete={handleAiDelete}
+                    onRestore={handleAiRestore}
+                    onDeleteForever={handleAiDeleteForever}
+                    onEmptyTrash={handleAiEmptyTrash}
                     onMove={handleAiMove}
                   />
                 )}
@@ -3788,7 +3947,10 @@ export function VaultApp() {
                   onCreateTable={(pid) => void handleCreate('table', pid)}
                   onImportFolder={(pid) => openImportFolder(pid)}
                   onRename={(id, title) => updateNoteById(id, { title })}
-                  onDelete={(id) => void handleDelete(id)}
+                  onDelete={(id) => void handleTrashMany([id])}
+                  onRestore={(id) => void handleRestoreFromTrash(id)}
+                  onDeleteForever={(id) => void handleDeleteMany([id])}
+                  onEmptyTrash={() => void handleEmptyTrash()}
                   onMove={(dragId, targetId, position) => void handleMove(dragId, targetId, position)}
                   onTransfer={handleTransferRequest}
                   renameRequestId={renameRequestId}

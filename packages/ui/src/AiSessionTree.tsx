@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from 'react';
 import type { AiSessionNode } from '@fastnote/shared';
 import { useT } from '@fastnote/i18n';
+import { TrashSection } from './TrashSection';
 
 interface AiSessionTreeProps {
   sessions: AiSessionNode[];
@@ -8,7 +9,14 @@ interface AiSessionTreeProps {
   onSelect: (id: string) => void;
   onCreate: (kind: 'folder' | 'session', parentId: string | null) => void;
   onRename: (id: string, title: string) => void;
+  /** Moves the node (with its subtree) into the recycle bin. */
   onDelete: (id: string) => void;
+  /** Restores a recycle-bin entry back into the tree. */
+  onRestore?: (id: string) => void;
+  /** Permanently deletes one recycle-bin entry (with its subtree). */
+  onDeleteForever?: (id: string) => void;
+  /** Permanently deletes everything in the recycle bin. */
+  onEmptyTrash?: () => void;
   onMove: (id: string, newParentId: string | null) => void;
 }
 
@@ -19,7 +27,7 @@ interface AiTreeLevel {
 
 function buildLevels(sessions: AiSessionNode[], parentId: string | null): AiTreeLevel[] {
   return sessions
-    .filter((s) => s.parentId === parentId)
+    .filter((s) => s.parentId === parentId && !s.trashed)
     .sort((a, b) => a.sortOrder - b.sortOrder || a.updatedAt.localeCompare(b.updatedAt))
     .map((node) => ({ node, children: node.kind === 'folder' ? buildLevels(sessions, node.id) : [] }));
 }
@@ -49,6 +57,9 @@ export function AiSessionTree({
   onCreate,
   onRename,
   onDelete,
+  onRestore,
+  onDeleteForever,
+  onEmptyTrash,
   onMove,
 }: AiSessionTreeProps) {
   const t = useT();
@@ -118,9 +129,23 @@ export function AiSessionTree({
   };
 
   const allFolderIds = useMemo(
-    () => sessions.filter((s) => s.kind === 'folder').map((s) => s.id),
+    () => sessions.filter((s) => s.kind === 'folder' && !s.trashed).map((s) => s.id),
     [sessions],
   );
+
+  // Recycle bin: only the roots of trashed subtrees are listed — restoring/purging a root
+  // takes its descendants with it.
+  const trashItems = useMemo(() => {
+    const byId = new Map(sessions.map((s) => [s.id, s]));
+    return sessions
+      .filter((s) => s.trashed && (!s.parentId || !byId.get(s.parentId)?.trashed))
+      .map((s) => ({
+        id: s.id,
+        title: s.title || t(s.kind === 'folder' ? 'aiPanel.defaultFolderTitle' : 'aiPanel.defaultSessionTitle'),
+        icon: s.kind === 'folder' ? '📁' : '💬',
+      }));
+  }, [sessions, t]);
+  const trashedCount = sessions.filter((s) => s.trashed).length;
   const anyExpanded = allFolderIds.some((id) => !collapsed.has(id));
 
   const toggleCollapse = (id: string) => {
@@ -234,6 +259,7 @@ export function AiSessionTree({
                   type="button"
                   title={t('aiPanel.delete')}
                   onClick={() => {
+                    // Confirmed, though recoverable: the node moves into the recycle bin.
                     if (confirm(t(isFolder ? 'aiPanel.confirmDeleteFolder' : 'aiPanel.confirmDeleteSession', { title: node.title }))) {
                       onDelete(node.id);
                     }
@@ -296,6 +322,15 @@ export function AiSessionTree({
         <p className="fn-ai-tree__empty">{t('aiPanel.empty')}</p>
       ) : (
         renderLevel(levels, 0)
+      )}
+      {onRestore && onDeleteForever && onEmptyTrash && (
+        <TrashSection
+          items={trashItems}
+          emptyCount={trashedCount}
+          onRestore={onRestore}
+          onDeleteForever={onDeleteForever}
+          onEmpty={onEmptyTrash}
+        />
       )}
     </div>
   );

@@ -385,17 +385,71 @@ export function renameColumn(doc: TableDocument, columnId: string, name: string)
   };
 }
 
+/** Merges a patch into a style object; `undefined` values delete keys, empty result → undefined. */
+function mergeStylePatch(
+  base: TableCellStyle | undefined,
+  patch: Partial<TableCellStyle>,
+): TableCellStyle | undefined {
+  const merged: TableCellStyle = { ...(base ?? {}) };
+  for (const key of Object.keys(patch) as Array<keyof TableCellStyle>) {
+    const value = patch[key];
+    if (value === undefined) delete merged[key];
+    else (merged as Record<string, unknown>)[key] = value;
+  }
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
+/**
+ * Merges a style patch into the header name cell of every listed column. Keys explicitly set to
+ * `undefined` are removed (back to default); a header style that ends up empty drops entirely.
+ */
+export function setHeaderStyle(
+  doc: TableDocument,
+  columnIds: string[],
+  patch: Partial<TableCellStyle>,
+): TableDocument {
+  if (columnIds.length === 0) return doc;
+  const idSet = new Set(columnIds);
+  return {
+    ...doc,
+    columns: doc.columns.map((c) => {
+      if (!idSet.has(c.id)) return c;
+      const merged: TableCellStyle = { ...(c.headerStyle ?? {}) };
+      for (const key of Object.keys(patch) as Array<keyof TableCellStyle>) {
+        const value = patch[key];
+        if (value === undefined) delete merged[key];
+        else (merged as Record<string, unknown>)[key] = value;
+      }
+      if (Object.keys(merged).length === 0) {
+        const { headerStyle: _drop, ...rest } = c;
+        return rest;
+      }
+      return { ...c, headerStyle: merged };
+    }),
+  };
+}
+
 /**
  * Excel-style "use first row as header": renames every column to the first row's cell content
- * (columns whose cell is empty keep their name) and removes that row from the data. If it was
- * the only row, an empty one is added so the table never ends up rowless.
+ * (columns whose cell is empty keep their name), carries the row's cell alignment over to the
+ * header style, and removes that row from the data. If it was the only row, an empty one is
+ * added so the table never ends up rowless. Formula references shift up one row (same as
+ * deleting the top row; references to the promoted row become #REF!).
  */
 export function promoteFirstRowToHeader(doc: TableDocument): TableDocument {
   const first = doc.rows[0];
   if (!first) return doc;
   const columns = doc.columns.map((c) => {
     const v = (first.cells[c.id] ?? '').trim();
-    return v ? { ...c, name: v } : c;
+    const cellStyle = first.styles?.[c.id];
+    const headerStyle = mergeStylePatch(c.headerStyle, {
+      ...(cellStyle?.align ? { align: cellStyle.align } : {}),
+      ...(cellStyle?.valign ? { valign: cellStyle.valign } : {}),
+    });
+    const next = { ...c };
+    if (v) next.name = v;
+    if (headerStyle) next.headerStyle = headerStyle;
+    return next;
   });
   let rows = doc.rows.slice(1);
   if (rows.length === 0) {
@@ -403,7 +457,31 @@ export function promoteFirstRowToHeader(doc: TableDocument): TableDocument {
     for (const c of columns) cells[c.id] = '';
     rows = [{ id: crypto.randomUUID(), cells }];
   }
-  return { ...doc, columns, rows };
+  return rewriteDocFormulasForDelete({ ...doc, columns, rows }, 'row', 0);
+}
+
+/**
+ * Inverse of `promoteFirstRowToHeader`: inserts the column names as a new first data row (header
+ * alignment becomes the new cells' style), blanks the header names, and shifts formula
+ * references down one row (same as inserting a row at the top).
+ */
+export function demoteHeaderToFirstRow(doc: TableDocument): TableDocument {
+  const cells: Record<string, string> = {};
+  const styles: Record<string, TableCellStyle> = {};
+  for (const c of doc.columns) {
+    cells[c.id] = c.name;
+    if (c.headerStyle && Object.keys(c.headerStyle).length > 0) styles[c.id] = { ...c.headerStyle };
+  }
+  const row: TableRow = {
+    id: crypto.randomUUID(),
+    cells,
+    ...(Object.keys(styles).length > 0 ? { styles } : {}),
+  };
+  const columns = doc.columns.map((c) => {
+    const { headerStyle: _drop, ...rest } = c;
+    return { ...rest, name: '' };
+  });
+  return rewriteDocFormulasForInsert({ ...doc, columns, rows: [row, ...doc.rows] }, 'row', 0);
 }
 
 /** Swaps the positions of two columns (by id) in the column order. */
@@ -556,6 +634,69 @@ export function applyCellStyle(
         return rest;
       }
       return { ...row, styles };
+    }),
+  };
+}
+
+/**
+ * Whole-column styling: merges the patch into each column's default cell style and removes the
+ * patched keys from every per-cell override in those columns, so the new default is what every
+ * cell (including rows added later) actually shows.
+ */
+export function applyColumnCellStyle(
+  doc: TableDocument,
+  columnIds: string[],
+  patch: Partial<TableCellStyle>,
+): TableDocument {
+  if (columnIds.length === 0) return doc;
+  const idSet = new Set(columnIds);
+  const clearPatch = Object.fromEntries(
+    Object.keys(patch).map((k) => [k, undefined]),
+  ) as Partial<TableCellStyle>;
+  const cells: Array<{ rowId: string; colId: string }> = [];
+  for (const row of doc.rows) for (const colId of columnIds) cells.push({ rowId: row.id, colId });
+  const next = applyCellStyle(doc, cells, clearPatch);
+  return {
+    ...next,
+    columns: next.columns.map((c) => {
+      if (!idSet.has(c.id)) return c;
+      const cellStyle = mergeStylePatch(c.cellStyle, patch);
+      if (!cellStyle) {
+        const { cellStyle: _drop, ...rest } = c;
+        return rest;
+      }
+      return { ...c, cellStyle };
+    }),
+  };
+}
+
+/**
+ * Whole-row styling: merges the patch into each row's default cell style and removes the patched
+ * keys from that row's per-cell overrides. Row defaults beat column defaults when both are set.
+ */
+export function applyRowCellStyle(
+  doc: TableDocument,
+  rowIds: string[],
+  patch: Partial<TableCellStyle>,
+): TableDocument {
+  if (rowIds.length === 0) return doc;
+  const idSet = new Set(rowIds);
+  const clearPatch = Object.fromEntries(
+    Object.keys(patch).map((k) => [k, undefined]),
+  ) as Partial<TableCellStyle>;
+  const cells: Array<{ rowId: string; colId: string }> = [];
+  for (const rowId of rowIds) for (const col of doc.columns) cells.push({ rowId, colId: col.id });
+  const next = applyCellStyle(doc, cells, clearPatch);
+  return {
+    ...next,
+    rows: next.rows.map((r) => {
+      if (!idSet.has(r.id)) return r;
+      const style = mergeStylePatch(r.style, patch);
+      if (!style) {
+        const { style: _drop, ...rest } = r;
+        return rest;
+      }
+      return { ...r, style };
     }),
   };
 }

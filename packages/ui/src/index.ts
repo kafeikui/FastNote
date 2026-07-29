@@ -2,6 +2,7 @@ export { AppShell } from './AppShell';
 export { UnlockScreen } from './UnlockScreen';
 export type { CloudSyncParams, UnlockTab, VaultListItem } from './UnlockScreen';
 export { NoteTree } from './NoteTree';
+export { TrashSection } from './TrashSection';
 export { TreeToolbar } from './TreeToolbar';
 export { TabBar } from './TabBar';
 export { EditorToolbar } from './EditorToolbar';

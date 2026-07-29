@@ -6,7 +6,9 @@ import { isFormulaValue } from './formula';
  * unsorted, unfiltered document (the editor only enables these interactions in that view).
  */
 
-const CELL_REF = /([A-Z]+)(\d+)/g;
+// Case-insensitive so drag-fill also shifts lowercase references (=sum(b1:b6)); the letters are
+// written back exactly as typed. Function names never end in digits, so they can't match.
+const CELL_REF = /([A-Za-z]+)(\d+)/g;
 
 /** Shifts the row part of every A1-style cell reference in a formula by `offset` rows. */
 export function shiftFormulaRows(formula: string, offset: number): string {

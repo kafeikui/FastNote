@@ -15,6 +15,7 @@ import type {
   NoteAttachment,
   ShortcutBinding,
   TableCellStyle,
+  TableColumn,
   TableColumnFormat,
   TableDocument,
 } from '@fastnote/shared';
@@ -46,12 +47,16 @@ import {
   addColumn,
   addRow,
   applyCellStyle,
+  applyColumnCellStyle,
+  applyRowCellStyle,
+  demoteHeaderToFirstRow,
   filterRows,
   promoteFirstRowToHeader,
   removeColumn,
   removeRow,
   renameColumn,
   setAllRowHeights,
+  setHeaderStyle,
   setColumnFormat,
   setColumnWidth,
   setRowHeight,
@@ -153,7 +158,12 @@ export function TableEditor({
   const [liveRowHeight, setLiveRowHeight] = useState<{ rowId: string; height: number } | null>(null);
   const [openPalette, setOpenPalette] = useState<'color' | 'fill' | null>(null);
   /** Inline column rename (window.prompt is unavailable in the Electron renderer). */
-  const [renamingCol, setRenamingCol] = useState<{ colId: string; draft: string } | null>(null);
+  const [renamingCol, setRenamingCol] = useState<{ colId: string; draft: string; selectAll?: boolean } | null>(
+    null,
+  );
+  /** Header name cells selected like grid cells (click/drag/Shift extends; copy/Del/Enter-to-edit). */
+  const [selHeader, setSelHeader] = useState<{ anchor: number; focus: number } | null>(null);
+  const [isHeaderSelecting, setIsHeaderSelecting] = useState(false);
   /** Characters selected inside the cell input currently being edited (0 = none). */
   const [cellSelChars, setCellSelChars] = useState(0);
   const [showHelp, setShowHelp] = useState(false);
@@ -195,6 +205,8 @@ export function TableEditor({
   };
   const tableWrapRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  /** First header row (controls); its measured height drives the name row's sticky offset. */
+  const headRowRef = useRef<HTMLTableRowElement>(null);
   const lastActionRef = useRef<LastAction | null>(null);
   const docRef = useRef(doc);
   docRef.current = doc;
@@ -206,6 +218,19 @@ export function TableEditor({
   const undoStackRef = useRef<TableDocument[]>([]);
   const redoStackRef = useRef<TableDocument[]>([]);
   const [, setHistVersion] = useState(0);
+
+  // Both header rows are sticky; the name row sticks right below the controls row, whose height
+  // varies (the filter row toggles), so it's measured instead of hard-coded.
+  useEffect(() => {
+    const row = headRowRef.current;
+    const wrap = tableWrapRef.current;
+    if (!row || !wrap) return;
+    const update = () => wrap.style.setProperty('--fn-head1-h', `${row.getBoundingClientRect().height}px`);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(row);
+    return () => ro.disconnect();
+  }, []);
 
   const emitChange = useCallback((next: TableDocument) => {
     undoStackRef.current.push(docRef.current);
@@ -418,6 +443,22 @@ export function TableEditor({
     return () => window.removeEventListener('mouseup', stop);
   }, [isSelecting]);
 
+  useEffect(() => {
+    if (!isHeaderSelecting) return;
+    const stop = () => setIsHeaderSelecting(false);
+    window.addEventListener('mouseup', stop);
+    return () => window.removeEventListener('mouseup', stop);
+  }, [isHeaderSelecting]);
+
+  /** Inclusive column-index range of the header selection. */
+  const headerRange = useMemo(() => {
+    if (!selHeader) return null;
+    return {
+      start: Math.min(selHeader.anchor, selHeader.focus),
+      end: Math.max(selHeader.anchor, selHeader.focus),
+    };
+  }, [selHeader]);
+
   const toggleSort = (colId: string) => {
     if (sortCol !== colId) {
       setSortCol(colId);
@@ -586,6 +627,7 @@ export function TableEditor({
     const active = document.activeElement;
     if (active instanceof HTMLTextAreaElement && active.dataset.rowIdx !== undefined) active.blur();
     containerRef.current?.focus();
+    setSelHeader(null);
     if (e.shiftKey && selAnchor) {
       // Shift+click extends the selection from the anchor, spreadsheet-style.
       setSelFocus({ rowIdx, colIdx });
@@ -712,12 +754,15 @@ export function TableEditor({
     return [];
   }, [selectionRange, displayRows, doc.columns, focusCell]);
 
-  /** Style of the first target cell — drives the toolbar's active/current indicators. */
+  /** Effective style of the first target cell (cell > row default > column default) — drives
+   *  the toolbar's active/current indicators. */
   const anchorStyle: TableCellStyle = useMemo(() => {
     const first = formatTargets[0];
     if (!first) return {};
-    return doc.rows.find((r) => r.id === first.rowId)?.styles?.[first.colId] ?? {};
-  }, [formatTargets, doc.rows]);
+    const row = doc.rows.find((r) => r.id === first.rowId);
+    const col = doc.columns.find((c) => c.id === first.colId);
+    return { ...(col?.cellStyle ?? {}), ...(row?.style ?? {}), ...(row?.styles?.[first.colId] ?? {}) };
+  }, [formatTargets, doc.rows, doc.columns]);
 
   const applyStyle = (patch: Partial<TableCellStyle>) => {
     if (formatTargets.length === 0) {
@@ -725,6 +770,44 @@ export function TableEditor({
       return;
     }
     emitChange(applyCellStyle(docRef.current, formatTargets, patch));
+  };
+
+  /** The alignment dropdowns act on the header selection when one is active, else on cells. */
+  const alignStyleSource: TableCellStyle = selHeader
+    ? (doc.columns[Math.min(selHeader.anchor, selHeader.focus)]?.headerStyle ?? {})
+    : anchorStyle;
+  const applyAlignStyle = (patch: Partial<TableCellStyle>) => {
+    const cols = headerSelectedCols();
+    if (cols.length > 0) {
+      emitChange(setHeaderStyle(docRef.current, cols.map((c) => c.id), patch));
+      return;
+    }
+    // Whole-column / whole-row selections write the alignment at the column/row level so it
+    // covers every cell — including rows hidden by a filter and rows/columns added later.
+    const range = selectionRange;
+    const wholeCols =
+      !!range && displayRows.length > 0 && range.rowStart === 0 && range.rowEnd >= displayRows.length - 1;
+    const wholeRows =
+      !!range && doc.columns.length > 0 && range.colStart === 0 && range.colEnd >= doc.columns.length - 1;
+    if (wholeCols) {
+      const colIds = doc.columns.slice(range.colStart, range.colEnd + 1).map((c) => c.id);
+      let next = applyColumnCellStyle(docRef.current, colIds, patch);
+      if (wholeRows) {
+        // Select-all: row-level defaults would shadow the new column default — drop those keys.
+        const clearPatch = Object.fromEntries(
+          Object.keys(patch).map((k) => [k, undefined]),
+        ) as Partial<TableCellStyle>;
+        next = applyRowCellStyle(next, next.rows.map((r) => r.id), clearPatch);
+      }
+      emitChange(next);
+      return;
+    }
+    if (wholeRows) {
+      const rowIds = displayRows.slice(range.rowStart, range.rowEnd + 1).map((r) => r.id);
+      emitChange(applyRowCellStyle(docRef.current, rowIds, patch));
+      return;
+    }
+    applyStyle(patch);
   };
 
   // ---- Column number format -----------------------------------------------------------------
@@ -769,20 +852,32 @@ export function TableEditor({
       alert(t('tableEditor.formatNeedTarget'));
       return;
     }
-    let next = applyCellStyle(docRef.current, formatTargets, {
+    const clearAll: Partial<TableCellStyle> = {
       bold: undefined,
       fontSize: undefined,
       color: undefined,
       fill: undefined,
       align: undefined,
       valign: undefined,
-    });
+    };
+    let next = applyCellStyle(docRef.current, formatTargets, clearAll);
     const wholeColumns =
       selectionRange !== null &&
       selectionRange.rowStart === 0 &&
       selectionRange.rowEnd >= displayRows.length - 1;
     if (wholeColumns) {
       for (const colId of formatColIds) next = setColumnFormat(next, colId, undefined);
+      next = applyColumnCellStyle(next, formatColIds, clearAll);
+    }
+    const wholeRows =
+      selectionRange !== null &&
+      selectionRange.colStart === 0 &&
+      selectionRange.colEnd >= doc.columns.length - 1;
+    if (wholeRows) {
+      const rowIds = displayRows
+        .slice(selectionRange.rowStart, selectionRange.rowEnd + 1)
+        .map((r) => r.id);
+      next = applyRowCellStyle(next, rowIds, clearAll);
     }
     emitChange(next);
   };
@@ -827,10 +922,16 @@ export function TableEditor({
   const commitRename = () => {
     const cur = renamingCol;
     setRenamingCol(null);
+    // Enter-confirm: focus is still on the rename input, which is about to unmount — hand the
+    // keyboard back to the grid. A blur-commit (user clicked elsewhere) keeps that new focus.
+    if (document.activeElement instanceof HTMLInputElement && document.activeElement.classList.contains('fn-table__rename-input')) {
+      containerRef.current?.focus();
+    }
     if (!cur) return;
+    // Empty names are allowed (Del on the header cell clears the name the same way).
     const name = cur.draft.trim();
     const col = docRef.current.columns.find((c) => c.id === cur.colId);
-    if (name && col && name !== col.name) {
+    if (col && name !== col.name) {
       emitChange(renameColumn(docRef.current, cur.colId, name));
     }
   };
@@ -877,9 +978,10 @@ export function TableEditor({
     const baseSize = tableWrapRef.current
       ? parseFloat(getComputedStyle(tableWrapRef.current).fontSize) || 14.4
       : 14.4;
-    // Header row: letter chip + name + rename/delete buttons need roughly 76px beside the name.
+    // Header: the name sits alone on its own row (plus cell padding); the controls row
+    // (letter chip + sort + delete buttons) needs ~90px regardless of the name.
     measure.font = `600 ${baseSize}px ${baseFamily}`;
-    let best = measure.measureText(col.name).width + 76;
+    let best = Math.max(measure.measureText(col.name).width + 16, 90);
     for (const row of d.rows) {
       const raw = row.cells[colId] ?? '';
       if (!raw.trim()) continue;
@@ -946,10 +1048,16 @@ export function TableEditor({
   // at the target cell, growing the table as needed. While editing a cell, single values keep
   // the browser default (insert at caret); with only a selection, they replace the anchor cell.
   const handleGridPaste = (e: ClipboardEvent<HTMLDivElement>) => {
-    if (!isPlainView) return;
     const target = e.target as HTMLElement;
     if (target instanceof HTMLInputElement) return; // filter/rename/symbol inputs: native paste
     const text = e.clipboardData.getData('text/plain');
+    // Header names selected: paste one value per column, independent of sort/filter state
+    // (column order never changes with the row view).
+    if (selHeaderRef.current) {
+      if (applyHeaderPasteText(text)) e.preventDefault();
+      return;
+    }
+    if (!isPlainView) return;
     const rowAttr = target.dataset?.rowIdx;
     const colAttr = target.dataset?.colIdx;
     if (rowAttr !== undefined && colAttr !== undefined) {
@@ -984,6 +1092,78 @@ export function TableEditor({
     applyGridAt(range.rowStart, range.colStart, parsePasteGrid(text, delims) ?? [[text]]);
   };
 
+  // ---- Header name cell selection helpers ----------------------------------------------------
+
+  const selHeaderRef = useRef(selHeader);
+  selHeaderRef.current = selHeader;
+
+  /** Columns covered by the header selection, in display order. */
+  const headerSelectedCols = (): TableColumn[] => {
+    const sel = selHeaderRef.current;
+    if (!sel) return [];
+    const start = Math.min(sel.anchor, sel.focus);
+    const end = Math.max(sel.anchor, sel.focus);
+    return docRef.current.columns.slice(start, end + 1);
+  };
+
+  /** Copies the selected header names, joined with the active copy delimiter. */
+  const copyHeaderNames = (): boolean => {
+    const cols = headerSelectedCols();
+    if (cols.length === 0) return false;
+    copyTextToClipboard(cols.map((c) => encodeCellForCopy(c.name, copyDelimiterChar(delims))).join(copyDelimiterChar(delims)));
+    return true;
+  };
+
+  /** Writes pasted text into header names, one value per column from the selection start. */
+  const applyHeaderPasteText = (text: string): boolean => {
+    const sel = selHeaderRef.current;
+    if (!sel || !text) return false;
+    const values = (parsePasteGrid(text, delims) ?? [[text.trim()]])[0] ?? [];
+    if (values.length === 0) return false;
+    const start = Math.min(sel.anchor, sel.focus);
+    let next = docRef.current;
+    let changed = false;
+    values.forEach((value, i) => {
+      const col = next.columns[start + i];
+      if (col && col.name !== value.trim()) {
+        next = renameColumn(next, col.id, value.trim());
+        changed = true;
+      }
+    });
+    if (changed) emitChange(next);
+    return true;
+  };
+
+  /** Context-menu Paste for header names (prefers the real clipboard, falls back to the buffer). */
+  const pasteIntoHeader = async () => {
+    if (!selHeaderRef.current) return;
+    let text = '';
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      // Clipboard read denied (e.g. the desktop app) — fall back to the internal copy buffer.
+    }
+    if (!text) text = internalClipboardRef.current ?? '';
+    if (!text) {
+      alert(t('tableEditor.pasteUnavailable'));
+      return;
+    }
+    applyHeaderPasteText(text);
+  };
+
+  /** Clears the names of every selected header cell (Del / context-menu Clear). */
+  const clearHeaderNames = () => {
+    let next = docRef.current;
+    let changed = false;
+    for (const col of headerSelectedCols()) {
+      if (col.name !== '') {
+        next = renameColumn(next, col.id, '');
+        changed = true;
+      }
+    }
+    if (changed) emitChange(next);
+  };
+
   /** Clears the values of every cell in the current selection (Del / context-menu Clear). */
   const clearSelectedCells = useCallback(() => {
     const range = selectionRangeRef.current;
@@ -1007,7 +1187,7 @@ export function TableEditor({
 
   // ---- Right-click context menu (copy / copy values / paste / clear) ------------------------
 
-  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; kind: 'cell' | 'header' } | null>(null);
 
   useEffect(() => {
     if (!ctxMenu) return;
@@ -1028,13 +1208,35 @@ export function TableEditor({
     // While editing this cell, keep the native text menu (cut/copy/paste inside the textarea).
     if (isEditingCell(rowIdx, colIdx)) return;
     e.preventDefault();
+    setSelHeader(null);
     // Right-clicking outside the current selection retargets it to the clicked cell.
     if (!isCellSelected(rowIdx, colIdx)) {
       setSelAnchor({ rowIdx, colIdx });
       setSelFocus({ rowIdx, colIdx });
     }
     containerRef.current?.focus();
-    setCtxMenu({ x: e.clientX, y: e.clientY });
+    setCtxMenu({ x: e.clientX, y: e.clientY, kind: 'cell' });
+  };
+
+  /** Right-click on a header name cell: select it (keeping an existing multi-selection that
+   *  already covers it) and open the header variant of the context menu. */
+  const handleHeaderContextMenu = (e: MouseEvent, colIdx: number) => {
+    // While renaming this column, keep the native text menu inside the input.
+    if (renamingCol?.colId === doc.columns[colIdx]?.id) return;
+    e.preventDefault();
+    setSelAnchor(null);
+    setSelFocus(null);
+    setFocusCell(null);
+    setSelHeader((prev) => {
+      if (prev) {
+        const start = Math.min(prev.anchor, prev.focus);
+        const end = Math.max(prev.anchor, prev.focus);
+        if (colIdx >= start && colIdx <= end) return prev;
+      }
+      return { anchor: colIdx, focus: colIdx };
+    });
+    containerRef.current?.focus();
+    setCtxMenu({ x: e.clientX, y: e.clientY, kind: 'header' });
   };
 
   // Multi-cell copy: a selection spanning more than one cell is copied as tab-separated values
@@ -1144,6 +1346,7 @@ export function TableEditor({
     if (displayRows.length === 0) return;
     // Move keyboard focus to the grid so arrows / Del / copy shortcuts act on the selection.
     containerRef.current?.focus();
+    setSelHeader(null);
     setSelAnchor({ rowIdx: 0, colIdx });
     setSelFocus({ rowIdx: displayRows.length - 1, colIdx });
   };
@@ -1151,6 +1354,7 @@ export function TableEditor({
   const selectRow = (rowIdx: number) => {
     if (doc.columns.length === 0) return;
     containerRef.current?.focus();
+    setSelHeader(null);
     setSelAnchor({ rowIdx, colIdx: 0 });
     setSelFocus({ rowIdx, colIdx: doc.columns.length - 1 });
   };
@@ -1529,12 +1733,52 @@ export function TableEditor({
     // Esc with a selection but no cell being edited (e.g. a row/column selected via its
     // header): drop the selection entirely. The editing case is handled in handleCellKeyDown,
     // which stops propagation.
-    if (e.key === 'Escape' && (selAnchor || selFocus || focusCell)) {
+    if (e.key === 'Escape' && (selAnchor || selFocus || focusCell || selHeader)) {
       e.preventDefault();
       setSelAnchor(null);
       setSelFocus(null);
       setFocusCell(null);
+      setSelHeader(null);
       return;
+    }
+    // Selected header name cells mirror the grid-cell keyboard model: arrows move along the
+    // header (Shift extends the selection, Down drops into the first data row), Enter edits the
+    // focused one, Del clears every selected name, and a printable character starts a rename
+    // with that character (type-to-edit).
+    if (selHeader && !inTextField) {
+      const focusedCol = doc.columns[selHeader.focus];
+      if (focusedCol) {
+        if (arrowKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          e.preventDefault();
+          if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+            const next = Math.min(
+              Math.max(selHeader.focus + (e.key === 'ArrowRight' ? 1 : -1), 0),
+              doc.columns.length - 1,
+            );
+            setSelHeader(e.shiftKey ? { anchor: selHeader.anchor, focus: next } : { anchor: next, focus: next });
+          } else if (e.key === 'ArrowDown' && !e.shiftKey && displayRows.length > 0) {
+            setSelHeader(null);
+            setSelAnchor({ rowIdx: 0, colIdx: selHeader.focus });
+            setSelFocus({ rowIdx: 0, colIdx: selHeader.focus });
+          }
+          return;
+        }
+        if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+          e.preventDefault();
+          setRenamingCol({ colId: focusedCol.id, draft: focusedCol.name, selectAll: true });
+          return;
+        }
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+          e.preventDefault();
+          clearHeaderNames();
+          return;
+        }
+        if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          e.preventDefault();
+          setRenamingCol({ colId: focusedCol.id, draft: e.key });
+          return;
+        }
+      }
     }
     // Excel-style keyboard selection (only when the grid itself holds focus):
     // plain arrows move the selected cell, Shift+Arrow extends the selection from the anchor.
@@ -1596,6 +1840,8 @@ export function TableEditor({
     // pressing again (or when nothing is being edited) selects every cell.
     if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'a') {
       const el = document.activeElement;
+      // While renaming a column, Ctrl+A selects the name being edited, not the whole grid.
+      if (el instanceof HTMLInputElement && el.classList.contains('fn-table__rename-input')) return;
       if (el instanceof HTMLTextAreaElement && el.dataset.rowIdx !== undefined) {
         const fullySelected =
           (el.selectionStart ?? 0) === 0 && (el.selectionEnd ?? 0) === el.value.length;
@@ -1617,6 +1863,10 @@ export function TableEditor({
       !(document.activeElement instanceof HTMLInputElement) &&
       !(document.activeElement instanceof HTMLTextAreaElement)
     ) {
+      if (selHeader) {
+        if (copyHeaderNames()) e.preventDefault();
+        return;
+      }
       if (copyRangeViaExecCommand()) e.preventDefault();
       return;
     }
@@ -1830,9 +2080,9 @@ export function TableEditor({
         <select
           className="fn-table-fmt__size"
           title={t('tableEditor.alignH')}
-          value={anchorStyle.align ?? ''}
+          value={alignStyleSource.align ?? ''}
           onChange={(e) =>
-            applyStyle({ align: (e.target.value || undefined) as TableCellStyle['align'] })
+            applyAlignStyle({ align: (e.target.value || undefined) as TableCellStyle['align'] })
           }
         >
           <option value="">{t('tableEditor.alignHDefault')}</option>
@@ -1843,9 +2093,9 @@ export function TableEditor({
         <select
           className="fn-table-fmt__size"
           title={t('tableEditor.alignV')}
-          value={anchorStyle.valign ?? ''}
+          value={alignStyleSource.valign ?? ''}
           onChange={(e) =>
-            applyStyle({ valign: (e.target.value || undefined) as TableCellStyle['valign'] })
+            applyAlignStyle({ valign: (e.target.value || undefined) as TableCellStyle['valign'] })
           }
         >
           <option value="">{t('tableEditor.alignVDefault')}</option>
@@ -1879,6 +2129,14 @@ export function TableEditor({
           onClick={() => emitChange(promoteFirstRowToHeader(docRef.current))}
         >
           {t('tableEditor.useFirstRowAsHeader')}
+        </button>
+        <button
+          type="button"
+          disabled={!isPlainView}
+          title={t('tableEditor.headerToFirstRowHint')}
+          onClick={() => emitChange(demoteHeaderToFirstRow(docRef.current))}
+        >
+          {t('tableEditor.headerToFirstRow')}
         </button>
         <button type="button" title={t('tableEditor.insertNow')} onClick={insertLocalTime}>
           🕒
@@ -2003,7 +2261,7 @@ export function TableEditor({
       <div className="fn-table-wrap" ref={tableWrapRef}>
         <table className="fn-table">
           <thead>
-            <tr>
+            <tr ref={headRowRef}>
               <th className="fn-table__rowdel-col" />
               <th className="fn-table__rownum-col" title={t('tableEditor.rowNumberTooltip')}>
                 #
@@ -2042,32 +2300,13 @@ export function TableEditor({
                       >
                         {columnLetter(colIdx)}
                       </button>
-                      {renamingCol?.colId === col.id ? (
-                        <input
-                          className="fn-table__rename-input"
-                          value={renamingCol.draft}
-                          autoFocus
-                          placeholder={t('tableEditor.renameColumnPrompt')}
-                          onChange={(e) => setRenamingCol({ colId: col.id, draft: e.target.value })}
-                          onBlur={commitRename}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') commitRename();
-                            else if (e.key === 'Escape') setRenamingCol(null);
-                          }}
-                        />
-                      ) : (
-                        <button type="button" className="fn-table__sort" onClick={() => toggleSort(col.id)}>
-                          {col.name}
-                          {sortCol === col.id ? (sortDir === 'asc' ? ' ↑' : ' ↓') : ''}
-                        </button>
-                      )}
                       <button
                         type="button"
-                        className="fn-table__col-rename"
-                        title={t('tableEditor.renameColumn')}
-                        onClick={() => setRenamingCol({ colId: col.id, draft: col.name })}
+                        className="fn-table__sort-btn"
+                        title={t('tableEditor.sortColumn')}
+                        onClick={() => toggleSort(col.id)}
                       >
-                        ✎
+                        {sortCol === col.id ? (sortDir === 'asc' ? '↑' : '↓') : '↕'}
                       </button>
                       <button
                         type="button"
@@ -2103,6 +2342,91 @@ export function TableEditor({
                   </th>
                 );
               })}
+            </tr>
+            {/* Header name row: each cell behaves like a grid cell — click selects, Del clears,
+                Enter/double-click edits (text pre-selected), Enter confirms. */}
+            <tr className="fn-table__name-row">
+              <th className="fn-table__rowdel-col" />
+              <th className="fn-table__rownum-col" />
+              {doc.columns.map((col, colIdx) => (
+                <th
+                  key={col.id}
+                  className={[
+                    'fn-table__name-cell',
+                    doc.freezeFirstColumn && colIdx === 0 ? 'fn-table__col--frozen' : '',
+                    headerRange && colIdx >= headerRange.start && colIdx <= headerRange.end
+                      ? 'fn-table__name-cell--sel'
+                      : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                  style={col.headerStyle?.valign ? { verticalAlign: col.headerStyle.valign } : undefined}
+                  onMouseDown={(e) => {
+                    if (e.button !== 0 || renamingCol?.colId === col.id) return;
+                    e.preventDefault();
+                    const active = document.activeElement;
+                    if (active instanceof HTMLTextAreaElement && active.dataset.rowIdx !== undefined) {
+                      active.blur();
+                    }
+                    containerRef.current?.focus();
+                    setSelAnchor(null);
+                    setSelFocus(null);
+                    setFocusCell(null);
+                    if (e.shiftKey) {
+                      // Shift+click extends the header selection from its anchor.
+                      setSelHeader((prev) =>
+                        prev ? { anchor: prev.anchor, focus: colIdx } : { anchor: colIdx, focus: colIdx },
+                      );
+                      return;
+                    }
+                    setSelHeader({ anchor: colIdx, focus: colIdx });
+                    setIsHeaderSelecting(true);
+                  }}
+                  onMouseEnter={() => {
+                    if (isHeaderSelecting) {
+                      setSelHeader((prev) => (prev ? { anchor: prev.anchor, focus: colIdx } : prev));
+                    }
+                  }}
+                  onDoubleClick={() => setRenamingCol({ colId: col.id, draft: col.name, selectAll: true })}
+                  onContextMenu={(e) => handleHeaderContextMenu(e, colIdx)}
+                >
+                  {renamingCol?.colId === col.id ? (
+                    <input
+                      className="fn-table__rename-input"
+                      value={renamingCol.draft}
+                      autoFocus
+                      placeholder={t('tableEditor.renameColumnPrompt')}
+                      onFocus={(e) => {
+                        if (renamingCol.selectAll) e.currentTarget.select();
+                      }}
+                      onChange={(e) => setRenamingCol({ colId: col.id, draft: e.target.value })}
+                      onBlur={commitRename}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') commitRename();
+                        else if (e.key === 'Escape') setRenamingCol(null);
+                      }}
+                    />
+                  ) : (
+                    <div
+                      className="fn-table__name-text"
+                      title={col.name}
+                      style={col.headerStyle?.align ? { textAlign: col.headerStyle.align } : undefined}
+                    >
+                      {col.name}
+                    </div>
+                  )}
+                  <span
+                    className="fn-table__col-resize"
+                    title={t('tableEditor.colResizeTitle')}
+                    onMouseDown={(e) => handleColResizeStart(e, col.id)}
+                    onDoubleClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      autoFitColumn(col.id);
+                    }}
+                  />
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
@@ -2163,7 +2487,12 @@ export function TableEditor({
                       : formula
                         ? result!.display
                         : raw;
-                  const cellStyle = row.styles?.[col.id];
+                  // Effective style: per-cell overrides beat the row default, which beats the
+                  // column default (whole-row/column alignment lands on those defaults).
+                  const cellStyle: TableCellStyle | undefined =
+                    col.cellStyle || row.style || row.styles?.[col.id]
+                      ? { ...(col.cellStyle ?? {}), ...(row.style ?? {}), ...(row.styles?.[col.id] ?? {}) }
+                      : undefined;
                   const isFillOrigin =
                     isPlainView &&
                     !!selectionRange &&
@@ -2255,45 +2584,79 @@ export function TableEditor({
           // Keep the window-level dismiss listener from eating the buttons' clicks.
           onMouseDown={(e) => e.stopPropagation()}
         >
-          <button
-            type="button"
-            onClick={() => {
-              const text = buildRangeTsv('raw', true);
-              if (text !== null) copyTextToClipboard(text);
-              setCtxMenu(null);
-            }}
-          >
-            {t('tableEditor.ctxCopy')}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              const text = buildRangeTsv('values', true);
-              if (text !== null) copyTextToClipboard(text);
-              setCtxMenu(null);
-            }}
-          >
-            {t('tableEditor.ctxCopyValues')}
-          </button>
-          <button
-            type="button"
-            disabled={!isPlainView}
-            onClick={() => {
-              setCtxMenu(null);
-              void pasteIntoSelection();
-            }}
-          >
-            {t('tableEditor.ctxPaste')}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              clearSelectedCells();
-              setCtxMenu(null);
-            }}
-          >
-            {t('tableEditor.ctxClear')}
-          </button>
+          {ctxMenu.kind === 'header' ? (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  copyHeaderNames();
+                  setCtxMenu(null);
+                }}
+              >
+                {t('tableEditor.ctxCopy')}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setCtxMenu(null);
+                  void pasteIntoHeader();
+                }}
+              >
+                {t('tableEditor.ctxPaste')}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  clearHeaderNames();
+                  setCtxMenu(null);
+                }}
+              >
+                {t('tableEditor.ctxClear')}
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  const text = buildRangeTsv('raw', true);
+                  if (text !== null) copyTextToClipboard(text);
+                  setCtxMenu(null);
+                }}
+              >
+                {t('tableEditor.ctxCopy')}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const text = buildRangeTsv('values', true);
+                  if (text !== null) copyTextToClipboard(text);
+                  setCtxMenu(null);
+                }}
+              >
+                {t('tableEditor.ctxCopyValues')}
+              </button>
+              <button
+                type="button"
+                disabled={!isPlainView}
+                onClick={() => {
+                  setCtxMenu(null);
+                  void pasteIntoSelection();
+                }}
+              >
+                {t('tableEditor.ctxPaste')}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  clearSelectedCells();
+                  setCtxMenu(null);
+                }}
+              >
+                {t('tableEditor.ctxClear')}
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>

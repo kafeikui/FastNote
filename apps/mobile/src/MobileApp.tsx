@@ -869,19 +869,82 @@ export function MobileApp() {
     );
   };
 
-  const handleAiDelete = (id: string) => {
-    // Deleting a folder removes its whole subtree.
-    const doomed = new Set([id]);
+  /** Collects an AI node plus its whole subtree (folders cascade). */
+  const collectAiSubtree = (id: string): Set<string> => {
+    const out = new Set([id]);
     let grew = true;
     while (grew) {
       grew = false;
       for (const s of aiSessions) {
-        if (s.parentId && doomed.has(s.parentId) && !doomed.has(s.id)) {
-          doomed.add(s.id);
+        if (s.parentId && out.has(s.parentId) && !out.has(s.id)) {
+          out.add(s.id);
           grew = true;
         }
       }
     }
+    return out;
+  };
+
+  /** Deleting from the sidebar moves the node (with its subtree) into the recycle bin. */
+  const handleAiDelete = (id: string) => {
+    const doomed = collectAiSubtree(id);
+    const now = new Date().toISOString();
+    setAiSessions((prev) =>
+      prev.map((s) => {
+        if (!doomed.has(s.id) || s.trashed) return s;
+        const next = { ...s, trashed: true, updatedAt: now };
+        persistAiSession(next);
+        return next;
+      }),
+    );
+    setActiveAiSessionId((cur) => (cur && doomed.has(cur) ? null : cur));
+  };
+
+  /** Restores a recycle-bin entry (and its trashed subtree); orphans re-attach at the root. */
+  const handleAiRestore = (id: string) => {
+    const target = aiSessions.find((s) => s.id === id);
+    if (!target?.trashed) return;
+    const restoring = new Set([id]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const s of aiSessions) {
+        if (s.trashed && s.parentId && restoring.has(s.parentId) && !restoring.has(s.id)) {
+          restoring.add(s.id);
+          grew = true;
+        }
+      }
+    }
+    const parent = target.parentId ? aiSessions.find((s) => s.id === target.parentId) : undefined;
+    const parentOk = target.parentId === null || (parent && !parent.trashed);
+    const now = new Date().toISOString();
+    setAiSessions((prev) =>
+      prev.map((s) => {
+        if (!restoring.has(s.id)) return s;
+        const next = {
+          ...s,
+          trashed: false,
+          parentId: s.id === id && !parentOk ? null : s.parentId,
+          updatedAt: now,
+        };
+        persistAiSession(next);
+        return next;
+      }),
+    );
+  };
+
+  /** Permanently deletes one recycle-bin entry (tombstone, so the deletion syncs). */
+  const handleAiDeleteForever = (id: string) => {
+    const doomed = collectAiSubtree(id);
+    setAiSessions((prev) => prev.filter((s) => !doomed.has(s.id)));
+    for (const doomedId of doomed) void storage.deleteAiSession(doomedId);
+    setActiveAiSessionId((cur) => (cur && doomed.has(cur) ? null : cur));
+    scheduleAiSessionPush();
+  };
+
+  /** Permanently deletes everything in the AI recycle bin. */
+  const handleAiEmptyTrash = () => {
+    const doomed = new Set(aiSessions.filter((s) => s.trashed).map((s) => s.id));
     setAiSessions((prev) => prev.filter((s) => !doomed.has(s.id)));
     for (const doomedId of doomed) void storage.deleteAiSession(doomedId);
     setActiveAiSessionId((cur) => (cur && doomed.has(cur) ? null : cur));
@@ -1241,6 +1304,9 @@ export function MobileApp() {
                   onCreate={handleAiCreate}
                   onRename={handleAiRename}
                   onDelete={handleAiDelete}
+                  onRestore={handleAiRestore}
+                  onDeleteForever={handleAiDeleteForever}
+                  onEmptyTrash={handleAiEmptyTrash}
                   onMove={handleAiMove}
                 />
               )}
