@@ -68,6 +68,7 @@ import {
 } from './utils';
 import {
   DELIMITER_PRIORITY,
+  applyHorizontalFill,
   applyVerticalFill,
   copyDelimiterChar,
   encodeCellForCopy,
@@ -150,8 +151,8 @@ export function TableEditor({
   const [selAnchor, setSelAnchor] = useState<CellPos | null>(null);
   const [selFocus, setSelFocus] = useState<CellPos | null>(null);
   const [isSelecting, setIsSelecting] = useState(false);
-  /** Row the fill-handle drag currently points at (Excel-style autofill), null when not filling. */
-  const [fillTargetRow, setFillTargetRow] = useState<number | null>(null);
+  /** Cell the fill-handle drag currently points at (Excel-style autofill), null when not filling. */
+  const [fillTarget, setFillTarget] = useState<CellPos | null>(null);
   const [isFilling, setIsFilling] = useState(false);
   /** Live values while dragging a resize handle; committed to the document (and history) on mouseup. */
   const [liveColWidth, setLiveColWidth] = useState<{ colId: string; width: number } | null>(null);
@@ -481,6 +482,19 @@ export function TableEditor({
     };
   }, [selAnchor, selFocus]);
 
+  // Selecting a cell moves the "operation focus" with it, so toolbar insertions (time,
+  // attachments) and other focus-cell fallbacks target the *selected* cell — not whichever
+  // cell happened to be edited last.
+  useEffect(() => {
+    if (!selFocus) return;
+    const row = displayRows[selFocus.rowIdx];
+    const col = doc.columns[selFocus.colIdx];
+    if (!row || !col) return;
+    setFocusCell((prev) =>
+      prev && prev.rowId === row.id && prev.colId === col.id ? prev : { rowId: row.id, colId: col.id },
+    );
+  }, [selFocus, displayRows, doc.columns]);
+
   const isCellSelected = useCallback(
     (rowIdx: number, colIdx: number) => {
       if (!selectionRange) return false;
@@ -614,8 +628,12 @@ export function TableEditor({
     }
     // Clicking inside the cell that's already being edited keeps native caret placement.
     if (isEditingCell(rowIdx, colIdx)) return;
-    // Attachment chips keep their native interactions (click actions, HTML5 drag reordering).
+    // Attachment chips keep their native interactions (click actions, HTML5 drag reordering),
+    // but the selection and keyboard focus still move to this cell so copy/paste target it.
     if ((e.target as HTMLElement).closest?.('.fn-embed-attach')) {
+      const active = document.activeElement;
+      if (active instanceof HTMLTextAreaElement && active.dataset.rowIdx !== undefined) active.blur();
+      containerRef.current?.focus();
       setSelAnchor({ rowIdx, colIdx });
       setSelFocus({ rowIdx, colIdx });
       return;
@@ -681,7 +699,7 @@ export function TableEditor({
       return;
     }
     if (isFilling) {
-      setFillTargetRow(rowIdx);
+      setFillTarget({ rowIdx, colIdx });
       return;
     }
     if (!isSelecting) return;
@@ -700,38 +718,79 @@ export function TableEditor({
 
   const selectionRangeRef = useRef<typeof selectionRange>(null);
   selectionRangeRef.current = selectionRange;
-  const fillTargetRowRef = useRef<number | null>(null);
-  fillTargetRowRef.current = fillTargetRow;
+  const fillTargetRef = useRef<CellPos | null>(null);
+  fillTargetRef.current = fillTarget;
 
   const handleFillHandleMouseDown = (e: MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
     setIsFilling(true);
-    setFillTargetRow(null);
+    setFillTarget(null);
+  };
+
+  /** Picks the fill axis from where the drag points: the dominant overflow direction wins
+   *  (dragging mostly sideways fills by row and shifts column refs; mostly up/down fills by
+   *  column and shifts row refs, as before). */
+  const fillPlanFor = (
+    range: NonNullable<typeof selectionRange>,
+    target: CellPos,
+  ): { axis: 'row' | 'col'; target: number } | null => {
+    const rowOver =
+      target.rowIdx > range.rowEnd
+        ? target.rowIdx - range.rowEnd
+        : target.rowIdx < range.rowStart
+          ? target.rowIdx - range.rowStart
+          : 0;
+    const colOver =
+      target.colIdx > range.colEnd
+        ? target.colIdx - range.colEnd
+        : target.colIdx < range.colStart
+          ? target.colIdx - range.colStart
+          : 0;
+    if (rowOver === 0 && colOver === 0) return null;
+    return Math.abs(rowOver) >= Math.abs(colOver)
+      ? { axis: 'row', target: target.rowIdx }
+      : { axis: 'col', target: target.colIdx };
   };
 
   useEffect(() => {
     if (!isFilling) return;
     const finish = () => {
       const range = selectionRangeRef.current;
-      const target = fillTargetRowRef.current;
-      if (range && target !== null) {
-        emitChange(applyVerticalFill(docRef.current, range, target));
+      const target = fillTargetRef.current;
+      if (range && target) {
+        const plan = fillPlanFor(range, target);
+        if (plan) {
+          emitChange(
+            plan.axis === 'row'
+              ? applyVerticalFill(docRef.current, range, plan.target)
+              : applyHorizontalFill(docRef.current, range, plan.target),
+          );
+        }
       }
       setIsFilling(false);
-      setFillTargetRow(null);
+      setFillTarget(null);
     };
     window.addEventListener('mouseup', finish);
     return () => window.removeEventListener('mouseup', finish);
   }, [isFilling, emitChange]);
 
   const isFillPreviewCell = (rowIdx: number, colIdx: number): boolean => {
-    if (!isFilling || fillTargetRow === null || !selectionRange) return false;
-    if (colIdx < selectionRange.colStart || colIdx > selectionRange.colEnd) return false;
-    if (fillTargetRow > selectionRange.rowEnd) {
-      return rowIdx > selectionRange.rowEnd && rowIdx <= fillTargetRow;
+    if (!isFilling || !fillTarget || !selectionRange) return false;
+    const plan = fillPlanFor(selectionRange, fillTarget);
+    if (!plan) return false;
+    if (plan.axis === 'row') {
+      if (colIdx < selectionRange.colStart || colIdx > selectionRange.colEnd) return false;
+      if (plan.target > selectionRange.rowEnd) {
+        return rowIdx > selectionRange.rowEnd && rowIdx <= plan.target;
+      }
+      return rowIdx < selectionRange.rowStart && rowIdx >= plan.target;
     }
-    return rowIdx < selectionRange.rowStart && rowIdx >= fillTargetRow;
+    if (rowIdx < selectionRange.rowStart || rowIdx > selectionRange.rowEnd) return false;
+    if (plan.target > selectionRange.colEnd) {
+      return colIdx > selectionRange.colEnd && colIdx <= plan.target;
+    }
+    return colIdx < selectionRange.colStart && colIdx >= plan.target;
   };
 
   // ---- Cell formatting (bold / font size / colors) ----------------------------------------

@@ -1,5 +1,5 @@
 import type { TableDocument } from '@fastnote/shared';
-import { isFormulaValue } from './formula';
+import { columnLetter, isFormulaValue, letterToColumnIndex } from './formula';
 
 /**
  * Excel-style drag-fill and paste-grid helpers. Both operate on row/column *indices* of the
@@ -10,6 +10,10 @@ import { isFormulaValue } from './formula';
 // written back exactly as typed. Function names never end in digits, so they can't match.
 const CELL_REF = /([A-Za-z]+)(\d+)/g;
 
+// Whole-column reference halves (`C:C`, or the open end of `C1:C`): letters directly adjacent
+// to a range colon with no row digits. Function names never touch a colon, so they can't match.
+const COL_ONLY_REF = /([A-Za-z]+)(?=:)|(?<=:)([A-Za-z]+)(?![A-Za-z]*\d)/g;
+
 /** Shifts the row part of every A1-style cell reference in a formula by `offset` rows. */
 export function shiftFormulaRows(formula: string, offset: number): string {
   if (offset === 0) return formula;
@@ -17,6 +21,21 @@ export function shiftFormulaRows(formula: string, offset: number): string {
     const next = parseInt(row, 10) + offset;
     return next >= 1 ? `${col}${next}` : `${col}${row}`;
   });
+}
+
+/** Shifts the column part of every cell/column reference in a formula by `offset` columns. */
+export function shiftFormulaCols(formula: string, offset: number): string {
+  if (offset === 0) return formula;
+  const shiftLetters = (letters: string): string => {
+    const idx = letterToColumnIndex(letters.toUpperCase()) + offset;
+    if (idx < 0) return letters;
+    const out = columnLetter(idx);
+    // Preserve the case style the user typed (=sum(b1) stays lowercase).
+    return letters === letters.toLowerCase() ? out.toLowerCase() : out;
+  };
+  return formula
+    .replace(CELL_REF, (_m, col: string, row: string) => `${shiftLetters(col)}${row}`)
+    .replace(COL_ONLY_REF, (m) => shiftLetters(m));
 }
 
 function isNumeric(raw: string): boolean {
@@ -34,11 +53,17 @@ const TRAILING_INT = /^(.*?)(\d+)$/;
  * Computes the fill value for one target cell of one column.
  *
  * - all-numeric source: continues the arithmetic sequence (single value is copied)
- * - formula source: repeats the pattern with row references shifted, like Excel relative refs
+ * - formula source: repeats the pattern with row (vertical fill) or column (horizontal fill)
+ *   references shifted, like Excel relative refs
  * - single text value ending in a number: increments the trailing number ("Item 1" -> "Item 2")
  * - anything else: repeats the source pattern cyclically
  */
-export function fillValueAt(sourceValues: string[], step: number, direction: 1 | -1 = 1): string {
+export function fillValueAt(
+  sourceValues: string[],
+  step: number,
+  direction: 1 | -1 = 1,
+  axis: 'row' | 'col' = 'row',
+): string {
   const n = sourceValues.length;
   // step is the 1-based distance past the end of the source pattern.
   const cycle = (step - 1) % n;
@@ -58,7 +83,8 @@ export function fillValueAt(sourceValues: string[], step: number, direction: 1 |
   }
 
   if (isFormulaValue(base)) {
-    return shiftFormulaRows(base, direction * repeat * n);
+    const offset = direction * repeat * n;
+    return axis === 'col' ? shiftFormulaCols(base, offset) : shiftFormulaRows(base, offset);
   }
 
   if (n === 1) {
@@ -114,6 +140,44 @@ export function applyVerticalFill(
         ? fillValueAt(source, i + 1, 1)
         : fillValueAt(reversed, i + 1, -1);
       rows[rowIdx].cells[col.id] = value;
+    });
+  }
+  return { ...doc, rows };
+}
+
+/**
+ * Extends the selected range horizontally to `targetCol` (right of the selection) or leftwards
+ * when dragging left. Column indices refer to `doc.columns`; formulas shift column references.
+ */
+export function applyHorizontalFill(
+  doc: TableDocument,
+  selection: FillRange,
+  targetCol: number,
+): TableDocument {
+  const { rowStart, rowEnd, colStart, colEnd } = selection;
+  if (targetCol >= colStart && targetCol <= colEnd) return doc;
+  const rightward = targetCol > colEnd;
+  const targets: number[] = [];
+  if (rightward) {
+    for (let c = colEnd + 1; c <= targetCol && c < doc.columns.length; c++) targets.push(c);
+  } else {
+    for (let c = colStart - 1; c >= targetCol && c >= 0; c--) targets.push(c);
+  }
+  if (targets.length === 0) return doc;
+
+  const rows = doc.rows.map((r) => ({ ...r, cells: { ...r.cells } }));
+  for (let r = rowStart; r <= rowEnd; r++) {
+    const srcRow = doc.rows[r];
+    if (!srcRow) continue;
+    const source: string[] = [];
+    for (let c = colStart; c <= colEnd; c++) source.push(srcRow.cells[doc.columns[c]?.id ?? ''] ?? '');
+    const reversed = [...source].reverse();
+    targets.forEach((colIdx, i) => {
+      const colId = doc.columns[colIdx]?.id;
+      if (!colId) return;
+      rows[r].cells[colId] = rightward
+        ? fillValueAt(source, i + 1, 1, 'col')
+        : fillValueAt(reversed, i + 1, -1, 'col');
     });
   }
   return { ...doc, rows };

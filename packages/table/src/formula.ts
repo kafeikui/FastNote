@@ -52,7 +52,8 @@ export function columnLetter(index: number): string {
   return letters;
 }
 
-function letterToColumnIndex(letters: string): number {
+/** Spreadsheet-style letters -> 0-based column index ('A' -> 0, 'Z' -> 25, 'AA' -> 26, ...). */
+export function letterToColumnIndex(letters: string): number {
   let n = 0;
   for (const ch of letters) {
     n = n * 26 + (ch.charCodeAt(0) - 64);

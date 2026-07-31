@@ -452,7 +452,7 @@ export const zh = {
     uniformRowHeightApply: '应用到所有行',
     uniformRowHeightAuto: '恢复自动行高',
     formatNeedTarget: '请先选中单元格',
-    fillHandleTooltip: '选区右下角的填充柄可上下拖动自动填充（数字按序列递增，公式自动调整行引用）',
+    fillHandleTooltip: '选区右下角的填充柄可向上下左右拖动自动填充（数字按序列递增，公式上下填充调整行引用、左右填充调整列引用）',
     help: '表格帮助',
     helpCopy: '选中多个单元格后 Ctrl+C 复制，内容按生效分隔符（默认制表符）分列，可直接粘贴到 Excel/其它表格（公式复制为计算结果）',
     helpPaste: '粘贴多行/多列文本（如从 Excel 复制）会按生效的分隔符自动分列填入表格，点工具栏 ⌗ 按钮可自定义分隔符',

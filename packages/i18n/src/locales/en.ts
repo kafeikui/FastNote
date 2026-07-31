@@ -456,7 +456,7 @@ export const en: Dictionary = {
     uniformRowHeightApply: 'Apply to all rows',
     uniformRowHeightAuto: 'Reset to auto',
     formatNeedTarget: 'Select a cell first',
-    fillHandleTooltip: 'Drag the fill handle at the selection corner down/up to autofill (numbers continue the sequence, formulas shift row references)',
+    fillHandleTooltip: 'Drag the fill handle at the selection corner in any direction to autofill (numbers continue the sequence; formulas shift row references when filling vertically, column references when filling horizontally)',
     help: 'Table help',
     helpCopy: 'Select multiple cells and Ctrl+C to copy them separated by the active delimiter (tab by default) — pasteable into Excel and other tables (formulas copy as computed values)',
     helpPaste: 'Pasting multi-row/column text (e.g. copied from Excel) auto-splits into cells by the active delimiters — customize them via the ⌗ toolbar button',
