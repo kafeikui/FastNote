@@ -286,9 +286,27 @@ export class SyncClient {
    * changes made after the first sync don't themselves get re-synced.
    */
   async syncChatMessages(storage: StorageAdapter): Promise<{ pushed: number; pulled: number }> {
-    let pushed = 0;
+    const pushed = await this.pushChatMessages(storage);
     let pulled = 0;
 
+    const remoteItems = await this.api.pullChatMessages(this.session.token);
+    for (const item of remoteItems) {
+      if (await storage.hasChatMessage(item.message_id)) continue;
+      await storage.saveChatMessageFromRemote(item);
+      pulled++;
+    }
+
+    return { pushed, pulled };
+  }
+
+  /**
+   * Push-only half of `syncChatMessages`: uploads any locally-unsynced chat blobs. Used by the
+   * debounced real-time upload right after a message is sent/received — pulling the full remote
+   * history on every message would be wasteful, so pulls stay confined to login/unlock/manual
+   * sync (`syncChatMessages`).
+   */
+  async pushChatMessages(storage: StorageAdapter): Promise<number> {
+    let pushed = 0;
     const pending = await storage.listPendingChatMessages();
     for (const { id } of pending) {
       const wire = await storage.getChatMessageWire(id);
@@ -302,15 +320,7 @@ export class SyncClient {
       await storage.markChatMessageSynced(id);
       pushed++;
     }
-
-    const remoteItems = await this.api.pullChatMessages(this.session.token);
-    for (const item of remoteItems) {
-      if (await storage.hasChatMessage(item.message_id)) continue;
-      await storage.saveChatMessageFromRemote(item);
-      pulled++;
-    }
-
-    return { pushed, pulled };
+    return pushed;
   }
 
   /**

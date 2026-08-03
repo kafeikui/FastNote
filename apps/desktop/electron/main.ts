@@ -84,6 +84,17 @@ function createWindow() {
     win.focus();
   });
 
+  // In-app page reloads (server address / data directory changes) can leave the renderer
+  // without keyboard focus on Windows when a native dialog held OS focus just before the
+  // reload — the unlock password field then looks dead. Re-hand focus to the web contents
+  // after every load while the window is (or becomes) the focused one.
+  win.webContents.on('did-finish-load', () => {
+    if (win.isFocused()) win.webContents.focus();
+  });
+  win.on('focus', () => {
+    win.webContents.focus();
+  });
+
   const devUrl = process.env.VITE_DEV_SERVER_URL;
   if (devUrl) {
     void win.loadURL(devUrl).then(() => {

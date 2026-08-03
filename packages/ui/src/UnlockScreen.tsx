@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { APP_NAME } from '@fastnote/shared';
 import { useT } from '@fastnote/i18n';
 
@@ -30,6 +30,8 @@ interface UnlockScreenProps {
   onUnlockLocal: (password: string) => Promise<void>;
   onCloudSync: (params: CloudSyncParams) => Promise<void>;
   progress?: { current: number; total: number } | null;
+  /** Tab to open initially — e.g. 'cloud' right after a server-change reload. */
+  initialTab?: UnlockTab;
 }
 
 export function UnlockScreen({
@@ -44,10 +46,12 @@ export function UnlockScreen({
   onUnlockLocal,
   onCloudSync,
   progress = null,
+  initialTab = 'local',
 }: UnlockScreenProps) {
   const t = useT();
   const activeVault = vaults.find((v) => v.id === activeVaultId);
-  const [tab, setTab] = useState<UnlockTab>('local');
+  const [tab, setTab] = useState<UnlockTab>(initialTab);
+  const passwordRef = useRef<HTMLInputElement>(null);
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [username, setUsername] = useState(defaultUsername);
@@ -60,6 +64,44 @@ export function UnlockScreen({
   useEffect(() => {
     setUsername(defaultUsername);
   }, [defaultUsername, activeVaultId]);
+
+  // A bare `autoFocus` is not reliable on Windows/Electron right after a page reload that was
+  // triggered while a native dialog held OS focus (e.g. the server-change confirm): the renderer
+  // document isn't focused yet, Chromium skips autofocus, and the password field looks dead.
+  // Focus explicitly with a few retries over the first moments, and re-grab focus whenever the
+  // window itself regains focus while nothing else has it.
+  useEffect(() => {
+    const grab = () => {
+      const el = passwordRef.current;
+      if (!el) return;
+      const active = document.activeElement;
+      // Never steal focus from a field the user has already picked.
+      if (
+        active &&
+        active !== el &&
+        (active instanceof HTMLInputElement ||
+          active instanceof HTMLTextAreaElement ||
+          active instanceof HTMLSelectElement)
+      ) {
+        return;
+      }
+      el.focus();
+    };
+    grab();
+    const raf = requestAnimationFrame(grab);
+    const t1 = window.setTimeout(grab, 200);
+    const t2 = window.setTimeout(grab, 600);
+    const onWindowFocus = () => {
+      if (!document.activeElement || document.activeElement === document.body) grab();
+    };
+    window.addEventListener('focus', onWindowFocus);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+      window.removeEventListener('focus', onWindowFocus);
+    };
+  }, [tab]);
 
   async function handleLocalSubmit(e: FormEvent) {
     e.preventDefault();
@@ -244,6 +286,7 @@ export function UnlockScreen({
             </p>
             <form onSubmit={handleLocalSubmit}>
               <input
+                ref={passwordRef}
                 type="password"
                 placeholder={t('unlockScreen.masterPasswordPlaceholder')}
                 value={password}
@@ -279,7 +322,6 @@ export function UnlockScreen({
                 placeholder={t('unlockScreen.serverUrlPlaceholder')}
                 value={serverUrl}
                 onChange={(e) => setServerUrl(e.target.value)}
-                autoFocus
               />
               <input
                 type="text"
@@ -290,6 +332,7 @@ export function UnlockScreen({
                 readOnly={!!activeVault?.boundUsername}
               />
               <input
+                ref={passwordRef}
                 type="password"
                 placeholder={t('unlockScreen.masterPasswordPlaceholder')}
                 value={password}

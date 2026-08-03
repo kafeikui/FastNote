@@ -144,6 +144,9 @@ type AppView = 'notes' | 'chat';
 
 const SAVE_DEBOUNCE_MS = 500;
 
+/** sessionStorage key: which unlock tab to reopen after a server-change page reload. */
+const UNLOCK_TAB_HINT_KEY = 'fastnote_unlock_tab';
+
 function chatStatusRank(status: ChatMessage['status']): number {
   return status === 'read' ? 2 : status === 'delivered' ? 1 : 0;
 }
@@ -298,6 +301,19 @@ export function VaultApp() {
   // session immediately and show a banner prompting a fresh login instead.
   const [sessionExpired, setSessionExpired] = useState(false);
   const [serverUrl, setServerUrl] = useState(() => loadServerUrl());
+  // One-shot hint left behind by the server-change reload path in `handleCloudSync`, so the
+  // unlock screen reopens on the cloud tab with the new address prefilled.
+  const [unlockInitialTab] = useState<'local' | 'cloud'>(() => {
+    try {
+      if (sessionStorage.getItem(UNLOCK_TAB_HINT_KEY) === 'cloud') {
+        sessionStorage.removeItem(UNLOCK_TAB_HINT_KEY);
+        return 'cloud';
+      }
+    } catch {
+      /* ignore */
+    }
+    return 'local';
+  });
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
   const [expandedSearch, setExpandedSearch] = useState(false);
   const [searchTick, setSearchTick] = useState(0);
@@ -569,6 +585,31 @@ export function VaultApp() {
     }
   }, [keys, storage]);
 
+  /**
+   * Debounced real-time upload of chat history blobs: every sent/received message lands on the
+   * account within a few seconds instead of waiting for the next login/unlock/manual sync, so
+   * other devices of the same account can pull it. No-op while logged out — pending rows are
+   * picked up by the next sync as before.
+   */
+  const chatPushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Last reconnect catch-up chat sync (ms epoch), throttles the on-connect full sync. */
+  const lastChatCatchupRef = useRef(0);
+  const scheduleChatPush = () => {
+    if (chatPushTimerRef.current) clearTimeout(chatPushTimerRef.current);
+    chatPushTimerRef.current = setTimeout(() => {
+      chatPushTimerRef.current = null;
+      const s = sessionRef.current;
+      if (!s) return;
+      void new SyncClient(new ApiClient(serverUrl, locale), s)
+        .pushChatMessages(storage)
+        .catch((err) => {
+          console.warn('[FastNote] chat: realtime push failed (will retry on next sync)', err);
+        });
+    }, 3000);
+  };
+  const scheduleChatPushRef = useRef(scheduleChatPush);
+  scheduleChatPushRef.current = scheduleChatPush;
+
   const persistChatMessage = useCallback(
     async (message: ChatMessage) => {
       const k = keysRef.current;
@@ -580,6 +621,7 @@ export function VaultApp() {
         }
         return [...prev, message].sort((a, b) => a.sentAt.localeCompare(b.sentAt));
       });
+      scheduleChatPushRef.current();
     },
     [storage],
   );
@@ -647,6 +689,16 @@ export function VaultApp() {
     },
     [migrateLegacyChat, storage],
   );
+
+  /** Manual "sync history" from the chat header: full push+pull, then refresh the thread. */
+  const handleChatHistorySync = useCallback(async () => {
+    const k = keysRef.current;
+    const s = sessionRef.current;
+    if (!k || !s) throw new Error(t('chatPanel.syncNeedsLogin'));
+    const client = new SyncClient(new ApiClient(serverUrl, locale), s);
+    const { pulled } = await client.syncChatMessages(storage);
+    if (pulled > 0 && keysRef.current === k) await loadChatHistory(k);
+  }, [serverUrl, locale, storage, loadChatHistory, t]);
 
   const processIncomingChat = useCallback(
     async (peerId: string, plaintext: string, msgId: string, sentAt: string) => {
@@ -1040,10 +1092,21 @@ export function VaultApp() {
       };
 
       client.setPendingFetcher(() => pullPending());
+      // Reconnect catch-up: while this device was offline another logged-in device may have
+      // already delivery-acked (and thus deleted) queued relay messages, so the pending pull
+      // alone can miss them. Pull the account chat history too, throttled to once a minute.
+      client.setOnConnected(() => {
+        const now = Date.now();
+        if (now - lastChatCatchupRef.current < 60_000) return;
+        lastChatCatchupRef.current = now;
+        void handleChatHistorySync().catch(() => {
+          lastChatCatchupRef.current = 0; // let the next reconnect retry
+        });
+      });
       client.connect();
       void pullPending().catch((err) => console.error('fetchPending failed', err));
     },
-    [serverUrl, processIncomingChat, storage, t, updateChatMessageStatus],
+    [serverUrl, processIncomingChat, storage, t, updateChatMessageStatus, handleChatHistorySync],
   );
 
   /**
@@ -2958,6 +3021,22 @@ export function VaultApp() {
     username: string;
     serverUrl: string;
   }) => {
+    // A brand-new server origin can't be reached until the page's CSP is rebuilt around it, so
+    // logging in against it right away would just fail with an opaque network error. Save the
+    // address, tell the user what's happening, and reload — after the reload the unlock screen
+    // reopens on this tab with the address prefilled, ready for the actual login. (No native
+    // confirm here: on Windows/Electron it wrecks keyboard focus across the reload.)
+    if (serverUrlNeedsReload(nextServerUrl)) {
+      saveServerUrl(nextServerUrl);
+      setServerUrl(nextServerUrl);
+      try {
+        sessionStorage.setItem(UNLOCK_TAB_HINT_KEY, 'cloud');
+      } catch {
+        /* private mode etc. — worst case the user re-picks the tab */
+      }
+      window.setTimeout(() => window.location.reload(), 1800);
+      throw new Error(t('unlockScreen.serverChangedReloading'));
+    }
     commitServerUrl(nextServerUrl);
     const api = new ApiClient(nextServerUrl, locale);
     await assertVaultUsernameMatch(username);
@@ -3740,6 +3819,7 @@ export function VaultApp() {
           onUnlockLocal={handleUnlockLocal}
           onCloudSync={handleCloudSync}
           progress={unlockProgress}
+          initialTab={unlockInitialTab}
         />
       </I18nProvider>
     );
@@ -3974,6 +4054,7 @@ export function VaultApp() {
               onEditAttachment={handleChatAttachmentEdit}
               onRemoveAttachment={handleChatAttachmentRemove}
               onLoadAttachmentPreview={handleChatAttachmentPreview}
+              onSyncHistory={handleChatHistorySync}
             />
           ) : activeAiSession ? (
             <AiWorkbench

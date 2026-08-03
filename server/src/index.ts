@@ -307,7 +307,40 @@ app.delete<{ Params: { id: string } }>('/api/v1/messages/:id', async (req, reply
   return { ok: true };
 });
 
-const onlineSockets = new Map<string, WebSocket>();
+// All live connections per user — a user logged in on several devices has one socket per
+// device, and every frame addressed to them fans out to all of those sockets. (This used to be
+// a single-socket map, so a second device silently evicted the first and stopped its delivery.)
+const onlineSockets = new Map<string, Set<WebSocket>>();
+
+function registerSocket(userId: string, socket: WebSocket) {
+  let set = onlineSockets.get(userId);
+  if (!set) {
+    set = new Set();
+    onlineSockets.set(userId, set);
+  }
+  set.add(socket);
+}
+
+function unregisterSocket(userId: string, socket: WebSocket) {
+  const set = onlineSockets.get(userId);
+  if (!set) return;
+  set.delete(socket);
+  if (set.size === 0) onlineSockets.delete(userId);
+}
+
+/** Sends a frame to every open socket of a user; returns how many sockets it reached. */
+function sendToUser(userId: string, frame: string): number {
+  const set = onlineSockets.get(userId);
+  if (!set) return 0;
+  let sent = 0;
+  for (const socket of set) {
+    if (socket.readyState === 1) {
+      socket.send(frame);
+      sent += 1;
+    }
+  }
+  return sent;
+}
 
 function authTokenFromReq(req: { headers: { authorization?: string }; url?: string }): string | null {
   const header = authUser(req.headers.authorization);
@@ -331,9 +364,9 @@ app.register(async (fastify) => {
       socket.close();
       return;
     }
-    onlineSockets.set(userId, socket);
+    registerSocket(userId, socket);
     socket.on('close', () => {
-      if (onlineSockets.get(userId) === socket) onlineSockets.delete(userId);
+      unregisterSocket(userId, socket);
     });
     socket.on('message', (raw: Buffer | ArrayBuffer | Buffer[]) => {
       try {
@@ -369,10 +402,9 @@ app.register(async (fastify) => {
             JSON.stringify(msg.payload),
             sentAt,
           );
-          const peer = onlineSockets.get(msg.to);
-          if (peer && peer.readyState === 1) {
-            peer.send(JSON.stringify(envelope));
-            app.log.info({ from: userId, to: msg.to, id }, 'im message pushed');
+          const reached = sendToUser(msg.to, JSON.stringify(envelope));
+          if (reached > 0) {
+            app.log.info({ from: userId, to: msg.to, id, devices: reached }, 'im message pushed');
           } else {
             app.log.info({ from: userId, to: msg.to, id }, 'im message queued (offline)');
           }
@@ -389,18 +421,14 @@ app.register(async (fastify) => {
           // it no longer needs to sit in the recipient's offline mailbox —
           // without this, delivered messages would linger in message_queue
           // forever and get needlessly retried by the pending-poll cycle.
+          // (With multiple recipient devices the first ack wins; devices that
+          // were offline at send time catch up via the chat-history sync.)
           store.deleteMessage(msg.id, userId);
-          const peer = onlineSockets.get(msg.to);
-          if (peer && peer.readyState === 1) {
-            peer.send(JSON.stringify({ type: 'delivery_ack', id: msg.id, from: userId }));
-          }
+          sendToUser(msg.to, JSON.stringify({ type: 'delivery_ack', id: msg.id, from: userId }));
           return;
         }
         if (msg.type === 'read_ack' && msg.to && msg.id) {
-          const peer = onlineSockets.get(msg.to);
-          if (peer && peer.readyState === 1) {
-            peer.send(JSON.stringify({ type: 'read_ack', id: msg.id, from: userId }));
-          }
+          sendToUser(msg.to, JSON.stringify({ type: 'read_ack', id: msg.id, from: userId }));
         }
       } catch {
         /* ignore malformed */

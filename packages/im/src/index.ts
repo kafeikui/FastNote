@@ -135,6 +135,7 @@ export class IMClient {
   private disposed = false;
   private pendingPollTimer: ReturnType<typeof setInterval> | null = null;
   private pendingFetcher?: () => Promise<void>;
+  private onConnected?: () => void;
 
   constructor(
     private wsBaseUrl: string,
@@ -160,6 +161,11 @@ export class IMClient {
 
   setPendingFetcher(fetcher: () => Promise<void>): void {
     this.pendingFetcher = fetcher;
+  }
+
+  /** Fires on every successful (re)connect — used for catch-up syncs after being offline. */
+  setOnConnected(handler: () => void): void {
+    this.onConnected = handler;
   }
 
   upsertSession(
@@ -209,6 +215,7 @@ export class IMClient {
       this.openResolve?.();
       this.openResolve = null;
       void this.pendingFetcher?.();
+      this.onConnected?.();
     };
     this.ws.onclose = () => {
       this.openPromise = null;

@@ -1123,7 +1123,16 @@ export function TableEditor({
       const grid = parsePasteGrid(text, delims);
       if (!grid) return;
       e.preventDefault();
-      applyGridAt(Number(rowAttr), Number(colAttr), grid);
+      // The visible selection is the source of truth for where a grid paste starts. The event
+      // target can be a stale textarea that kept focus across structural edits (e.g. a row
+      // insert), whose data-row-idx then points at the wrong cell; while genuinely editing a
+      // cell the selection always equals that cell, so this never changes the editing case.
+      const range = selectionRangeRef.current;
+      applyGridAt(
+        range ? range.rowStart : Number(rowAttr),
+        range ? range.colStart : Number(colAttr),
+        grid,
+      );
       return;
     }
     // No cell being edited (grid container focused): paste replaces content at the selection.
@@ -1642,6 +1651,9 @@ export function TableEditor({
       setSelAnchor((p) => (p && p.colIdx >= at ? { ...p, colIdx: p.colIdx + 1 } : p));
       setSelFocus((p) => (p && p.colIdx >= at ? { ...p, colIdx: p.colIdx + 1 } : p));
     }
+    // Hand keyboard focus back to the grid so paste / arrows / typing act on the selection
+    // right away instead of sitting dead on the toolbar button.
+    containerRef.current?.focus();
   }, [locale, emitChange]);
 
   const handleAddRow = useCallback(() => {
@@ -1658,6 +1670,9 @@ export function TableEditor({
       setSelAnchor((p) => (p && p.rowIdx >= range.rowStart ? { ...p, rowIdx: p.rowIdx + 1 } : p));
       setSelFocus((p) => (p && p.rowIdx >= range.rowStart ? { ...p, rowIdx: p.rowIdx + 1 } : p));
     }
+    // Hand keyboard focus back to the grid so paste / arrows / typing act on the selection
+    // right away instead of sitting dead on the toolbar button.
+    containerRef.current?.focus();
   }, [emitChange]);
 
   // The × buttons unmount themselves on click, dropping keyboard focus to <body>; refocusing the

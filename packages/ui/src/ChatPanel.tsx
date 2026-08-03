@@ -15,6 +15,8 @@ interface ChatPanelProps {
   onEditAttachment: (attachmentId: string, description: string) => void | Promise<void>;
   onRemoveAttachment: (messageId: string, attachmentId: string) => void | Promise<void>;
   onLoadAttachmentPreview?: (attachmentId: string) => Promise<Blob | null>;
+  /** Manual "sync chat history with the account" (push pending + pull missing). */
+  onSyncHistory?: () => void | Promise<void>;
 }
 
 export function ChatPanel({
@@ -27,11 +29,13 @@ export function ChatPanel({
   onEditAttachment,
   onRemoveAttachment,
   onLoadAttachmentPreview,
+  onSyncHistory,
 }: ChatPanelProps) {
   const t = useT();
   const [draft, setDraft] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const [syncingHistory, setSyncingHistory] = useState(false);
   const [showNewMessages, setShowNewMessages] = useState(false);
   const messagesRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -164,10 +168,36 @@ export function ChatPanel({
     resetFileInput();
   }
 
+  async function handleSyncHistory() {
+    if (!onSyncHistory || syncingHistory) return;
+    setSyncingHistory(true);
+    setError(null);
+    try {
+      await onSyncHistory();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t('chatPanel.syncHistoryFailed'));
+    } finally {
+      setSyncingHistory(false);
+    }
+  }
+
   return (
     <div className="fn-chat">
       <div className="fn-chat__header">
-        {activePeerName ? t('chatPanel.conversationWith', { name: activePeerName }) : t('chatPanel.selectOrStart')}
+        <span className="fn-chat__header-title">
+          {activePeerName ? t('chatPanel.conversationWith', { name: activePeerName }) : t('chatPanel.selectOrStart')}
+        </span>
+        {onSyncHistory && (
+          <button
+            type="button"
+            className="fn-chat__sync-btn"
+            disabled={syncingHistory}
+            title={t('chatPanel.syncHistoryHint')}
+            onClick={() => void handleSyncHistory()}
+          >
+            {syncingHistory ? t('chatPanel.syncingHistory') : t('chatPanel.syncHistory')}
+          </button>
+        )}
       </div>
       <div className="fn-chat__messages-wrap">
         {showNewMessages && (

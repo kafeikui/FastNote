@@ -78,6 +78,10 @@ MVP（`docs/PHASE1.md` M1–M8）已全部完成并在 M8 之后继续做了大�
 - [x] 下拉填充支持小写单元格引用（`fill.ts` 的 `CELL_REF` 大小写不敏感）
 - [x] 表格内按 Del 不再触发侧栏文件删除（全局快捷键增加 defaultPrevented + `.fn-table-editor` guard）
 - [x] 回收站（笔记 + AI sidebar）：`trashed` 标记贯通 shared/storage/sync，删除先进回收站（有确认，文案提示可还原），支持还原/单项永久删除/清空（均有确认）；搜索、标签页、焦点历史对 trashed 隐身；共用组件 `TrashSection`，移动端 AI 树同步支持
+- [x] 表格多格粘贴锚定选区（2026-08-03）：`handleGridPaste` dataset 分支改用 `selectionRangeRef` 左上角作为起点（避免插行后残留焦点 textarea 的过期 data-row-idx）；`handleAddRow`/`handleAddColumn` 结束后焦点归还网格容器
+- [x] 聊天实时上传 + 手动同步按钮（2026-08-03）：`SyncClient.pushChatMessages`（push-only）+ `scheduleChatPush` 3s 防抖（VaultApp/MobileApp 的 `persistChatMessage`）；`ChatPanel` 头部"⟳ 同步历史"按钮（`onSyncHistory` prop，完整 push+pull 后刷新）
+- [x] 多端登录收不到聊天消息（2026-08-03，**需重新部署 server**）：`onlineSockets` 改为 `Map<string, Set<WebSocket>>` 全设备扇出（message/delivery_ack/read_ack）；`IMClient.setOnConnected` 重连时整账户聊天历史补拉（60s 节流），覆盖离线期间被其它设备 ack 删除的队列消息
+- [x] Win 版解锁页焦点 + 服务器地址手动输入（2026-08-03）：`UnlockScreen` 密码框显式聚焦（多次重试 + window focus 兜底，新增 `initialTab` prop）；desktop main.ts 在 `did-finish-load`/窗口 focus 时 `webContents.focus()`；解锁页云登录换新地址时不再中途弹原生 confirm——保存地址 + 提示 + 自动 reload 并经 `sessionStorage.fastnote_unlock_tab` 回到云同步 tab
 
 ## 已知问题 / 技术债
 

@@ -289,6 +289,22 @@ export function MobileApp() {
     return { identity, exchange };
   };
 
+  /** Debounced real-time upload of chat blobs so other devices can pull them right away. */
+  const chatPushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Last reconnect catch-up chat sync (ms epoch), throttles the on-connect full sync. */
+  const lastChatCatchupRef = useRef(0);
+  const scheduleChatPush = () => {
+    if (chatPushTimerRef.current) clearTimeout(chatPushTimerRef.current);
+    chatPushTimerRef.current = setTimeout(() => {
+      chatPushTimerRef.current = null;
+      const s = sessionRef.current;
+      if (!s) return;
+      void new SyncClient(new ApiClient(serverUrl(), locale), s)
+        .pushChatMessages(storage)
+        .catch((err) => console.warn('[chat] realtime push failed (will retry on next sync)', err));
+    }, 3000);
+  };
+
   const persistChatMessage = async (message: ChatMessage) => {
     const k = keysRef.current;
     if (!k) return;
@@ -299,6 +315,7 @@ export function MobileApp() {
       }
       return [...prev, message].sort((a, b) => a.sentAt.localeCompare(b.sentAt));
     });
+    scheduleChatPush();
   };
 
   /** Receipts only ever move a message's status forward (sent → delivered → read). */
@@ -416,6 +433,18 @@ export function MobileApp() {
       persistSessions();
     };
     client.setPendingFetcher(() => pullPending());
+    // Reconnect catch-up: another logged-in device may have already delivery-acked (deleted)
+    // queued relay messages while this device was offline, so also pull the account chat
+    // history on every (re)connect, throttled to once a minute.
+    client.setOnConnected(() => {
+      const now = Date.now();
+      if (now - lastChatCatchupRef.current < 60_000) return;
+      lastChatCatchupRef.current = now;
+      const k = keysRef.current;
+      const s = sessionRef.current;
+      if (!k || !s) return;
+      void syncChatHistory(s, k);
+    });
     client.connect();
     void pullPending().catch((err) => console.error('fetchPending failed', err));
   };
@@ -436,6 +465,16 @@ export function MobileApp() {
     } catch (err) {
       console.warn('[chat] history sync failed', err);
     }
+  };
+
+  /** Manual "sync history" from the chat header: full push+pull, then refresh the thread. */
+  const handleChatHistorySync = async () => {
+    const k = keysRef.current;
+    const s = sessionRef.current;
+    if (!k || !s) throw new Error(t('chatPanel.syncNeedsLogin'));
+    const client = new SyncClient(new ApiClient(serverUrl(), locale), s);
+    const { pulled } = await client.syncChatMessages(storage);
+    if (pulled > 0 && keysRef.current === k) await loadChatHistoryFor(k);
   };
 
   const ensureImReady = async (): Promise<IMClient> => {
@@ -1236,6 +1275,7 @@ export function MobileApp() {
               onEditAttachment={handleChatAttachmentEdit}
               onRemoveAttachment={handleChatAttachmentRemove}
               onLoadAttachmentPreview={handleChatAttachmentPreview}
+              onSyncHistory={handleChatHistorySync}
             />
           ) : activeAiSession ? (
             <AiWorkbench

@@ -400,6 +400,18 @@
   - AI 侧：`handleAiDelete` 改为标记 trashed（+ 清 activeAiSessionId），`handleAiRestore`/`handleAiDeleteForever`/`handleAiEmptyTrash` 同笔记语义；`MobileApp.tsx` 有同一套镜像实现。
   - UI：新组件 `packages/ui/src/TrashSection.tsx`（两个树共用；折叠标题 + 数量 + 清空按钮，条目行 ↩ 还原 / × 永久删除；删除、清空、永久删除都有确认，还原没有）。`NoteTree`/`AiSessionTree` 内部过滤 trashed 构树，回收站只列 trashed 子树的根（父节点不是 trashed 的），还原/清空随根带走整棵子树。新 i18n 组 `trash.*`，新 CSS 组 `.fn-trash*`。
 
+## 本次会话的实质性变更（聊天多端 + Win 解锁焦点 + 表格粘贴锚点，2026-08-03）
+
+- **表格粘贴锚点以选区为准**（`packages/table/src/TableEditor.tsx`）：`handleGridPaste` 的 dataset 分支（粘贴事件落在某个 textarea 上）改为优先用 `selectionRangeRef.current` 的左上角作为多格粘贴起点——结构性操作（如插入行）后可能有残留焦点的旧 textarea，其 `data-row-idx` 指向错误行；正常编辑时选区恒等于编辑格，行为不变。另外 `handleAddColumn`/`handleAddRow` 结束时 `containerRef.focus()`，插入后键盘/粘贴立即作用于网格而不是停留在工具栏按钮上。
+- **聊天实时上传**：`SyncClient` 拆出 `pushChatMessages(storage)`（push-only，`syncChatMessages` 复用它）；`VaultApp`/`MobileApp` 新增 `scheduleChatPush`（3s 防抖，挂在 `persistChatMessage` 末尾），发送/接收后几秒内密文 blob 即上传账户，未登录时静默跳过、由下次同步兜底。
+- **聊天手动同步历史按钮**：`ChatPanel` 新增可选 prop `onSyncHistory`，头部"⟳ 同步历史"按钮（syncing 态 + 错误显示）；`VaultApp.handleChatHistorySync` / `MobileApp.handleChatHistorySync` 执行完整 `syncChatMessages`（push+pull），`pulled > 0` 时刷新线程。i18n 新键 `chatPanel.syncHistory/syncingHistory/syncHistoryHint/syncHistoryFailed/syncNeedsLogin`；CSS `.fn-chat__header` 改 flex，新 `.fn-chat__header-title`/`.fn-chat__sync-btn`。
+- **多端登录收不到消息（根因修复，需重新部署 server）**：`server/src/index.ts` 的 `onlineSockets` 从 `Map<string, WebSocket>`（第二台设备连接会顶掉第一台）改为 `Map<string, Set<WebSocket>>` + `registerSocket`/`unregisterSocket`/`sendToUser` 广播，message/delivery_ack/read_ack 都扇出到该用户所有在线设备。遗留语义：`delivery_ack` 仍会删掉离线队列条目（首个确认的设备生效）——当时离线的设备错过实时推送后由聊天历史同步补齐。
+- **重连补拉**：`IMClient` 新增 `setOnConnected`（每次 WS (re)connect 触发）；`VaultApp`/`MobileApp` 在其中做整账户聊天历史同步（60s 节流 ref `lastChatCatchupRef`），覆盖"离线期间消息被其它设备 ack 删除"的空洞。
+- **Win 版解锁页焦点丢失**（根因：原生 confirm 抢走 OS 焦点后 reload，Chromium 对未聚焦 document 跳过 autofocus）：
+  - `UnlockScreen`：`passwordRef` 挂在两个 tab 的密码框上，mount/切 tab 时显式 focus（立即 + rAF + 200ms + 600ms 重试），window focus 事件里若无焦点元素再抢回；不会从用户已点选的输入框抢焦点。新增 `initialTab` prop。
+  - `apps/desktop/electron/main.ts`：`did-finish-load`（窗口聚焦时）与窗口 `focus` 事件都调用 `webContents.focus()`，修复 reload 后渲染进程键盘焦点悬空。
+- **解锁页手动改服务器地址**（原问题：云登录时输入新地址 → `commitServerUrl` 中途弹原生 confirm+reload 打断登录；取消则请求被 CSP 拦截，看起来"没法手动输入"）：`handleCloudSync` 开头检测 `serverUrlNeedsReload`，若需要重载则保存地址、写 `sessionStorage.fastnote_unlock_tab='cloud'`、抛出 `unlockScreen.serverChangedReloading` 提示并 1.8s 后自动 reload；重载后 `VaultApp` 一次性读取该标记并通过 `initialTab` 让解锁页直接打开云同步 tab（地址已预填），用户重输密码登录即可。设置页的 `commitServerUrl` confirm 流程保留（焦点问题已由上面两条硬化覆盖）。
+
 ## 活跃的技术决策 / 约定（后续开发请遵守）
 
 - **新增持久化设置**一律走 `packages/api/src/index.ts` 的 `loadXxx`/`saveXxx` 命名对模式，`VaultApp.tsx` 里用 `useState(() => loadXxx())` 初始化。
