@@ -412,6 +412,14 @@
   - `apps/desktop/electron/main.ts`：`did-finish-load`（窗口聚焦时）与窗口 `focus` 事件都调用 `webContents.focus()`，修复 reload 后渲染进程键盘焦点悬空。
 - **解锁页手动改服务器地址**（原问题：云登录时输入新地址 → `commitServerUrl` 中途弹原生 confirm+reload 打断登录；取消则请求被 CSP 拦截，看起来"没法手动输入"）：`handleCloudSync` 开头检测 `serverUrlNeedsReload`，若需要重载则保存地址、写 `sessionStorage.fastnote_unlock_tab='cloud'`、抛出 `unlockScreen.serverChangedReloading` 提示并 1.8s 后自动 reload；重载后 `VaultApp` 一次性读取该标记并通过 `initialTab` 让解锁页直接打开云同步 tab（地址已预填），用户重输密码登录即可。设置页的 `commitServerUrl` confirm 流程保留（焦点问题已由上面两条硬化覆盖）。
 
+## 本次会话的实质性变更（搜索下划线/孤儿笔记 + 表格日期填充 + 交换公式跟随，2026-08-06）
+
+- **全局搜索搜不到下划线关键词（根因修复）**：`packages/search` 的 `stripMarkdownForSearch` 原来用 `/\*\*|__|\*|_|~~/g` 把**所有** `_` 当强调符剥掉，`run_evm_holder_changes_server` 在索引里变成 `runevmholderchangesserver`。改为只剥词边界上的下划线（`/(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])/g`），标识符内部的 `_` 保留（`_em_`/`__bold__` 仍会剥掉；`__init__` 这类 dunder 是已知牺牲）。**配套**：`VaultApp.searchFingerprint` 加了 `search-schema-v2|` 前缀，老快照指纹失配 → 下次解锁自动全量重建，用户无需手动清缓存。以后凡是改 tokenizer/剥离规则都要 bump 这个 schema 标记。
+- **全局搜索重复结果"无法定位"（根因=孤儿笔记）**：搜索结果本身已按 live notes 过滤 + 按 id 去重，重复的第二条是**存储里真实存在但父节点丢失的孤儿行**（例如另一台设备删了父文件夹、子笔记后同步进来）——旧 `buildTree` 只从存在的父节点向下递归，孤儿永远不进侧栏树，但会被索引和搜索到。修复：`packages/shared` 的 `buildTree` 现在把 `parentId` 指向不存在（或已 deleted）节点的条目**收养到根层级**，可见、可定位、可删除（进回收站后重复结果即消失）。注意收养只发生在顶层调用（`parentId === null`）；两个调用方（VaultApp 焦点遍历、NoteTree）都从根构树。环状 parentId（A↔B）不在处理范围。
+- **表格日期自动填充**（`packages/table/src/fill.ts`）：新导出 `parseDateValue`（支持 `YYYY-MM-DD` / `YYYY/M/D` / `YYYY.M.D` / `YYYY年M月D日`，UTC 往返校验拒绝 2026-02-30 这类假日期）；`fillValueAt` 在数字分支**之前**检查全日期源：单格 +1 天/步，多格按天差等差延续（`Math.round` 容忍不均匀源），上/左方向由调用方反转源序列的既有约定自然生效。格式保真：分隔符、月/日补零风格、中文年月日按源样式输出（多格时用第一格的样式）。日期序列走 `Date.UTC` 天序数运算，无 DST/时区问题。
+- **Alt+方向键交换自动调整公式**：`formula.ts` 新导出 `rewriteFormulaRefsForSwap(raw, kind, i, j)`（行/列交换：引用**跟随内容**做 i↔j 置换映射，公式计算结果不因交换而变；范围端点同样映射后重新归一化 lo/hi——交换完全在范围内或完全在范围外时不变；`C:C` 整列引用跟随；混合形式 `C1:C` 保持端点角色）和 `rewriteFormulaRefsForCellSwap(raw, a, b)`（单格交换：只重写恰好指向这两个格子的单元引用，范围不动——单格跨范围边界移动无法用范围表达）。接线在 `utils.ts` 的 `swapRows`/`swapColumns`/`swapCells` 内部（都先换位再 `rewriteDocFormulas`，置换映射对称所以顺序无关），Alt+↑↓←→ 的三条路径（整行/整列/单格）自动受益。范围端点部分覆盖交换时按"端点跟随"规则（如 `B1:B3` 交换行 3、5 → `B1:B5`），与插入的吸收语义一致的取舍。
+- 冒烟测试：`/tmp/fn-search-test.mjs`（9 断言）+ `/tmp/fn-table-swap-date-test.mjs`（34 断言）全过；全仓 18 包 typecheck 通过。
+
 ## 活跃的技术决策 / 约定（后续开发请遵守）
 
 - **新增持久化设置**一律走 `packages/api/src/index.ts` 的 `loadXxx`/`saveXxx` 命名对模式，`VaultApp.tsx` 里用 `useState(() => loadXxx())` 初始化。

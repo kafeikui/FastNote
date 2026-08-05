@@ -256,6 +256,73 @@ export function rewriteFormulaRefsForDelete(
   });
 }
 
+/**
+ * Rewrites references after two rows or two columns swap positions (Alt+Arrow reordering).
+ * References follow the moved content — a reference to row/column `i` now points at `j` and
+ * vice versa — so a formula's result never changes because of a swap. Range endpoints are
+ * mapped the same way and re-normalized (so a swap entirely inside or entirely outside a
+ * range leaves it untouched). Non-formula values are returned unchanged.
+ */
+export function rewriteFormulaRefsForSwap(
+  raw: string,
+  kind: 'row' | 'col',
+  i: number,
+  j: number,
+): string {
+  if (!isFormulaValue(raw) || i === j) return raw;
+  const map = (v: number): number => (v === i ? j : v === j ? i : v);
+  return rewriteFormulaRefs(raw, (unit) => {
+    if (unit.type === 'cell') {
+      const next =
+        kind === 'col' ? { ...unit, col: map(unit.col) } : { ...unit, row: map(unit.row) };
+      return next.col === unit.col && next.row === unit.row ? null : next;
+    }
+    const a = { ...unit.a };
+    const b = { ...unit.b };
+    if (kind === 'col') {
+      a.col = map(a.col);
+      b.col = map(b.col);
+    } else {
+      if (a.row !== null) a.row = map(a.row);
+      if (b.row !== null) b.row = map(b.row);
+    }
+    // Re-normalize corner order (mixed forms like C1:C keep their endpoint roles).
+    if (a.col > b.col) {
+      const t = a.col;
+      a.col = b.col;
+      b.col = t;
+    }
+    if (a.row !== null && b.row !== null && a.row > b.row) {
+      const t = a.row;
+      a.row = b.row;
+      b.row = t;
+    }
+    return a.col === unit.a.col && a.row === unit.a.row && b.col === unit.b.col && b.row === unit.b.row
+      ? null
+      : { type: 'range', a, b };
+  });
+}
+
+/**
+ * Rewrites references after two individual cells swap contents (single-cell Alt+Arrow):
+ * a reference to exactly one of the two cells follows its content to the other position.
+ * Ranges are left untouched — a single cell moving across a range boundary isn't expressible
+ * as a range edit.
+ */
+export function rewriteFormulaRefsForCellSwap(
+  raw: string,
+  a: { row: number; col: number },
+  b: { row: number; col: number },
+): string {
+  if (!isFormulaValue(raw) || (a.row === b.row && a.col === b.col)) return raw;
+  return rewriteFormulaRefs(raw, (unit) => {
+    if (unit.type !== 'cell') return null;
+    if (unit.row === a.row && unit.col === a.col) return { ...unit, row: b.row, col: b.col };
+    if (unit.row === b.row && unit.col === b.col) return { ...unit, row: a.row, col: a.col };
+    return null;
+  });
+}
+
 export class FormulaEvalError extends Error {
   code: string;
   constructor(code: string) {

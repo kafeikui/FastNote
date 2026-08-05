@@ -11,8 +11,10 @@ import { translate, type Locale } from '@fastnote/i18n';
 import {
   cellDisplayValue,
   isFormulaValue,
+  rewriteFormulaRefsForCellSwap,
   rewriteFormulaRefsForDelete,
   rewriteFormulaRefsForInsert,
+  rewriteFormulaRefsForSwap,
 } from './formula';
 
 /** Applies a formula-reference rewriter to every formula cell of the document. */
@@ -484,24 +486,26 @@ export function demoteHeaderToFirstRow(doc: TableDocument): TableDocument {
   return rewriteDocFormulasForInsert({ ...doc, columns, rows: [row, ...doc.rows] }, 'row', 0);
 }
 
-/** Swaps the positions of two columns (by id) in the column order. */
+/** Swaps the positions of two columns (by id); references follow the moved content. */
 export function swapColumns(doc: TableDocument, colIdA: string, colIdB: string): TableDocument {
   const a = doc.columns.findIndex((c) => c.id === colIdA);
   const b = doc.columns.findIndex((c) => c.id === colIdB);
   if (a === -1 || b === -1 || a === b) return doc;
   const columns = [...doc.columns];
   [columns[a], columns[b]] = [columns[b], columns[a]];
-  return { ...doc, columns };
+  return rewriteDocFormulas({ ...doc, columns }, (raw) =>
+    rewriteFormulaRefsForSwap(raw, 'col', a, b),
+  );
 }
 
-/** Swaps the positions of two rows (by id) in the row order. */
+/** Swaps the positions of two rows (by id); references follow the moved content. */
 export function swapRows(doc: TableDocument, rowIdA: string, rowIdB: string): TableDocument {
   const a = doc.rows.findIndex((r) => r.id === rowIdA);
   const b = doc.rows.findIndex((r) => r.id === rowIdB);
   if (a === -1 || b === -1 || a === b) return doc;
   const rows = [...doc.rows];
   [rows[a], rows[b]] = [rows[b], rows[a]];
-  return { ...doc, rows };
+  return rewriteDocFormulas({ ...doc, rows }, (raw) => rewriteFormulaRefsForSwap(raw, 'row', a, b));
 }
 
 /** Swaps two cells' content and per-cell style (the cells may live in different rows/columns). */
@@ -534,10 +538,21 @@ export function swapCells(
     if (row.id === b.rowId) patch(b.colId, valueA, styleA);
     return next;
   };
-  return {
+  const swapped = {
     ...doc,
     rows: doc.rows.map((r) => (r.id === a.rowId || r.id === b.rowId ? applyToRow(r) : r)),
   };
+  // References to exactly one of the two cells follow their content to the other position.
+  const posA = {
+    row: doc.rows.findIndex((r) => r.id === a.rowId),
+    col: doc.columns.findIndex((c) => c.id === a.colId),
+  };
+  const posB = {
+    row: doc.rows.findIndex((r) => r.id === b.rowId),
+    col: doc.columns.findIndex((c) => c.id === b.colId),
+  };
+  if (posA.col === -1 || posB.col === -1) return swapped;
+  return rewriteDocFormulas(swapped, (raw) => rewriteFormulaRefsForCellSwap(raw, posA, posB));
 }
 
 export const MIN_COL_WIDTH = 48;

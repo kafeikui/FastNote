@@ -18,7 +18,10 @@ export function stripMarkdownForSearch(text: string): string {
     .replace(/^#{1,6}\s+/gm, '')
     .replace(/^>\s?/gm, '')
     .replace(/^[-*+]\s+/gm, '')
-    .replace(/\*\*|__|\*|_|~~/g, '')
+    .replace(/\*\*|\*|~~/g, '')
+    // Emphasis underscores only occur at word edges; inner underscores are part of identifiers
+    // like run_evm_holder_changes_server and must stay searchable.
+    .replace(/(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])/g, '')
     .replace(/\s+/g, ' ')
     .trim();
 }

@@ -324,13 +324,22 @@ export { normalizeLatexDelimiters, extractMathSegments } from './latexDelimiters
 export type { MathSegment } from './latexDelimiters';
 
 export function buildTree(notes: NoteNode[], parentId: string | null = null): TreeItem[] {
-  return notes
-    .filter((n) => !n.deleted && n.parentId === parentId)
-    .sort((a, b) => a.sortOrder - b.sortOrder || a.title.localeCompare(b.title))
-    .map((node) => ({
-      node,
-      children: buildTree(notes, node.id),
-    }));
+  const live = notes.filter((n) => !n.deleted);
+  // Orphans (parentId pointing at a node that no longer exists — e.g. the parent was deleted on
+  // another device before this child synced) are adopted at the root level: otherwise they stay
+  // invisible in the sidebar forever while still existing in storage and search results.
+  const liveIds = new Set(live.map((n) => n.id));
+  const isChildOf = (n: NoteNode, pid: string | null): boolean =>
+    pid === null ? n.parentId === null || !liveIds.has(n.parentId) : n.parentId === pid;
+  const level = (pid: string | null): TreeItem[] =>
+    live
+      .filter((n) => isChildOf(n, pid))
+      .sort((a, b) => a.sortOrder - b.sortOrder || a.title.localeCompare(b.title))
+      .map((node) => ({
+        node,
+        children: level(node.id),
+      }));
+  return level(parentId);
 }
 
 export function isDescendantOf(notes: NoteNode[], ancestorId: string, nodeId: string): boolean {

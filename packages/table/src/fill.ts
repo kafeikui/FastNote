@@ -42,6 +42,55 @@ function isNumeric(raw: string): boolean {
   return raw.trim() !== '' && !Number.isNaN(Number(raw));
 }
 
+// --- date sequences ------------------------------------------------------------------------
+
+interface ParsedDate {
+  y: number;
+  m: number;
+  d: number;
+  /** '-', '/', '.' — or 'cn' for the 2026年8月3日 form. */
+  sep: string;
+  /** Whether month/day were zero-padded in the source (preserved when formatting). */
+  padM: boolean;
+  padD: boolean;
+}
+
+const DATE_SEP_RE = /^(\d{4})([-/.])(\d{1,2})\2(\d{1,2})$/;
+const DATE_CN_RE = /^(\d{4})年(\d{1,2})月(\d{1,2})日$/;
+
+/** Parses a plain date value (YYYY-MM-DD, YYYY/M/D, YYYY.M.D or YYYY年M月D日); null otherwise. */
+export function parseDateValue(raw: string): ParsedDate | null {
+  const s = raw.trim();
+  const m = DATE_SEP_RE.exec(s) ?? DATE_CN_RE.exec(s);
+  if (!m) return null;
+  const sep = m.length === 5 ? m[2] : 'cn';
+  const [y, mo, d] =
+    sep === 'cn'
+      ? [Number(m[1]), Number(m[2]), Number(m[3])]
+      : [Number(m[1]), Number(m[3]), Number(m[4])];
+  // Reject impossible dates (2026-02-30) via a UTC round-trip.
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return null;
+  const moStr = sep === 'cn' ? m[2] : m[3];
+  const dStr = sep === 'cn' ? m[3] : m[4];
+  return { y, m: mo, d, sep, padM: moStr.length === 2, padD: dStr.length === 2 };
+}
+
+/** Days since the epoch (UTC — immune to DST because only Y/M/D are ever involved). */
+function dateToSerial(p: ParsedDate): number {
+  return Date.UTC(p.y, p.m - 1, p.d) / 86400000;
+}
+
+/** Formats a day serial back into the source date's style (separator + zero padding). */
+function formatDateLike(style: ParsedDate, serial: number): string {
+  const dt = new Date(serial * 86400000);
+  const y = dt.getUTCFullYear();
+  const mo = String(dt.getUTCMonth() + 1).padStart(style.padM ? 2 : 1, '0');
+  const d = String(dt.getUTCDate()).padStart(style.padD ? 2 : 1, '0');
+  if (style.sep === 'cn') return `${y}年${mo}月${d}日`;
+  return `${y}${style.sep}${mo}${style.sep}${d}`;
+}
+
 function formatFillNumber(n: number): string {
   const rounded = Math.round(n * 1e9) / 1e9;
   return String(rounded);
@@ -53,6 +102,8 @@ const TRAILING_INT = /^(.*?)(\d+)$/;
  * Computes the fill value for one target cell of one column.
  *
  * - all-numeric source: continues the arithmetic sequence (single value is copied)
+ * - all-date source (YYYY-MM-DD / YYYY/M/D / YYYY.M.D / YYYY年M月D日): continues the day
+ *   sequence — a single date advances one day per cell, two or more continue their day delta
  * - formula source: repeats the pattern with row (vertical fill) or column (horizontal fill)
  *   references shifted, like Excel relative refs
  * - single text value ending in a number: increments the trailing number ("Item 1" -> "Item 2")
@@ -69,6 +120,18 @@ export function fillValueAt(
   const cycle = (step - 1) % n;
   const repeat = Math.floor((step - 1) / n) + 1;
   const base = sourceValues[cycle];
+
+  const dates = sourceValues.map(parseDateValue);
+  if (dates.every((d): d is NonNullable<typeof d> => d !== null)) {
+    const serials = dates.map(dateToSerial);
+    if (n === 1) {
+      return formatDateLike(dates[0], serials[0] + direction * step);
+    }
+    // Like numbers: the caller passes the source reversed when filling up/left, so the derived
+    // delta already points in the right direction.
+    const delta = (serials[n - 1] - serials[0]) / (n - 1);
+    return formatDateLike(dates[0], Math.round(serials[0] + delta * (n + step - 1)));
+  }
 
   if (sourceValues.every((v) => isNumeric(v))) {
     if (n === 1) {

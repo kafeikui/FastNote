@@ -847,13 +847,16 @@ export function VaultApp() {
    * snapshot so unlock can tell whether the snapshot still matches the database — if it does, the
    * expensive full index rebuild is skipped entirely.
    */
+  // The schema tag invalidates persisted snapshots whenever tokenization/stripping rules change
+  // (v2: underscores inside identifiers are no longer stripped), forcing a clean rebuild.
   const searchFingerprint = (items: NoteNode[]): string =>
     hashContent(
-      items
-        .filter((n) => !n.deleted)
-        .map((n) => `${n.id}:${n.version}`)
-        .sort()
-        .join('|'),
+      'search-schema-v2|' +
+        items
+          .filter((n) => !n.deleted)
+          .map((n) => `${n.id}:${n.version}`)
+          .sort()
+          .join('|'),
     );
 
   /**
