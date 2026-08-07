@@ -50,9 +50,11 @@ export interface SyncNotePayload {
   updated_at: string;
 }
 
-/** Column-level numeric display format; raw cell values stay untouched. */
+/** Numeric display format (column- or cell-level); raw cell values stay untouched. */
 export interface TableColumnFormat {
-  kind: 'number' | 'currency' | 'percent';
+  /** 'none' only ever appears as a cell-level override meaning "explicitly unformatted"
+   *  (needed so a cell inside a formatted column can opt out of the column format). */
+  kind: 'number' | 'currency' | 'percent' | 'none';
   /** Fixed number of decimal places (0-6). */
   decimals: number;
   /** Currency prefix symbol (only used when kind is 'currency'). */
@@ -85,6 +87,9 @@ export interface TableCellStyle {
   align?: 'left' | 'center' | 'right';
   /** Vertical alignment of the cell content; unset means the default (middle). */
   valign?: 'top' | 'middle' | 'bottom';
+  /** Per-cell numeric display format; unset falls back to the column format, kind 'none'
+   *  explicitly disables formatting for this cell. */
+  format?: TableColumnFormat;
 }
 
 export interface TableRow {

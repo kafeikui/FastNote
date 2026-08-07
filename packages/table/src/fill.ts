@@ -8,22 +8,28 @@ import { columnLetter, isFormulaValue, letterToColumnIndex } from './formula';
 
 // Case-insensitive so drag-fill also shifts lowercase references (=sum(b1:b6)); the letters are
 // written back exactly as typed. Function names never end in digits, so they can't match.
-const CELL_REF = /([A-Za-z]+)(\d+)/g;
+// The optional `$` groups capture Excel-style absolute anchors ($B$1) — an anchored axis is
+// pinned during fill instead of shifted.
+const CELL_REF = /(\$?)([A-Za-z]+)(\$?)(\d+)/g;
 
-// Whole-column reference halves (`C:C`, or the open end of `C1:C`): letters directly adjacent
-// to a range colon with no row digits. Function names never touch a colon, so they can't match.
-const COL_ONLY_REF = /([A-Za-z]+)(?=:)|(?<=:)([A-Za-z]+)(?![A-Za-z]*\d)/g;
+// Whole-column reference halves (`C:C` / `$C:$C`, or the open end of `C1:C`): letters directly
+// adjacent to a range colon with no row digits (a trailing `$digits` marks a cell ref, not a
+// column). Function names never touch a colon, so they can't match.
+const COL_ONLY_REF = /(\$?)([A-Za-z]+)(?=:)|(?<=:)(\$?)([A-Za-z]+)(?![A-Za-z]*\$?\d)/g;
 
-/** Shifts the row part of every A1-style cell reference in a formula by `offset` rows. */
+/** Shifts the row part of every A1-style cell reference in a formula by `offset` rows.
+ *  `$`-anchored rows ($1) stay pinned. */
 export function shiftFormulaRows(formula: string, offset: number): string {
   if (offset === 0) return formula;
-  return formula.replace(CELL_REF, (_m, col: string, row: string) => {
+  return formula.replace(CELL_REF, (m, dCol: string, col: string, dRow: string, row: string) => {
+    if (dRow) return m;
     const next = parseInt(row, 10) + offset;
-    return next >= 1 ? `${col}${next}` : `${col}${row}`;
+    return next >= 1 ? `${dCol}${col}${next}` : m;
   });
 }
 
-/** Shifts the column part of every cell/column reference in a formula by `offset` columns. */
+/** Shifts the column part of every cell/column reference in a formula by `offset` columns.
+ *  `$`-anchored columns ($B) stay pinned. */
 export function shiftFormulaCols(formula: string, offset: number): string {
   if (offset === 0) return formula;
   const shiftLetters = (letters: string): string => {
@@ -34,8 +40,14 @@ export function shiftFormulaCols(formula: string, offset: number): string {
     return letters === letters.toLowerCase() ? out.toLowerCase() : out;
   };
   return formula
-    .replace(CELL_REF, (_m, col: string, row: string) => `${shiftLetters(col)}${row}`)
-    .replace(COL_ONLY_REF, (m) => shiftLetters(m));
+    .replace(CELL_REF, (m, dCol: string, col: string, dRow: string, row: string) =>
+      dCol ? m : `${shiftLetters(col)}${dRow}${row}`,
+    )
+    .replace(COL_ONLY_REF, (m, d1: string | undefined, l1: string | undefined, d2: string | undefined, l2: string | undefined) => {
+      const anchored = (d1 ?? d2) === '$';
+      const letters = l1 ?? l2 ?? '';
+      return anchored ? m : shiftLetters(letters);
+    });
 }
 
 function isNumeric(raw: string): boolean {

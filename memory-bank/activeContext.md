@@ -420,6 +420,31 @@
 - **Alt+方向键交换自动调整公式**：`formula.ts` 新导出 `rewriteFormulaRefsForSwap(raw, kind, i, j)`（行/列交换：引用**跟随内容**做 i↔j 置换映射，公式计算结果不因交换而变；范围端点同样映射后重新归一化 lo/hi——交换完全在范围内或完全在范围外时不变；`C:C` 整列引用跟随；混合形式 `C1:C` 保持端点角色）和 `rewriteFormulaRefsForCellSwap(raw, a, b)`（单格交换：只重写恰好指向这两个格子的单元引用，范围不动——单格跨范围边界移动无法用范围表达）。接线在 `utils.ts` 的 `swapRows`/`swapColumns`/`swapCells` 内部（都先换位再 `rewriteDocFormulas`，置换映射对称所以顺序无关），Alt+↑↓←→ 的三条路径（整行/整列/单格）自动受益。范围端点部分覆盖交换时按"端点跟随"规则（如 `B1:B3` 交换行 3、5 → `B1:B5`），与插入的吸收语义一致的取舍。
 - 冒烟测试：`/tmp/fn-search-test.mjs`（9 断言）+ `/tmp/fn-table-swap-date-test.mjs`（34 断言）全过；全仓 18 包 typecheck 通过。
 
+## 本次会话的实质性变更（单元格级数字格式，2026-08-06 下午）
+
+- **数字格式下沉到单元格级**：`TableCellStyle` 新增 `format?: TableColumnFormat`（shared），随既有的 单元格 > 行 > 列默认 样式合并链生效；`TableColumnFormat.kind` 扩展 `'none'`——**仅作单元格级覆盖使用**，表示"显式无格式"（否则格式化列里的单元格无法退出列格式）。新 `resolveCellFormat(cellFormat, colFormat)`（`formula.ts`）：cell 覆盖优先、'none' 解析为 undefined，渲染/自动列宽/工具栏指示三处统一走它。
+- **工具栏语义**（`TableEditor.tsx`）：`applyColumnFormat` 重构为 `applyNumberFormat`——整列选中时仍写列级 `col.format`（覆盖被筛选行和未来新行）**并清掉选区内单元格级覆盖**；其他选区写单元格级 `style.format`。选"原始值"时：所在列有列格式的格子写 `{kind:'none'}` 退出，无列格式的格子直接删 key。指示器 `anchorFormat` = 首目标格的有效格式（原 `anchorColFormat` 删除）。小数位调整基于锚点格式统一应用到选区（不再逐列保留各自小数位）。`clearFormatting` 的 clearAll 补了 `format: undefined`。
+- 单元格交换（Alt+方向键 swapCells）连带 styles 交换，格式自动跟随内容，无需额外处理。
+- i18n `tableEditor.numberFormat` 文案更新为"作用于选中单元格；选中整列时作用于该列"。
+- 冒烟测试 `/tmp/fn-cellformat-test.mjs` 14 断言全过；全仓 18 包 typecheck 通过。
+
+## 本次会话的实质性变更（公式绝对引用 $ + F4，2026-08-06 下午）
+
+- **绝对引用**：公式支持 `$A$1` / `A$1` / `$A1` 及整列 `$C:$C`。求值忽略 `$`（`evaluateExpression` 开头 `replace(/\$/g,'')`）。填充位移（`fill.ts` `shiftFormulaRows/Cols`）：`CELL_REF` 改为 `(\$?)([A-Za-z]+)(\$?)(\d+)`，锚定轴不移动；`COL_ONLY_REF` 同步支持 `$C:` / `:$C`，且负向前瞻改为 `(?![A-Za-z]*\$?\d)` 修掉 `:C$5` 被误判为整列引用导致双移的隐患。
+- **结构性编辑保留 `$`**：`rewriteFormulaRefs` 的 token 正则解析 `$` 并在 `RefEndpoint`/`RefUnit` 上带 `absCol/absRow` 标志，重写输出时还原 `$`；插入/删除/交换仍照常调整下标（Excel 语义：`$` 只影响填充/复制，不影响结构性编辑）。swap 的 corner 归一化会让 `$` 跟随其锚定的值交换。
+- **F4 循环**：新 `cycleRefAnchorAtCaret(text, caret)`（formula.ts 导出）：A1 → $A$1 → A$1 → $A1 → A1；整列端点（紧邻冒号的纯字母 token）在 $C ↔ C 间切换；函数名/非引用返回 null；保留大小写。`handleCellKeyDown` 中：编辑公式单元格时按 F4（无修饰键）循环光标处引用并用 rAF 恢复光标；在公式中但不在引用上时吞掉按键（避免误触发 F4 重复上次结构操作）；非公式单元格 F4 保持原有 repeat-last-action。
+- 帮助弹层新增 `tableEditor.helpAbsRef`（zh/en）说明 $ 与 F4。
+- 冒烟测试 `/tmp/fn-absref-test.mjs` 31 断言全过（求值/填充/插删/交换/F4 循环）；全仓 typecheck 通过。
+
+## 本次会话的实质性变更（表格剪切 Ctrl+X，2026-08-07）
+
+- **单元格剪切**（`TableEditor.tsx`）：新 `cutSelectedCells()` = `buildRangeTsv('raw', true)`（公式复制源码，剪切是移动语义）+ `copyTextToClipboard`（同时写 internalClipboardRef）+ `clearSelectedCells()`。三条路径：
+  1. `handleGridCut`（容器 onCut）：单元格 textarea 聚焦时 Ctrl+X 触发；多格选区整体剪切（preventDefault + setData + 清空），单格编辑中保持 textarea 原生文本剪切（`buildRangeTsv('raw')` 无 allowSingle 返回 null）；工具栏/筛选 input 聚焦时跳过。
+  2. `handleContainerKeyDown` 的 Mod+X 回退：无文本焦点（选中未编辑的格/整行整列）时 keydown 处理，镜像 Mod+C 块。
+  3. 右键菜单新增"剪切"按钮（列表首位）。
+- i18n 新 key `tableEditor.ctxCut`（剪切/Cut），`helpExcel` 帮助文案补 Ctrl+X。
+- 剪切走 emitChange 历史，Ctrl+Z 可撤销。
+
 ## 活跃的技术决策 / 约定（后续开发请遵守）
 
 - **新增持久化设置**一律走 `packages/api/src/index.ts` 的 `loadXxx`/`saveXxx` 命名对模式，`VaultApp.tsx` 里用 `useState(() => loadXxx())` 初始化。

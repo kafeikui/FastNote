@@ -18,6 +18,19 @@ export function parseNumericValue(raw: string): number | null {
   return null;
 }
 
+/**
+ * Resolves the display format that actually applies to a cell: the cell-level override (from
+ * the cell/row/column style chain) beats the column format, and a cell-level kind 'none'
+ * explicitly disables formatting even inside a formatted column.
+ */
+export function resolveCellFormat(
+  cellFormat: TableColumnFormat | undefined,
+  colFormat: TableColumnFormat | undefined,
+): TableColumnFormat | undefined {
+  const f = cellFormat ?? colFormat;
+  return f && f.kind !== 'none' ? f : undefined;
+}
+
 /** Formats a numeric value according to a column's number format (thousand separators + fixed decimals). */
 export function formatColumnNumber(n: number, format: TableColumnFormat): string {
   const decimals = Math.min(Math.max(format.decimals ?? 2, 0), 6);
@@ -85,47 +98,73 @@ function parseColOnlyToken(word: string): number | null {
 // shift can't express (a range must absorb a row inserted just below its last row, and shrink —
 // or turn into #REF! — when a row inside it is deleted).
 
-/** One endpoint of a reference: `row === null` for column-only endpoints (the C in C:C). */
+/** One endpoint of a reference: `row === null` for column-only endpoints (the C in C:C).
+ *  `absCol`/`absRow` carry Excel-style `$` anchors ($B$1) through a rewrite. */
 interface RefEndpoint {
   col: number;
   row: number | null;
+  absCol?: boolean;
+  absRow?: boolean;
 }
 
 type RefUnit =
-  | { type: 'cell'; col: number; row: number }
+  | { type: 'cell'; col: number; row: number; absCol?: boolean; absRow?: boolean }
   | { type: 'range'; a: RefEndpoint; b: RefEndpoint };
 
 /** Sentinel returned by a unit rewriter when the referenced row/column was deleted. */
 const REF_ERROR = '#REF!';
 
 function formatEndpoint(e: RefEndpoint): string {
-  return columnLetter(e.col) + (e.row === null ? '' : String(e.row + 1));
+  return (
+    (e.absCol ? '$' : '') +
+    columnLetter(e.col) +
+    (e.row === null ? '' : (e.absRow ? '$' : '') + String(e.row + 1))
+  );
 }
 
 function formatUnit(unit: RefUnit): string {
-  if (unit.type === 'cell') return columnLetter(unit.col) + String(unit.row + 1);
+  if (unit.type === 'cell') {
+    return (unit.absCol ? '$' : '') + columnLetter(unit.col) + (unit.absRow ? '$' : '') + String(unit.row + 1);
+  }
   return `${formatEndpoint(unit.a)}:${formatEndpoint(unit.b)}`;
 }
 
 /**
  * Scans a formula for reference units and pipes each through `rewrite`; the callback returns a
  * changed unit, the string `REF_ERROR`, or null to keep the original text. Function names
- * (letters followed by `(`) and stray words are left untouched.
+ * (letters followed by `(`) and stray words are left untouched. `$` anchors are parsed and
+ * re-emitted, but don't change how structural edits shift a reference (Excel adjusts absolute
+ * refs on insert/delete too — `$` only pins refs during fill/copy).
  */
 function rewriteFormulaRefs(
   raw: string,
   rewrite: (unit: RefUnit) => RefUnit | typeof REF_ERROR | null,
 ): string {
-  const re = /[A-Za-z]+[0-9]*/g;
-  const tokens: Array<{ start: number; end: number; letters: string; digits: string }> = [];
+  const re = /(\$?)([A-Za-z]+)(\$?)([0-9]*)/g;
+  const tokens: Array<{
+    start: number;
+    end: number;
+    letters: string;
+    digits: string;
+    absCol: boolean;
+    absRow: boolean;
+  }> = [];
   let m: RegExpExecArray | null;
   while ((m = re.exec(raw)) !== null) {
-    const letters = /^[A-Za-z]+/.exec(m[0])![0];
-    tokens.push({ start: m.index, end: m.index + m[0].length, letters, digits: m[0].slice(letters.length) });
+    tokens.push({
+      start: m.index,
+      end: m.index + m[0].length,
+      letters: m[2],
+      digits: m[4],
+      absCol: m[1] === '$',
+      absRow: m[3] === '$' && m[4] !== '',
+    });
   }
   const endpointOf = (tok: (typeof tokens)[number]): RefEndpoint => ({
     col: letterToColumnIndex(tok.letters.toUpperCase()),
     row: tok.digits ? parseInt(tok.digits, 10) - 1 : null,
+    absCol: tok.absCol,
+    absRow: tok.absRow,
   });
   let out = '';
   let last = 0;
@@ -143,7 +182,7 @@ function rewriteFormulaRefs(
       i++;
     } else if (tok.digits) {
       const e = endpointOf(tok);
-      unit = { type: 'cell', col: e.col, row: e.row! };
+      unit = { type: 'cell', col: e.col, row: e.row!, absCol: e.absCol, absRow: e.absRow };
     }
     if (!unit) continue;
     const result = rewrite(unit);
@@ -286,16 +325,23 @@ export function rewriteFormulaRefsForSwap(
       if (a.row !== null) a.row = map(a.row);
       if (b.row !== null) b.row = map(b.row);
     }
-    // Re-normalize corner order (mixed forms like C1:C keep their endpoint roles).
+    // Re-normalize corner order (mixed forms like C1:C keep their endpoint roles); `$` anchors
+    // travel with the value they pin.
     if (a.col > b.col) {
       const t = a.col;
       a.col = b.col;
       b.col = t;
+      const tf = a.absCol;
+      a.absCol = b.absCol;
+      b.absCol = tf;
     }
     if (a.row !== null && b.row !== null && a.row > b.row) {
       const t = a.row;
       a.row = b.row;
       b.row = t;
+      const tf = a.absRow;
+      a.absRow = b.absRow;
+      b.absRow = tf;
     }
     return a.col === unit.a.col && a.row === unit.a.row && b.col === unit.b.col && b.row === unit.b.row
       ? null
@@ -321,6 +367,42 @@ export function rewriteFormulaRefsForCellSwap(
     if (unit.row === b.row && unit.col === b.col) return { ...unit, row: a.row, col: a.col };
     return null;
   });
+}
+
+/**
+ * Excel-style F4: cycles the `$` anchoring of the reference token at `caret` in a formula's
+ * text. Cell refs walk A1 → $A$1 → A$1 → $A1 → A1; a column-only endpoint of a range (the C in
+ * C:C) just toggles $C. Returns the new text plus a caret position (end of the rewritten
+ * token), or null when the caret isn't on a reference. Letter case is preserved.
+ */
+export function cycleRefAnchorAtCaret(
+  text: string,
+  caret: number,
+): { text: string; caret: number } | null {
+  const re = /(\$?)([A-Za-z]+)(\$?)([0-9]*)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const start = m.index;
+    const end = m.index + m[0].length;
+    if (caret < start || caret > end) continue;
+    const [, dCol, letters, dRow, digits] = m;
+    if (digits) {
+      // Cell ref: (rel,rel) → (abs,abs) → (rel col, abs row) → (abs col, rel row) → back.
+      const absCol = dCol === '$';
+      const absRow = dRow === '$';
+      const [nextCol, nextRow] =
+        !absCol && !absRow ? [true, true] : absCol && absRow ? [false, true] : !absCol && absRow ? [true, false] : [false, false];
+      const token = `${nextCol ? '$' : ''}${letters}${nextRow ? '$' : ''}${digits}`;
+      return { text: text.slice(0, start) + token + text.slice(end), caret: start + token.length };
+    }
+    // Letters-only tokens are references only as half of a whole-column range (C:C) — i.e.
+    // when directly adjacent to a colon. Anything else (function names, stray words) is skipped.
+    const touchesColon = text[end] === ':' || text[start - 1] === ':';
+    if (!touchesColon) return null;
+    const token = `${dCol === '$' ? '' : '$'}${letters}`;
+    return { text: text.slice(0, start) + token + text.slice(end), caret: start + token.length };
+  }
+  return null;
 }
 
 export class FormulaEvalError extends Error {
@@ -619,7 +701,8 @@ class Parser {
 }
 
 function evaluateExpression(src: string, ctx: EvalContext): number {
-  const trimmed = src.trim();
+  // `$` anchors ($B$1) only matter for fill/copy shifting — evaluation ignores them.
+  const trimmed = src.replace(/\$/g, '').trim();
   if (!trimmed) throw new FormulaEvalError('#ERROR!');
   const tokens = tokenize(trimmed);
   if (tokens.length === 0) throw new FormulaEvalError('#ERROR!');

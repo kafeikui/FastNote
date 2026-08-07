@@ -81,6 +81,9 @@ MVP（`docs/PHASE1.md` M1–M8）已全部完成并在 M8 之后继续做了大�
 - [x] 表格多格粘贴锚定选区（2026-08-03）：`handleGridPaste` dataset 分支改用 `selectionRangeRef` 左上角作为起点（避免插行后残留焦点 textarea 的过期 data-row-idx）；`handleAddRow`/`handleAddColumn` 结束后焦点归还网格容器
 - [x] 聊天实时上传 + 手动同步按钮（2026-08-03）：`SyncClient.pushChatMessages`（push-only）+ `scheduleChatPush` 3s 防抖（VaultApp/MobileApp 的 `persistChatMessage`）；`ChatPanel` 头部"⟳ 同步历史"按钮（`onSyncHistory` prop，完整 push+pull 后刷新）
 - [x] 多端登录收不到聊天消息（2026-08-03，**需重新部署 server**）：`onlineSockets` 改为 `Map<string, Set<WebSocket>>` 全设备扇出（message/delivery_ack/read_ack）；`IMClient.setOnConnected` 重连时整账户聊天历史补拉（60s 节流），覆盖离线期间被其它设备 ack 删除的队列消息
+- [x] 表格剪切 Ctrl+X（2026-08-07）：单格/多格选区剪切（公式保留源码），事件路径 + 键盘回退 + 右键菜单"剪切"，可撤销
+- [x] 公式绝对引用 $ + F4 循环（2026-08-06）：$A$1/A$1/$A1/$C:$C 求值忽略 $、填充位移固定锚定轴、结构性编辑保留 $ 并照常调整下标；编辑公式按 F4 循环光标处引用形式（cycleRefAnchorAtCaret）
+- [x] 单元格级数字格式（2026-08-06）：`TableCellStyle.format` 随样式合并链（cell>row>col.cellStyle）覆盖列格式，`kind:'none'` 作单元格显式退出；工具栏整列选中写列级并清单元格覆盖、其他选区写单元格级；`resolveCellFormat` 统一渲染/自动列宽/工具栏指示
 - [x] 全局搜索下划线关键词 + 孤儿笔记（2026-08-06）：`stripMarkdownForSearch` 只剥词边界下划线（标识符如 `run_evm_holder_changes_server` 可搜），搜索指纹加 `search-schema-v2` 前缀让旧快照自动重建；`buildTree` 把父节点丢失的孤儿收养到根层级（重复搜索结果可定位、可删除）
 - [x] 表格日期自动填充（2026-08-06）：`parseDateValue` 支持 ISO/斜杠/点/中文年月日，单格 +1 天、多格按天差等差，格式与补零风格保真，UTC 天序数运算
 - [x] Alt+方向键交换公式引用跟随（2026-08-06）：`rewriteFormulaRefsForSwap`（行/列 i↔j 置换，引用跟随内容、结果不变，范围端点映射+归一化，整列引用支持）+ `rewriteFormulaRefsForCellSwap`（单格交换只重写精确指向的单元引用），接线于 utils 的 swapRows/swapColumns/swapCells

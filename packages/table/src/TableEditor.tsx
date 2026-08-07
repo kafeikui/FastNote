@@ -33,11 +33,13 @@ import {
   FORMULA_PREFIX,
   columnLetter,
   computeRangeStats,
+  cycleRefAnchorAtCaret,
   evaluateCellFormula,
   formatColumnNumber,
   formatFormulaNumber,
   isFormulaValue,
   parseNumericValue,
+  resolveCellFormat,
 } from './formula';
 import {
   MAX_COL_WIDTH,
@@ -880,23 +882,51 @@ export function TableEditor({
     return ids;
   }, [formatTargets]);
 
-  /** Format of the first target column — drives the toolbar's current-value indicators. */
-  const anchorColFormat: TableColumnFormat | undefined = useMemo(() => {
-    const first = formatColIds[0];
-    return first ? doc.columns.find((c) => c.id === first)?.format : undefined;
-  }, [formatColIds, doc.columns]);
+  /** Effective number format of the first target cell (per-cell override beats the column
+   *  format) — drives the toolbar's current-value indicators. */
+  const anchorFormat: TableColumnFormat | undefined = useMemo(() => {
+    const first = formatTargets[0];
+    if (!first) return undefined;
+    const colFormat = doc.columns.find((c) => c.id === first.colId)?.format;
+    return resolveCellFormat(anchorStyle.format, colFormat);
+  }, [formatTargets, anchorStyle, doc.columns]);
 
-  const applyColumnFormat = (
+  /**
+   * Applies a number format to the current targets. Whole-column selections keep writing the
+   * column-level format (so it also covers filtered-out rows and rows added later) and drop
+   * per-cell overrides that would shadow it; any other selection formats just those cells —
+   * with an explicit 'none' override when "no format" is picked inside a formatted column.
+   */
+  const applyNumberFormat = (
     mutate: (cur: TableColumnFormat | undefined) => TableColumnFormat | undefined,
   ) => {
-    if (formatColIds.length === 0) {
+    if (formatTargets.length === 0) {
       alert(t('tableEditor.formatNeedTarget'));
       return;
     }
+    const nextFormat = mutate(anchorFormat);
+    const wholeColumns =
+      selectionRange !== null &&
+      displayRows.length > 0 &&
+      selectionRange.rowStart === 0 &&
+      selectionRange.rowEnd >= displayRows.length - 1;
     let next = docRef.current;
-    for (const colId of formatColIds) {
-      const cur = next.columns.find((c) => c.id === colId)?.format;
-      next = setColumnFormat(next, colId, mutate(cur));
+    if (wholeColumns) {
+      for (const colId of formatColIds) next = setColumnFormat(next, colId, nextFormat);
+      next = applyCellStyle(next, formatTargets, { format: undefined });
+      emitChange(next);
+      return;
+    }
+    if (nextFormat === undefined) {
+      const colHasFormat = new Set(doc.columns.filter((c) => c.format).map((c) => c.id));
+      const optOut = formatTargets.filter((cell) => colHasFormat.has(cell.colId));
+      const plain = formatTargets.filter((cell) => !colHasFormat.has(cell.colId));
+      if (optOut.length > 0) {
+        next = applyCellStyle(next, optOut, { format: { kind: 'none', decimals: 0 } });
+      }
+      if (plain.length > 0) next = applyCellStyle(next, plain, { format: undefined });
+    } else {
+      next = applyCellStyle(next, formatTargets, { format: nextFormat });
     }
     emitChange(next);
   };
@@ -918,6 +948,7 @@ export function TableEditor({
       fill: undefined,
       align: undefined,
       valign: undefined,
+      format: undefined,
     };
     let next = applyCellStyle(docRef.current, formatTargets, clearAll);
     const wholeColumns =
@@ -1046,9 +1077,10 @@ export function TableEditor({
       if (!raw.trim()) continue;
       const formula = isFormulaValue(raw);
       const result = formula ? evaluateCellFormula(d, row.id, colId) : null;
-      const numeric = col.format && !result?.error ? (formula ? result!.value : parseNumericValue(raw)) : null;
-      const shown =
-        col.format && numeric !== null ? formatColumnNumber(numeric, col.format) : formula ? result!.display : raw;
+      const cellFmt = row.styles?.[colId]?.format ?? row.style?.format ?? col.cellStyle?.format;
+      const fmt = resolveCellFormat(cellFmt, col.format);
+      const numeric = fmt && !result?.error ? (formula ? result!.value : parseNumericValue(raw)) : null;
+      const shown = fmt && numeric !== null ? formatColumnNumber(numeric, fmt) : formula ? result!.display : raw;
       const style = row.styles?.[colId];
       measure.font = `${style?.bold ? '700' : '400'} ${style?.fontSize ?? baseSize}px ${baseFamily}`;
       for (const line of shown.split('\n')) {
@@ -1410,6 +1442,29 @@ export function TableEditor({
     return true;
   };
 
+  /** Cut (Ctrl+X / context menu): copies the selection's raw content — formulas keep their
+   *  source, since a cut moves content — then clears the cut cells. */
+  const cutSelectedCells = (): boolean => {
+    const tsv = buildRangeTsv('raw', true);
+    if (tsv === null) return false;
+    copyTextToClipboard(tsv);
+    clearSelectedCells();
+    return true;
+  };
+
+  /** Cut-event path (Ctrl+X while a cell input is focused). A multi-cell selection cuts the
+   *  whole range; a single editing cell keeps the textarea's native text cut. */
+  const handleGridCut = (e: ClipboardEvent<HTMLDivElement>) => {
+    // Toolbar/filter/rename inputs keep their native cut behavior.
+    if (document.activeElement instanceof HTMLInputElement) return;
+    const tsv = buildRangeTsv('raw');
+    if (tsv === null) return;
+    e.preventDefault();
+    e.clipboardData.setData('text/plain', tsv);
+    internalClipboardRef.current = tsv;
+    clearSelectedCells();
+  };
+
   const selectColumn = (colIdx: number) => {
     if (displayRows.length === 0) return;
     // Move keyboard focus to the grid so arrows / Del / copy shortcuts act on the selection.
@@ -1502,6 +1557,23 @@ export function TableEditor({
         setSelFocus(null);
         setFocusCell(null);
         return;
+      }
+
+      // F4 while editing a formula cycles the $ anchoring of the reference under the caret
+      // (A1 → $A$1 → A$1 → $A1 → A1, Excel-style; a C:C endpoint just toggles $C). Outside
+      // formula editing, F4 keeps its container-level repeat-last-action role.
+      if (e.key === 'F4' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        const ta = e.target as HTMLTextAreaElement;
+        if (isFormulaValue(ta.value)) {
+          e.preventDefault();
+          e.stopPropagation();
+          const cycled = cycleRefAnchorAtCaret(ta.value, ta.selectionStart ?? ta.value.length);
+          if (!cycled) return; // on a formula but not on a ref — swallow so repeat doesn't fire mid-edit
+          const ids = cellIds();
+          if (ids) emitChange(updateCell(docRef.current, ids.rowId, ids.colId, cycled.text));
+          requestAnimationFrame(() => ta.setSelectionRange(cycled.caret, cycled.caret));
+          return;
+        }
       }
 
       // Shift+Arrow moves the selected cell and starts editing it; the current cell's edits
@@ -1944,6 +2016,19 @@ export function TableEditor({
       if (copyRangeViaExecCommand()) e.preventDefault();
       return;
     }
+    // Mod+X with focus outside any text field: cut the selection (copy raw + clear). When a
+    // cell input is focused, handleGridCut takes over via the cut event.
+    if (
+      (e.ctrlKey || e.metaKey) &&
+      !e.altKey &&
+      !e.shiftKey &&
+      e.key.toLowerCase() === 'x' &&
+      !(document.activeElement instanceof HTMLInputElement) &&
+      !(document.activeElement instanceof HTMLTextAreaElement)
+    ) {
+      if (cutSelectedCells()) e.preventDefault();
+      return;
+    }
     // Excel-style type-to-edit: with a cell selected (grid focused), typing a printable
     // character replaces the cell's content and starts editing. (IME input can't start on the
     // non-editable grid — double-click or press Enter first for composed input.)
@@ -1974,6 +2059,7 @@ export function TableEditor({
       // holds focus (Excel-style selection without an editing cell).
       onPaste={handleGridPaste}
       onCopy={handleGridCopy}
+      onCut={handleGridCut}
     >
       <div className="fn-table-editor__tools">
         <button type="button" onClick={handleAddColumn}>
@@ -2218,10 +2304,10 @@ export function TableEditor({
         <select
           className="fn-table-fmt__numfmt"
           title={t('tableEditor.numberFormat')}
-          value={anchorColFormat?.kind ?? ''}
+          value={anchorFormat?.kind ?? ''}
           onChange={(e) => {
             const kind = e.target.value as '' | 'number' | 'currency' | 'percent';
-            applyColumnFormat((cur) =>
+            applyNumberFormat((cur) =>
               kind === '' ? undefined : { kind, decimals: cur?.decimals ?? 2, symbol: cur?.symbol ?? '$' },
             );
           }}
@@ -2231,13 +2317,13 @@ export function TableEditor({
           <option value="currency">{t('tableEditor.numberFormatCurrency')}</option>
           <option value="percent">{t('tableEditor.numberFormatPercent')}</option>
         </select>
-        {anchorColFormat && (
+        {anchorFormat && (
           <select
             className="fn-table-fmt__decimals"
             title={t('tableEditor.decimals')}
-            value={anchorColFormat.decimals}
+            value={anchorFormat.decimals}
             onChange={(e) =>
-              applyColumnFormat((cur) => (cur ? { ...cur, decimals: Number(e.target.value) } : cur))
+              applyNumberFormat((cur) => (cur ? { ...cur, decimals: Number(e.target.value) } : cur))
             }
           >
             {[0, 1, 2, 3, 4, 5, 6].map((d) => (
@@ -2282,6 +2368,7 @@ export function TableEditor({
               <p>{t('tableEditor.helpExcel')}</p>
               <p>{t('tableEditor.formulaHint')}</p>
               <p>{t('tableEditor.helpFormulaRef')}</p>
+              <p>{t('tableEditor.helpAbsRef')}</p>
               {repeatActionShortcut && (
                 <p>{t('tableEditor.repeatActionHint', { key: formatShortcutBinding(repeatActionShortcut) })}</p>
               )}
@@ -2552,21 +2639,23 @@ export function TableEditor({
                   const raw = row.cells[col.id] ?? '';
                   const formula = isFormulaValue(raw);
                   const result = formula ? evaluateCellFormula(doc, row.id, col.id) : null;
-                  // Column number format: applies to numeric raw values and formula results alike.
-                  const numericForFormat =
-                    col.format && !result?.error ? (formula ? result!.value : parseNumericValue(raw)) : null;
-                  const displayValue =
-                    col.format && numericForFormat !== null
-                      ? formatColumnNumber(numericForFormat, col.format)
-                      : formula
-                        ? result!.display
-                        : raw;
                   // Effective style: per-cell overrides beat the row default, which beats the
                   // column default (whole-row/column alignment lands on those defaults).
                   const cellStyle: TableCellStyle | undefined =
                     col.cellStyle || row.style || row.styles?.[col.id]
                       ? { ...(col.cellStyle ?? {}), ...(row.style ?? {}), ...(row.styles?.[col.id] ?? {}) }
                       : undefined;
+                  // Number format: the cell-level override (riding the style chain) beats the
+                  // column format; applies to numeric raw values and formula results alike.
+                  const effFormat = resolveCellFormat(cellStyle?.format, col.format);
+                  const numericForFormat =
+                    effFormat && !result?.error ? (formula ? result!.value : parseNumericValue(raw)) : null;
+                  const displayValue =
+                    effFormat && numericForFormat !== null
+                      ? formatColumnNumber(numericForFormat, effFormat)
+                      : formula
+                        ? result!.display
+                        : raw;
                   const isFillOrigin =
                     isPlainView &&
                     !!selectionRange &&
@@ -2604,7 +2693,7 @@ export function TableEditor({
                       <TableCellContent
                         value={raw}
                         displayValue={displayValue}
-                        formattedIdle={!formula && col.format !== undefined && numericForFormat !== null}
+                        formattedIdle={!formula && effFormat !== undefined && numericForFormat !== null}
                         isFormula={formula}
                         hasError={!!result?.error}
                         attachments={attachments}
@@ -2690,6 +2779,15 @@ export function TableEditor({
             </>
           ) : (
             <>
+              <button
+                type="button"
+                onClick={() => {
+                  cutSelectedCells();
+                  setCtxMenu(null);
+                }}
+              >
+                {t('tableEditor.ctxCut')}
+              </button>
               <button
                 type="button"
                 onClick={() => {
