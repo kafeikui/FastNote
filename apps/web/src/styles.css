@@ -1371,6 +1371,17 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   background: var(--accent-hover);
 }
 
+/* Secondary fingerprint-unlock button below the password submit (mobile). */
+.fn-unlock__card button.fn-unlock__bio {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+.fn-unlock__card button.fn-unlock__bio:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
 .fn-unlock__hint {
   color: var(--muted);
   font-size: 0.9rem;
@@ -3353,6 +3364,13 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   text-align: left;
   color: inherit;
   font: inherit;
+}
+
+/* Pinned self-chat ("file transfer assistant") entry at the top of the list. */
+.fn-chat-sidebar__item--self {
+  border-color: var(--border);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  margin-bottom: 0.35rem;
 }
 
 .fn-chat-sidebar__item:hover {

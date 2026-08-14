@@ -825,6 +825,76 @@ export function TableEditor({
     return { ...(col?.cellStyle ?? {}), ...(row?.style ?? {}), ...(row?.styles?.[first.colId] ?? {}) };
   }, [formatTargets, doc.rows, doc.columns]);
 
+  /**
+   * Uniformity of the effective style across *every* format target. A 'mixed' key makes its
+   * toolbar control show a mixed placeholder instead of the anchor's value — with an
+   * anchor-only indicator, picking the value the anchor already has fires no change event, so
+   * a mixed selection could never be made uniform. Bold uses it for Excel-style toggling
+   * (any non-bold cell in the selection → bold everything).
+   */
+  const MIXED = '__mixed__';
+  type Uniform<T> = T | typeof MIXED | null;
+  const formatSummary = useMemo(() => {
+    const rowById = new Map(doc.rows.map((r) => [r.id, r]));
+    const colById = new Map(doc.columns.map((c) => [c.id, c]));
+    const merge = <T,>(cur: Uniform<T>, v: T): Uniform<T> => (cur === null ? v : cur === v ? cur : MIXED);
+    let bold: Uniform<boolean> = null;
+    let fontSize: Uniform<number | ''> = null;
+    let align: Uniform<NonNullable<TableCellStyle['align']> | ''> = null;
+    let valign: Uniform<NonNullable<TableCellStyle['valign']> | ''> = null;
+    let fmtKind: Uniform<TableColumnFormat['kind'] | ''> = null;
+    let fmtDecimals: Uniform<number> = null;
+    for (const cell of formatTargets) {
+      const row = rowById.get(cell.rowId);
+      const col = colById.get(cell.colId);
+      const s: TableCellStyle = {
+        ...(col?.cellStyle ?? {}),
+        ...(row?.style ?? {}),
+        ...(row?.styles?.[cell.colId] ?? {}),
+      };
+      const fmt = resolveCellFormat(s.format, col?.format);
+      bold = merge(bold, !!s.bold);
+      fontSize = merge(fontSize, s.fontSize ?? '');
+      align = merge(align, s.align ?? '');
+      valign = merge(valign, s.valign ?? '');
+      fmtKind = merge(fmtKind, fmt?.kind ?? '');
+      fmtDecimals = merge(fmtDecimals, fmt?.decimals ?? -1);
+    }
+    return { bold, fontSize, align, valign, fmtKind, fmtDecimals };
+  }, [formatTargets, doc.rows, doc.columns]);
+
+  /** Select value helper: '' -> default option, mixed -> the disabled mixed placeholder. */
+  const selectValue = <T extends string | number>(v: Uniform<T | ''>): string =>
+    v === MIXED ? MIXED : String(v ?? '');
+
+  /** Excel-style bold toggle: if any selected cell isn't bold, bold them all; otherwise unbold.
+   *  Unbolding a cell whose row/column default sets bold needs an explicit `false` override —
+   *  merely dropping the per-cell key would fall back to the bold default. */
+  const toggleBold = () => {
+    if (formatTargets.length === 0) {
+      alert(t('tableEditor.formatNeedTarget'));
+      return;
+    }
+    if (formatSummary.bold !== true) {
+      applyStyle({ bold: true });
+      return;
+    }
+    const rowById = new Map(docRef.current.rows.map((r) => [r.id, r]));
+    const colById = new Map(docRef.current.columns.map((c) => [c.id, c]));
+    const overrideNeeded: Array<{ rowId: string; colId: string }> = [];
+    const plain: Array<{ rowId: string; colId: string }> = [];
+    for (const cell of formatTargets) {
+      const row = rowById.get(cell.rowId);
+      const col = colById.get(cell.colId);
+      const defaultBold = row?.style?.bold ?? col?.cellStyle?.bold;
+      (defaultBold === true ? overrideNeeded : plain).push(cell);
+    }
+    let next = docRef.current;
+    if (overrideNeeded.length > 0) next = applyCellStyle(next, overrideNeeded, { bold: false });
+    if (plain.length > 0) next = applyCellStyle(next, plain, { bold: undefined });
+    emitChange(next);
+  };
+
   const applyStyle = (patch: Partial<TableCellStyle>) => {
     if (formatTargets.length === 0) {
       alert(t('tableEditor.formatNeedTarget'));
@@ -2141,18 +2211,23 @@ export function TableEditor({
         </button>
         <button
           type="button"
-          className={`fn-table-fmt__bold${anchorStyle.bold ? ' active' : ''}`}
+          className={`fn-table-fmt__bold${formatSummary.bold === true ? ' active' : ''}`}
           title={t('tableEditor.bold')}
-          onClick={() => applyStyle({ bold: anchorStyle.bold ? undefined : true })}
+          onClick={toggleBold}
         >
           B
         </button>
         <select
           className="fn-table-fmt__size"
           title={t('tableEditor.fontSize')}
-          value={anchorStyle.fontSize ?? ''}
+          value={selectValue(formatSummary.fontSize)}
           onChange={(e) => applyStyle({ fontSize: e.target.value ? Number(e.target.value) : undefined })}
         >
+          {formatSummary.fontSize === MIXED && (
+            <option value={MIXED} disabled hidden>
+              {t('tableEditor.mixedValue')}
+            </option>
+          )}
           <option value="">{t('tableEditor.fontSizeDefault')}</option>
           {FONT_SIZES.map((s) => (
             <option key={s} value={s}>
@@ -2240,11 +2315,16 @@ export function TableEditor({
         <select
           className="fn-table-fmt__size"
           title={t('tableEditor.alignH')}
-          value={alignStyleSource.align ?? ''}
+          value={selHeader ? (alignStyleSource.align ?? '') : selectValue(formatSummary.align)}
           onChange={(e) =>
             applyAlignStyle({ align: (e.target.value || undefined) as TableCellStyle['align'] })
           }
         >
+          {!selHeader && formatSummary.align === MIXED && (
+            <option value={MIXED} disabled hidden>
+              {t('tableEditor.mixedValue')}
+            </option>
+          )}
           <option value="">{t('tableEditor.alignHDefault')}</option>
           <option value="left">{t('tableEditor.alignLeft')}</option>
           <option value="center">{t('tableEditor.alignCenter')}</option>
@@ -2253,11 +2333,16 @@ export function TableEditor({
         <select
           className="fn-table-fmt__size"
           title={t('tableEditor.alignV')}
-          value={alignStyleSource.valign ?? ''}
+          value={selHeader ? (alignStyleSource.valign ?? '') : selectValue(formatSummary.valign)}
           onChange={(e) =>
             applyAlignStyle({ valign: (e.target.value || undefined) as TableCellStyle['valign'] })
           }
         >
+          {!selHeader && formatSummary.valign === MIXED && (
+            <option value={MIXED} disabled hidden>
+              {t('tableEditor.mixedValue')}
+            </option>
+          )}
           <option value="">{t('tableEditor.alignVDefault')}</option>
           <option value="top">{t('tableEditor.alignTop')}</option>
           <option value="middle">{t('tableEditor.alignMiddle')}</option>
@@ -2304,7 +2389,7 @@ export function TableEditor({
         <select
           className="fn-table-fmt__numfmt"
           title={t('tableEditor.numberFormat')}
-          value={anchorFormat?.kind ?? ''}
+          value={selectValue(formatSummary.fmtKind)}
           onChange={(e) => {
             const kind = e.target.value as '' | 'number' | 'currency' | 'percent';
             applyNumberFormat((cur) =>
@@ -2312,6 +2397,11 @@ export function TableEditor({
             );
           }}
         >
+          {formatSummary.fmtKind === MIXED && (
+            <option value={MIXED} disabled hidden>
+              {t('tableEditor.mixedValue')}
+            </option>
+          )}
           <option value="">{t('tableEditor.numberFormatNone')}</option>
           <option value="number">{t('tableEditor.numberFormatNumber')}</option>
           <option value="currency">{t('tableEditor.numberFormatCurrency')}</option>
@@ -2321,11 +2411,16 @@ export function TableEditor({
           <select
             className="fn-table-fmt__decimals"
             title={t('tableEditor.decimals')}
-            value={anchorFormat.decimals}
+            value={formatSummary.fmtDecimals === MIXED ? MIXED : anchorFormat.decimals}
             onChange={(e) =>
               applyNumberFormat((cur) => (cur ? { ...cur, decimals: Number(e.target.value) } : cur))
             }
           >
+            {formatSummary.fmtDecimals === MIXED && (
+              <option value={MIXED} disabled hidden>
+                {t('tableEditor.mixedValue')}
+              </option>
+            )}
             {[0, 1, 2, 3, 4, 5, 6].map((d) => (
               <option key={d} value={d}>
                 {t('tableEditor.decimalsOption', { n: String(d) })}

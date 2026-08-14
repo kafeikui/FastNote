@@ -21,7 +21,15 @@ import { basicSetup } from 'codemirror';
 import { markdown } from '@codemirror/lang-markdown';
 import { useEffect, useRef } from 'react';
 import type { AnyExtension } from '@tiptap/core';
-import { TextSelection } from '@tiptap/pm/state';
+import { AllSelection, TextSelection } from '@tiptap/pm/state';
+import {
+  chainCommands,
+  createParagraphNear,
+  deleteSelection,
+  liftEmptyBlock,
+  newlineInCode,
+  splitBlock as pmSplitBlock,
+} from '@tiptap/pm/commands';
 import type { EditorMode, NoteAttachment, FindReplaceController, FindReplaceStatus } from '@fastnote/shared';
 import { useT } from '@fastnote/i18n';
 import { AttachmentRef } from './AttachmentRefExtension';
@@ -202,11 +210,33 @@ export function NoteEditor({
       content: prepareContent(content),
       contentType: 'markdown',
       editorProps: {
-        // Tab types a literal tab character instead of moving browser focus.
         handleKeyDown: (view, event) => {
+          // Tab types a literal tab character instead of moving browser focus.
           if (event.key === 'Tab' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
             view.dispatch(view.state.tr.insertText('\t').scrollIntoView());
             return true;
+          }
+          // Enter on a selection spanning multiple blocks (or a Ctrl+A AllSelection): route
+          // around Tiptap v3's splitBlock, which decides canSplit on the *pre-delete* doc.
+          // That order makes it silently no-op for an AllSelection and lets it split at a
+          // stale position (throwing) when the selection ends inside a list — either way the
+          // user sees Enter "do nothing". ProseMirror's own splitBlock deletes the selection
+          // first and re-checks on the resulting doc, which is the expected
+          // "replace selection with a line break" behavior.
+          if (event.key === 'Enter' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
+            const sel = view.state.selection;
+            const multiBlock = !sel.empty && (!sel.$from.sameParent(sel.$to) || sel instanceof AllSelection);
+            if (multiBlock) {
+              const enterChain = chainCommands(newlineInCode, createParagraphNear, liftEmptyBlock, pmSplitBlock);
+              if (!enterChain(view.state, view.dispatch)) {
+                // Even the delete-first chain can refuse (e.g. the merged caret lands where no
+                // split is valid) — then at least replace the selection and retry the split
+                // from the collapsed caret.
+                deleteSelection(view.state, view.dispatch);
+                enterChain(view.state, view.dispatch);
+              }
+              return true;
+            }
           }
           return false;
         },

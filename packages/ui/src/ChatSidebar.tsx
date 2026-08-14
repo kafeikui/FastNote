@@ -15,6 +15,9 @@ interface ChatSidebarProps {
   sessionLoggedIn: boolean;
   imConnected: boolean;
   unreadByPeer?: Record<string, number>;
+  /** Own user id — when set (logged in), a pinned "file transfer assistant" self-chat entry
+   *  is shown at the top of the list. */
+  selfPeerId?: string | null;
   onSelectPeer: (peerId: string, peerName: string) => void;
   onStartChat: (username: string) => Promise<void>;
 }
@@ -62,6 +65,7 @@ export function ChatSidebar({
   sessionLoggedIn,
   imConnected,
   unreadByPeer = {},
+  selfPeerId = null,
   onSelectPeer,
   onStartChat,
 }: ChatSidebarProps) {
@@ -70,10 +74,20 @@ export function ChatSidebar({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  // The self-chat is rendered as a pinned entry above the list, so keep it out of the
+  // regular time-sorted sessions.
   const sorted = useMemo(
-    () => [...sessions].sort((a, b) => b.lastAt.localeCompare(a.lastAt)),
-    [sessions],
+    () =>
+      [...sessions]
+        .filter((s) => s.peerId !== selfPeerId)
+        .sort((a, b) => b.lastAt.localeCompare(a.lastAt)),
+    [sessions, selfPeerId],
   );
+  const selfSession = useMemo(
+    () => (selfPeerId ? sessions.find((s) => s.peerId === selfPeerId) ?? null : null),
+    [sessions, selfPeerId],
+  );
+  const selfName = t('chatSidebar.selfChat');
 
   async function handleStart(e: FormEvent) {
     e.preventDefault();
@@ -112,6 +126,37 @@ export function ChatSidebar({
       </form>
       {error && <p className="fn-unlock__error">{error}</p>}
       <ul className="fn-chat-sidebar__list">
+        {sessionLoggedIn && selfPeerId && (
+          <li>
+            <button
+              type="button"
+              className={`fn-chat-sidebar__item fn-chat-sidebar__item--self${selfPeerId === activePeerId ? ' active' : ''}`}
+              onClick={() => onSelectPeer(selfPeerId, selfName)}
+            >
+              <span className="fn-chat-sidebar__item-head">
+                <span className="fn-chat-sidebar__name">📁 {selfName}</span>
+                {(unreadByPeer[selfPeerId] ?? 0) > 0 ? (
+                  <span className="fn-unread-badge fn-unread-badge--sidebar">
+                    {unreadByPeer[selfPeerId]! > 99 ? '99+' : unreadByPeer[selfPeerId]}
+                  </span>
+                ) : null}
+              </span>
+              <span className="fn-chat-sidebar__preview">
+                {selfSession?.preview || t('chatSidebar.selfChatHint')}
+              </span>
+              {selfSession?.lastAt ? (
+                <time className="fn-chat-sidebar__time">
+                  {new Date(selfSession.lastAt).toLocaleString(undefined, {
+                    month: 'numeric',
+                    day: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}
+                </time>
+              ) : null}
+            </button>
+          </li>
+        )}
         {sorted.length === 0 ? (
           <li className="fn-chat-sidebar__empty">{t('chatSidebar.empty')}</li>
         ) : (

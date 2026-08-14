@@ -134,8 +134,13 @@ export class IMClient {
   private openResolve: (() => void) | null = null;
   private disposed = false;
   private pendingPollTimer: ReturnType<typeof setInterval> | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  /** Last time any frame arrived — proves the connection is actually alive. */
+  private lastAliveAt = 0;
   private pendingFetcher?: () => Promise<void>;
   private onConnected?: () => void;
+  private onAuthError?: () => void;
+  private selfId: string | null = null;
 
   constructor(
     private wsBaseUrl: string,
@@ -166,6 +171,19 @@ export class IMClient {
   /** Fires on every successful (re)connect — used for catch-up syncs after being offline. */
   setOnConnected(handler: () => void): void {
     this.onConnected = handler;
+  }
+
+  /** Fires when the pending-message API rejects the token (401) — the session is dead. The WS
+   *  layer alone can't tell an expired token from a flaky network (it only sees closes), so
+   *  this is the one reliable expiry signal the IM client has. */
+  setOnAuthError(handler: () => void): void {
+    this.onAuthError = handler;
+  }
+
+  /** Own user id — enables the self-chat ("file transfer assistant") session, where the peer
+   *  is this same account on other devices. */
+  setSelfId(userId: string): void {
+    this.selfId = userId;
   }
 
   upsertSession(
@@ -211,6 +229,7 @@ export class IMClient {
     this.ws = new WebSocket(url);
     this.ws.onmessage = (ev) => void this.handleRaw(ev.data as string);
     this.ws.onopen = () => {
+      this.lastAliveAt = Date.now();
       this.ws?.send(JSON.stringify({ type: 'ping' }));
       this.openResolve?.();
       this.openResolve = null;
@@ -233,6 +252,23 @@ export class IMClient {
     this.pendingPollTimer = setInterval(() => {
       if (this.isConnected()) void this.pendingFetcher?.();
     }, 15000);
+    // Heartbeat: mobile networks and OS background suspensions can leave the TCP connection
+    // half-dead — `readyState` still reports OPEN but nothing is delivered and sends vanish
+    // silently. Ping every 20s and force-close (→ reconnect loop) when nothing has arrived
+    // for 50s, so a zombie connection recovers instead of lingering forever.
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = setInterval(() => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      if (this.lastAliveAt && Date.now() - this.lastAliveAt > 50_000) {
+        this.ws.close();
+        return;
+      }
+      try {
+        this.ws.send(JSON.stringify({ type: 'ping' }));
+      } catch {
+        this.ws.close();
+      }
+    }, 20_000);
   }
 
   disconnect(): void {
@@ -241,10 +277,32 @@ export class IMClient {
       clearInterval(this.pendingPollTimer);
       this.pendingPollTimer = null;
     }
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
     this.ws?.close();
     this.ws = null;
     this.openPromise = null;
     this.openResolve = null;
+  }
+
+  /** Called when the app returns to the foreground: reconnect a closed socket immediately
+   *  instead of waiting for the retry loop, and ping an open one so the heartbeat can reap
+   *  it quickly if it turns out to be a zombie. */
+  nudge(): void {
+    if (this.disposed) return;
+    if (!this.ws || this.ws.readyState === WebSocket.CLOSED || this.ws.readyState === WebSocket.CLOSING) {
+      this.connect();
+      return;
+    }
+    if (this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(JSON.stringify({ type: 'ping' }));
+      } catch {
+        this.ws.close();
+      }
+    }
   }
 
   loadSession(state: IMSessionState): void {
@@ -314,11 +372,19 @@ export class IMClient {
     const session = this.sessions.get(from);
     if (!session) return false;
     try {
-      const { plaintext, state } = decryptMessage(session, envelope);
+      // Self-chat: every device of the account shares one session but keeps its own
+      // independent sendCounter, so incoming counters are NOT globally monotonic (device A
+      // may deliver #5 after device B delivered #7). The strictly-increasing replay check
+      // would wrongly reject those, so bypass it — the app layer dedupes by message id.
+      const isSelf = from === this.selfId;
+      const effective = isSelf ? { ...session, recvCounter: envelope.counter - 1 } : session;
+      const { plaintext, state } = decryptMessage(effective, envelope);
       if (this.onMessage) {
         await this.onMessage(from, plaintext, msgId, sentAt);
       }
-      this.sessions.set(from, state);
+      // For self-chat keep the original counters: recvCounter is meaningless there (see
+      // above) and must not clobber sendCounter bookkeeping.
+      this.sessions.set(from, isSelf ? { ...session, recvCounter: Math.max(session.recvCounter, state.recvCounter) } : state);
       return true;
     } catch (err) {
       console.warn('[IM] decrypt/process failed', from, msgId, err);
@@ -327,6 +393,7 @@ export class IMClient {
   }
 
   private async handleRaw(raw: string): Promise<void> {
+    this.lastAliveAt = Date.now();
     try {
       const msg = JSON.parse(raw) as WSMessage & { payload?: IMEnvelope; sent_at?: string };
       if (msg.type === 'pong') return;
@@ -368,6 +435,10 @@ export class IMClient {
     const res = await fetch(`${apiBase}/api/v1/messages/pending`, {
       headers: { Authorization: `Bearer ${token}` },
     });
+    if (res.status === 401) {
+      this.onAuthError?.();
+      return;
+    }
     if (!res.ok) return;
     const data = (await res.json()) as {
       items: Array<{ id: string; from_user: string; payload: IMEnvelope; created_at: string }>;

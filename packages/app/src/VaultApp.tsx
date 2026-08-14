@@ -707,6 +707,11 @@ export function VaultApp() {
       const existing = await storage.listChatMessagesDecrypted(k.notesKey);
       if (existing.some((m) => m.id === msgId)) return;
 
+      // Self-chat ("file transfer assistant"): a message from another device of this same
+      // account. It was authored by us, so store it as outgoing and keep notifications quiet
+      // (badge only, no sound).
+      const isSelf = peerId === sessionRef.current?.userId;
+
       const wire = decodeChatWire(plaintext);
       const refs: ChatAttachmentRef[] = [];
       for (const att of wire.attachments ?? []) {
@@ -721,7 +726,7 @@ export function VaultApp() {
       const msg = storedToChatMessage(
         msgId,
         peerId,
-        'in',
+        isSelf ? 'out' : 'in',
         sentAt,
         toStoredPayload({ ...wire, peerUsername: session?.peerUsername }, refs),
       );
@@ -731,7 +736,7 @@ export function VaultApp() {
         appViewRef.current === 'chat' && activePeerRef.current === peerId;
       if (!viewingThread) {
         bumpUnread(peerId);
-        if (chatNotifyRef.current.sound) {
+        if (chatNotifyRef.current.sound && !isSelf) {
           playChatNotificationSound(chatNotifyRef.current.soundId, chatNotifyRef.current.volume);
         }
       }
@@ -740,12 +745,12 @@ export function VaultApp() {
       if (imSession && appViewRef.current === 'chat') {
         if (!activePeerRef.current || activePeerRef.current === peerId) {
           setActivePeerId(peerId);
-          setActivePeerName(imSession.peerUsername);
+          setActivePeerName(isSelf ? t('chatSidebar.selfChat') : imSession.peerUsername);
           clearPeerUnread(peerId);
         }
       }
     },
-    [persistChatMessage, storage, bumpUnread, clearPeerUnread],
+    [persistChatMessage, storage, bumpUnread, clearPeerUnread, t],
   );
 
   useEffect(() => {
@@ -1041,6 +1046,19 @@ export function VaultApp() {
     await storage.setMeta(META_KEYS.exchangePubkey, toBase64(kp.exchangePublicKey));
   };
 
+  /**
+   * The stored token was rejected with 401. Stop pretending to be logged in: drop the persisted
+   * session (per-vault localStorage), disconnect IM, and raise the re-login banner. Login /
+   * register / cloud-sync all clear the flag again via setSession + setSessionExpired(false).
+   */
+  const expireSession = useCallback(() => {
+    saveSession(null, loadStorageNamespace());
+    setSession(null);
+    imRef.current?.disconnect();
+    imRef.current = null;
+    setSessionExpired(true);
+  }, []);
+
   const initIM = useCallback(
     async (derived: VaultKeys, userSession: UserSession) => {
       const priv = await loadExchangePrivate(derived.masterKey);
@@ -1056,6 +1074,7 @@ export function VaultApp() {
       await new ApiClient(serverUrl, locale).updateKeys(userSession.token, identity, derivedPub);
       imRef.current?.disconnect();
       const client = new IMClient(serverUrl, userSession.token, priv);
+      client.setSelfId(userSession.userId);
       imRef.current = client;
       const vaultNs = loadStorageNamespace();
       for (const s of loadChatSessions(vaultNs)) client.loadSession(s);
@@ -1088,6 +1107,7 @@ export function VaultApp() {
       client.setOnMessage(handleDecrypted);
       client.setOnDeliveryAck((_peerId, msgId) => updateChatMessageStatus(msgId, 'delivered'));
       client.setOnReadAck((_peerId, msgId) => updateChatMessageStatus(msgId, 'read'));
+      client.setOnAuthError(() => expireSession());
 
       const pullPending = async () => {
         await client.pullPendingMessages(serverUrl, userSession.token);
@@ -1100,7 +1120,7 @@ export function VaultApp() {
       // alone can miss them. Pull the account chat history too, throttled to once a minute.
       client.setOnConnected(() => {
         const now = Date.now();
-        if (now - lastChatCatchupRef.current < 60_000) return;
+        if (now - lastChatCatchupRef.current < 15_000) return;
         lastChatCatchupRef.current = now;
         void handleChatHistorySync().catch(() => {
           lastChatCatchupRef.current = 0; // let the next reconnect retry
@@ -1109,21 +1129,8 @@ export function VaultApp() {
       client.connect();
       void pullPending().catch((err) => console.error('fetchPending failed', err));
     },
-    [serverUrl, processIncomingChat, storage, t, updateChatMessageStatus, handleChatHistorySync],
+    [serverUrl, processIncomingChat, storage, t, updateChatMessageStatus, handleChatHistorySync, expireSession],
   );
-
-  /**
-   * The stored token was rejected with 401. Stop pretending to be logged in: drop the persisted
-   * session (per-vault localStorage), disconnect IM, and raise the re-login banner. Login /
-   * register / cloud-sync all clear the flag again via setSession + setSessionExpired(false).
-   */
-  const expireSession = useCallback(() => {
-    saveSession(null, loadStorageNamespace());
-    setSession(null);
-    imRef.current?.disconnect();
-    imRef.current = null;
-    setSessionExpired(true);
-  }, []);
 
   const ensureImReady = useCallback(async (): Promise<IMClient> => {
     const derived = keysRef.current;
@@ -1146,9 +1153,12 @@ export function VaultApp() {
       const client = await ensureImReady();
       if (!session) throw new Error(t('vaultApp.loginRequired'));
       const api = new ApiClient(serverUrl, locale);
-      const peer = peerName
-        ? await api.lookupUser(session.token, peerName)
-        : await api.lookupUserById(session.token, peerId);
+      // Self-chat: `peerName` is the localized "file transfer assistant" label, not an actual
+      // username — always resolve by id (returns our own exchange pubkey).
+      const peer =
+        peerName && peerId !== session.userId
+          ? await api.lookupUser(session.token, peerName)
+          : await api.lookupUserById(session.token, peerId);
       if (!peer.exchangePubkey) {
         throw new Error(t('vaultApp.peerKeyNotReady', { username: peer.username }));
       }
@@ -3951,6 +3961,7 @@ export function VaultApp() {
               activePeerId={activePeerId}
               sessionLoggedIn={!!session}
               imConnected={imConnected}
+              selfPeerId={session?.userId ?? null}
               unreadByPeer={chatNotify.bubble ? unreadByPeer : {}}
               onSelectPeer={(id, name) => {
                 setActivePeerId(id);

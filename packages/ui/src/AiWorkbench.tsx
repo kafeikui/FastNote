@@ -103,6 +103,13 @@ blockquote { border-left: 3pt solid #ccc; margin-left: 0; padding-left: 8pt; col
 <body>${bodyHtml}</body></html>`;
 }
 
+/**
+ * Composer drafts keyed by session id — module-level so a typed-but-unsent message survives
+ * both switching between AI sessions and the workbench unmounting entirely (switching to a
+ * note/table tab). Cleared when the message is sent.
+ */
+const composerDrafts = new Map<string, { text: string; attachments: AiAttachment[] }>();
+
 export function AiWorkbench({
   session,
   configured,
@@ -121,11 +128,46 @@ export function AiWorkbench({
   findRequest = null,
 }: AiWorkbenchProps) {
   const t = useT();
-  const [draft, setDraft] = useState('');
+  const [draft, setDraft] = useState(() => composerDrafts.get(session.id)?.text ?? '');
   // Assistant message display: rendered markdown (default) vs. raw source text.
   const [showSource, setShowSource] = useState(false);
-  const [pendingAttachments, setPendingAttachments] = useState<AiAttachment[]>([]);
+  const [pendingAttachments, setPendingAttachments] = useState<AiAttachment[]>(
+    () => composerDrafts.get(session.id)?.attachments ?? [],
+  );
   const [attaching, setAttaching] = useState(false);
+
+  // ---- Draft persistence across session switches and unmount ------------------------------
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const pendingAttachmentsRef = useRef(pendingAttachments);
+  pendingAttachmentsRef.current = pendingAttachments;
+  const draftSessionIdRef = useRef(session.id);
+
+  const stashDraft = (sessionId: string) => {
+    const text = draftRef.current;
+    const attachments = pendingAttachmentsRef.current;
+    if (!text && attachments.length === 0) composerDrafts.delete(sessionId);
+    else composerDrafts.set(sessionId, { text, attachments });
+  };
+
+  useEffect(() => {
+    // Session switched in place (no remount): stash the outgoing session's draft — the state
+    // still holds it at this point — then restore the incoming session's.
+    if (draftSessionIdRef.current === session.id) return;
+    stashDraft(draftSessionIdRef.current);
+    draftSessionIdRef.current = session.id;
+    const stored = composerDrafts.get(session.id);
+    setDraft(stored?.text ?? '');
+    setPendingAttachments(stored?.attachments ?? []);
+  }, [session.id]);
+
+  // Unmount (switching to a note/table tab): stash so coming back restores the draft.
+  useEffect(
+    () => () => {
+      stashDraft(draftSessionIdRef.current);
+    },
+    [],
+  );
   const fileInputRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
@@ -275,6 +317,7 @@ export function AiWorkbench({
     onSend(text, pendingAttachments);
     setDraft('');
     setPendingAttachments([]);
+    composerDrafts.delete(session.id);
   };
 
   const handleFilesPicked = async (files: FileList | null) => {

@@ -1,5 +1,15 @@
 apply plugin: 'com.android.application'
 
+// Auto-versioning: every packaging run gets a strictly higher versionCode (build epoch
+// seconds — monotonic, fits in the 2_100_000_000 Play limit until 2036) so an APK built
+// after any change always installs over the previous one. versionName combines the
+// package.json version with a build timestamp so the installed build is identifiable in
+// Android's app info even between manual version bumps.
+def packageJson = new groovy.json.JsonSlurper().parseText(file('../../package.json').text)
+def buildStamp = new Date().format('yyMMdd.HHmm', TimeZone.getDefault())
+def autoVersionCode = (System.currentTimeMillis() / 1000L).toInteger()
+def autoVersionName = "${packageJson.version}-${buildStamp}"
+
 android {
     namespace = "com.fastnote.mobile"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -7,8 +17,8 @@ android {
         applicationId "com.fastnote.mobile"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode autoVersionCode
+        versionName autoVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.

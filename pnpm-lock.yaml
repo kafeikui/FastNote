@@ -65,6 +65,9 @@ importers:
       '@capacitor/core':
         specifier: ^8.4.1
         version: 8.4.1
+      '@capgo/capacitor-native-biometric':
+        specifier: ^8.6.5
+        version: 8.6.5(@capacitor/core@8.4.1)
       '@fastnote/ai':
         specifier: workspace:*
         version: link:../../packages/ai
@@ -671,6 +674,11 @@ packages:
 
   '@capacitor/core@8.4.1':
     resolution: {integrity: sha512-xqhOGLbTAYeOWK+IDUNSjQJAPapQjRHrIcgk9PYp52or9zFTaaMko31uNi16N6W+CRJ8VrRram6fOYILkBG2Hg==}
+
+  '@capgo/capacitor-native-biometric@8.6.5':
+    resolution: {integrity: sha512-ep+NKRWphqYtYtQSHe0uIoAKufbKrH2GyU5gQSlztmG0FsNSO+bT6pbz/kjVlsLprrLBb+fSk5vQdUjNAqgZqg==}
+    peerDependencies:
+      '@capacitor/core': '>=8.0.0'
 
   '@codemirror/autocomplete@6.20.3':
     resolution: {integrity: sha512-tlosUqb+3BbxCxZdu4tKeRghPFC+QM7q4X5YhKV2eCmPG+1r2F3f4AaSz5sCrFqUtX4Jh20VFTKecl16MgiV9g==}
@@ -3549,6 +3557,10 @@ snapshots:
   '@capacitor/core@8.4.1':
     dependencies:
       tslib: 2.8.1
+
+  '@capgo/capacitor-native-biometric@8.6.5(@capacitor/core@8.4.1)':
+    dependencies:
+      '@capacitor/core': 8.4.1
 
   '@codemirror/autocomplete@6.20.3':
     dependencies:

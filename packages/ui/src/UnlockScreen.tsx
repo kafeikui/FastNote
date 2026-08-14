@@ -32,6 +32,9 @@ interface UnlockScreenProps {
   progress?: { current: number; total: number } | null;
   /** Tab to open initially — e.g. 'cloud' right after a server-change reload. */
   initialTab?: UnlockTab;
+  /** When provided (mobile with fingerprint unlock enabled), the local tab shows a biometric
+   *  unlock button that triggers this instead of the password flow. */
+  onBiometricUnlock?: () => void | Promise<void>;
 }
 
 export function UnlockScreen({
@@ -47,6 +50,7 @@ export function UnlockScreen({
   onCloudSync,
   progress = null,
   initialTab = 'local',
+  onBiometricUnlock,
 }: UnlockScreenProps) {
   const t = useT();
   const activeVault = vaults.find((v) => v.id === activeVaultId);
@@ -305,6 +309,24 @@ export function UnlockScreen({
               <button type="submit" disabled={loading || !activeVaultId}>
                 {loading ? t('unlockScreen.processing') : isFirstRun ? t('unlockScreen.createAndEnter') : t('unlockScreen.unlock')}
               </button>
+              {!isFirstRun && onBiometricUnlock && (
+                <button
+                  type="button"
+                  className="fn-unlock__bio"
+                  disabled={loading}
+                  onClick={() => {
+                    void (async () => {
+                      try {
+                        await onBiometricUnlock();
+                      } catch (err) {
+                        setLocalError(err instanceof Error ? err.message : t('unlockScreen.errorGeneric'));
+                      }
+                    })();
+                  }}
+                >
+                  {t('unlockScreen.biometricUnlock')}
+                </button>
+              )}
             </form>
           </>
         ) : (

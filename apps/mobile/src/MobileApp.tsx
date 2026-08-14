@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ApiAuthError,
   ApiClient,
   createVaultRegistryEntry,
   ensureLegacyVaultInRegistry,
@@ -40,7 +41,11 @@ import {
   AI_WEB_SEARCH_USES_LIMIT,
   AI_WEB_SEARCH_USES_MIN,
   META_KEYS,
+  clearCapturedLogs,
   decodeChatWire,
+  formatCapturedLogs,
+  getCapturedLogs,
+  installConsoleCapture,
   serverUrlNeedsReload,
   storedToChatMessage,
   toStoredPayload,
@@ -68,6 +73,7 @@ import {
   AiWorkbench,
   ChatPanel,
   ChatSidebar,
+  LogsModal,
   UnlockScreen,
   buildChatSessions,
   type VaultListItem,
@@ -82,6 +88,18 @@ import {
   type Locale,
   type TFunction,
 } from '@fastnote/i18n';
+
+// Wrap console + error events into the in-memory ring buffer as early as possible, so the
+// logs viewer (settings → 运行日志) covers connection failures from app startup onwards.
+installConsoleCapture();
+
+import {
+  biometricAvailable,
+  biometricUnlockEnabled,
+  disableBiometricUnlock,
+  enableBiometricUnlock,
+  readBiometricPassword,
+} from './biometric';
 
 type VaultKeys = Awaited<ReturnType<typeof deriveKeysFromPassword>>;
 
@@ -157,6 +175,9 @@ export function MobileApp() {
   const [activePeerName, setActivePeerName] = useState<string | null>(null);
   const [unreadByPeer, setUnreadByPeer] = useState<Record<string, number>>({});
   const [imConnected, setImConnected] = useState(false);
+  // Any authenticated call answered 401: the stored token is dead. Drop the session and show
+  // a prominent banner instead of a silently forever-"disconnected" chat.
+  const [sessionExpired, setSessionExpired] = useState(false);
   const imRef = useRef<IMClient | null>(null);
   const sessionRef = useRef<UserSession | null>(null);
   const activePeerRef = useRef<string | null>(null);
@@ -165,6 +186,25 @@ export function MobileApp() {
   const [view, setView] = useState<'ai' | 'chat'>('ai');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [showLogs, setShowLogs] = useState(false);
+  // Bumped on "clear" so the modal re-renders with the emptied buffer.
+  const [, setLogsTick] = useState(0);
+
+  // --- biometric (fingerprint) unlock -----------------------------------------
+  const [bioAvailable, setBioAvailable] = useState(false);
+  const [bioEnabled, setBioEnabled] = useState(() => biometricUnlockEnabled(loadStorageNamespace()));
+  // Master password of the current unlock, kept only in memory so the settings toggle can
+  // enroll it into the Keystore without asking the user to retype it.
+  const masterPasswordRef = useRef<string | null>(null);
+  // The automatic fingerprint prompt fires once per lock cycle, not on every re-render.
+  const bioAutoPromptedRef = useRef(false);
+
+  useEffect(() => {
+    void biometricAvailable().then(setBioAvailable);
+  }, []);
+  useEffect(() => {
+    setBioEnabled(biometricUnlockEnabled(loadStorageNamespace()));
+  }, [storageEpoch, activeVaultId]);
   const viewRef = useRef(view);
   viewRef.current = view;
   sessionRef.current = session;
@@ -365,6 +405,9 @@ export function MobileApp() {
     if (!k) return;
     if (await storage.hasChatMessage(msgId)) return;
 
+    // Self-chat ("file transfer assistant"): authored by us on another device — store as outgoing.
+    const isSelf = peerId === sessionRef.current?.userId;
+
     const wire = decodeChatWire(plaintext);
     const refs: ChatAttachmentRef[] = [];
     for (const att of wire.attachments ?? []) {
@@ -378,7 +421,7 @@ export function MobileApp() {
     const msg = storedToChatMessage(
       msgId,
       peerId,
-      'in',
+      isSelf ? 'out' : 'in',
       sentAt,
       toStoredPayload({ ...wire, peerUsername: imSession?.peerUsername }, refs),
     );
@@ -388,7 +431,7 @@ export function MobileApp() {
     if (!viewingThread) bumpUnread(peerId);
     if (imSession && viewRef.current === 'chat' && (!activePeerRef.current || activePeerRef.current === peerId)) {
       setActivePeerId(peerId);
-      setActivePeerName(imSession.peerUsername);
+      setActivePeerName(isSelf ? t('chatSidebar.selfChat') : imSession.peerUsername);
       clearPeerUnread(peerId);
     }
   };
@@ -399,11 +442,23 @@ export function MobileApp() {
     const derivedPub = verifyExchangeKeypair(priv);
     const storedPub = await storage.getMeta(META_KEYS.exchangePubkey);
     if (storedPub !== derivedPub) await storage.setMeta(META_KEYS.exchangePubkey, derivedPub);
-    const { identity } = await ensureLocalPubkeys(derived);
-    await new ApiClient(serverUrl(), locale).updateKeys(userSession.token, identity, derivedPub);
+    // A fresh connection context: the first on-connect catch-up must never be throttled away
+    // by a sync that belonged to the previous login.
+    lastChatCatchupRef.current = 0;
+    // Publishing our pubkeys only matters for *other* users starting new sessions with us —
+    // don't let this round trip delay the WS connection (it used to gate it, which is what
+    // made the first message after login feel slow).
+    void (async () => {
+      const { identity } = await ensureLocalPubkeys(derived);
+      await new ApiClient(serverUrl(), locale).updateKeys(userSession.token, identity, derivedPub);
+    })().catch((err) => {
+      console.warn('[IM] pubkey upload failed', err);
+      if (err instanceof ApiAuthError) expireSession();
+    });
 
     imRef.current?.disconnect();
     const client = new IMClient(serverUrl(), userSession.token, priv);
+    client.setSelfId(userSession.userId);
     imRef.current = client;
     const vaultNs = loadStorageNamespace();
     for (const s of loadChatSessions(vaultNs)) client.loadSession(s);
@@ -427,6 +482,7 @@ export function MobileApp() {
     });
     client.setOnDeliveryAck((_peerId, msgId) => updateChatMessageStatus(msgId, 'delivered'));
     client.setOnReadAck((_peerId, msgId) => updateChatMessageStatus(msgId, 'read'));
+    client.setOnAuthError(() => expireSession());
 
     const pullPending = async () => {
       await client.pullPendingMessages(serverUrl(), userSession.token);
@@ -438,7 +494,7 @@ export function MobileApp() {
     // history on every (re)connect, throttled to once a minute.
     client.setOnConnected(() => {
       const now = Date.now();
-      if (now - lastChatCatchupRef.current < 60_000) return;
+      if (now - lastChatCatchupRef.current < 15_000) return;
       lastChatCatchupRef.current = now;
       const k = keysRef.current;
       const s = sessionRef.current;
@@ -464,6 +520,7 @@ export function MobileApp() {
       }
     } catch (err) {
       console.warn('[chat] history sync failed', err);
+      if (err instanceof ApiAuthError) expireSession();
     }
   };
 
@@ -492,9 +549,11 @@ export function MobileApp() {
     const userSession = sessionRef.current;
     if (!userSession) throw new Error(t('vaultApp.loginRequired'));
     const api = new ApiClient(serverUrl(), locale);
-    const peer = peerName
-      ? await api.lookupUser(userSession.token, peerName)
-      : await api.lookupUserById(userSession.token, peerId);
+    // Self-chat: `peerName` is the localized assistant label, not a username — resolve by id.
+    const peer =
+      peerName && peerId !== userSession.userId
+        ? await api.lookupUser(userSession.token, peerName)
+        : await api.lookupUserById(userSession.token, peerId);
     if (!peer.exchangePubkey) {
       throw new Error(t('vaultApp.peerKeyNotReady', { username: peer.username }));
     }
@@ -634,10 +693,12 @@ export function MobileApp() {
     sessionRef.current = stored;
     void (async () => {
       try {
+        // History catch-up rides the IM client's on-connect callback — no explicit sync here
+        // (it used to run a second, duplicate full pull).
         await initIM(derived, stored);
-        await syncChatHistory(stored, derived);
       } catch (err) {
         console.warn('[chat] IM init after unlock failed', err);
+        if (err instanceof ApiAuthError) expireSession();
       }
     })();
   };
@@ -687,6 +748,8 @@ export function MobileApp() {
       saveSession(userSession, loadStorageNamespace());
       setSession(userSession);
       sessionRef.current = userSession;
+      setSessionExpired(false);
+      masterPasswordRef.current = password;
       keysRef.current = derived;
       await loadAiState(derived);
       setKeys(derived);
@@ -694,9 +757,10 @@ export function MobileApp() {
       setVaultListItems((prev) =>
         prev.map((v) => (v.id === activeVaultId ? { ...v, initialized: true, boundUsername: username.trim() } : v)),
       );
+      // Login returns as soon as the message service is connecting; the full history pull
+      // (potentially heavy) rides the on-connect callback in the background.
       await initIM(derived, userSession);
-      await syncChatHistory(userSession, derived);
-      await loadChatHistoryFor(derived);
+      void loadChatHistoryFor(derived);
       return;
     }
 
@@ -712,6 +776,8 @@ export function MobileApp() {
     saveSession(userSession, loadStorageNamespace());
     setSession(userSession);
     sessionRef.current = userSession;
+    setSessionExpired(false);
+    masterPasswordRef.current = password;
     // Already-unlocked path (login from settings): keep the current AI state untouched.
     const alreadyUnlocked = !!keysRef.current;
     keysRef.current = derived;
@@ -722,9 +788,9 @@ export function MobileApp() {
     setVaultListItems((prev) =>
       prev.map((v) => (v.id === activeVaultId ? { ...v, boundUsername: username.trim() } : v)),
     );
+    // Same as the new-device path: connect fast, sync history in the background on connect.
     await initIM(derived, userSession);
-    await syncChatHistory(userSession, derived);
-    await loadChatHistoryFor(derived);
+    void loadChatHistoryFor(derived);
   };
 
   /** Logs out of the cloud account (chat goes offline); the vault stays unlocked. */
@@ -736,6 +802,30 @@ export function MobileApp() {
     imRef.current = null;
     setImConnected(false);
   };
+
+  /** The stored token was rejected (401): drop the dead session and show the re-login banner. */
+  const expireSession = () => {
+    handleLogout();
+    setSessionExpired(true);
+  };
+
+  // Foreground recovery: Android suspends the WebView in the background, which can leave the
+  // WS half-dead and real-time delivery silently broken. On return to foreground, nudge the
+  // socket (reconnect/ping) and pull the chat history so anything missed shows up immediately.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      imRef.current?.nudge();
+      const k = keysRef.current;
+      const s = sessionRef.current;
+      if (!k || !s) return;
+      lastChatCatchupRef.current = Date.now();
+      void syncChatHistory(s, k);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Poll the WS connection state while the chat view is open.
   useEffect(() => {
@@ -796,6 +886,7 @@ export function MobileApp() {
     await storage.setMeta(META_KEYS.passwordVerifier, toBase64(derived.passwordVerifier));
     await setupIdentityKeys(derived);
     keysRef.current = derived;
+    masterPasswordRef.current = password;
     await loadAiState(derived);
     setKeys(derived);
     setIsFirstRun(false);
@@ -811,9 +902,66 @@ export function MobileApp() {
       throw new Error(t('vaultApp.wrongPassword'));
     }
     keysRef.current = derived;
+    masterPasswordRef.current = password;
     await loadAiState(derived);
     setKeys(derived);
     restoreChatAfterUnlock(derived);
+  };
+
+  /** Fingerprint unlock: BiometricPrompt-gated Keystore read of the master password, then the
+   *  normal password unlock path. A failed read (cancelled / biometrics changed / key
+   *  invalidated) just leaves the user on the password screen. */
+  const handleBiometricUnlock = async () => {
+    const ns = loadStorageNamespace();
+    const password = await readBiometricPassword(ns, {
+      title: t('unlockScreen.biometricUnlock'),
+      reason: t('unlockScreen.biometricPromptReason'),
+    });
+    if (!password) return;
+    try {
+      await handleUnlockLocal(password);
+    } catch (err) {
+      // Wrong password means the vault password changed since enrollment — drop the stale
+      // secret so the button stops offering an unlock that can never work.
+      console.warn('[bio] stored password rejected, disabling fingerprint unlock', err);
+      await disableBiometricUnlock(ns);
+      setBioEnabled(false);
+      throw new Error(t('unlockScreen.biometricStale'));
+    }
+  };
+
+  // Auto-prompt the fingerprint dialog once when the unlock screen shows and the feature is on.
+  useEffect(() => {
+    if (keys) {
+      bioAutoPromptedRef.current = false;
+      return;
+    }
+    if (!bioEnabled || !bioAvailable || isFirstRun || bioAutoPromptedRef.current) return;
+    bioAutoPromptedRef.current = true;
+    void handleBiometricUnlock().catch((err) => console.warn('[bio] auto unlock failed', err));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keys, bioEnabled, bioAvailable, isFirstRun]);
+
+  /** Settings toggle: enrolls the in-memory master password into the Keystore, or wipes it. */
+  const handleToggleBiometric = async (next: boolean) => {
+    const ns = loadStorageNamespace();
+    if (!next) {
+      await disableBiometricUnlock(ns);
+      setBioEnabled(false);
+      return;
+    }
+    const password = masterPasswordRef.current;
+    if (!password) {
+      alert(t('mobileApp.bioNeedPassword'));
+      return;
+    }
+    try {
+      await enableBiometricUnlock(ns, password);
+      setBioEnabled(true);
+    } catch (err) {
+      console.warn('[bio] enroll failed', err);
+      alert(t('mobileApp.bioEnrollFailed'));
+    }
   };
 
   const handleLock = () => {
@@ -826,6 +974,7 @@ export function MobileApp() {
     imRef.current = null;
     keysRef.current = null;
     sessionRef.current = null;
+    masterPasswordRef.current = null;
     setKeys(null);
     setSession(null);
     setAiSettings(null);
@@ -1204,6 +1353,9 @@ export function MobileApp() {
             onCreateVault={handleCreateVault}
             onUnlockLocal={handleUnlockLocal}
             onCloudSync={handleCloudLogin}
+            onBiometricUnlock={
+              bioEnabled && bioAvailable && !isFirstRun ? handleBiometricUnlock : undefined
+            }
           />
         </div>
       </I18nProvider>
@@ -1213,6 +1365,28 @@ export function MobileApp() {
   return (
     <I18nProvider locale={locale}>
       <div className="fn-mobile">
+        {sessionExpired && (
+          <div className="fn-session-expired-banner fn-session-expired-banner--mobile" role="alert">
+            <span>{t('vaultApp.sessionExpiredBanner')}</span>
+            <button
+              type="button"
+              onClick={() => {
+                setSessionExpired(false);
+                setSettingsOpen(true);
+              }}
+            >
+              {t('vaultApp.sessionExpiredLogin')}
+            </button>
+            <button
+              type="button"
+              className="fn-session-expired-banner__dismiss"
+              title={t('vaultApp.sessionExpiredDismiss')}
+              onClick={() => setSessionExpired(false)}
+            >
+              ×
+            </button>
+          </div>
+        )}
         <header className="fn-mobile__header">
           <button
             type="button"
@@ -1324,6 +1498,7 @@ export function MobileApp() {
                   activePeerId={activePeerId}
                   sessionLoggedIn={!!session}
                   imConnected={imConnected}
+                  selfPeerId={session?.userId ?? null}
                   unreadByPeer={unreadByPeer}
                   onSelectPeer={(id, name) => {
                     setActivePeerId(id);
@@ -1376,7 +1551,23 @@ export function MobileApp() {
               setLocale(next);
               saveLocale(next);
             }}
+            onShowLogs={() => setShowLogs(true)}
+            bioSupported={bioAvailable}
+            bioEnabled={bioEnabled}
+            onToggleBiometric={handleToggleBiometric}
             onClose={() => setSettingsOpen(false)}
+          />
+        )}
+
+        {showLogs && (
+          <LogsModal
+            entries={getCapturedLogs()}
+            formatted={formatCapturedLogs()}
+            onClose={() => setShowLogs(false)}
+            onClear={() => {
+              clearCapturedLogs();
+              setLogsTick((n) => n + 1);
+            }}
           />
         )}
       </div>
@@ -1394,6 +1585,10 @@ interface MobileSettingsProps {
   onLogout: () => void;
   onSaveSettings: (settings: AiSettings) => Promise<void>;
   onChangeLocale: (locale: Locale) => void;
+  onShowLogs: () => void;
+  bioSupported: boolean;
+  bioEnabled: boolean;
+  onToggleBiometric: (next: boolean) => Promise<void>;
   onClose: () => void;
 }
 
@@ -1407,6 +1602,10 @@ function MobileSettings({
   onLogout,
   onSaveSettings,
   onChangeLocale,
+  onShowLogs,
+  bioSupported,
+  bioEnabled,
+  onToggleBiometric,
   onClose,
 }: MobileSettingsProps) {
   const [apiKey, setApiKey] = useState(settings?.apiKey ?? '');
@@ -1611,6 +1810,27 @@ function MobileSettings({
 
         <button type="button" className="fn-mobile__save" onClick={() => void handleSave()}>
           {saved ? t('settingsModal.ai.saved') : t('settingsModal.ai.save')}
+        </button>
+
+        {bioSupported && (
+          <>
+            <div className="fn-mobile__settings-section">{t('mobileApp.bioSection')}</div>
+            <label className="fn-mobile__field fn-mobile__field--row">
+              <input
+                type="checkbox"
+                checked={bioEnabled}
+                onChange={(e) => void onToggleBiometric(e.target.checked)}
+              />
+              <span>{t('mobileApp.bioUnlockLabel')}</span>
+            </label>
+            <p className="fn-mobile__hint">{t('mobileApp.bioUnlockHint')}</p>
+          </>
+        )}
+
+        <div className="fn-mobile__settings-section">{t('logsModal.title')}</div>
+        <p className="fn-mobile__hint">{t('logsModal.hint')}</p>
+        <button type="button" className="fn-mobile__save" onClick={onShowLogs}>
+          {t('logsModal.title')}
         </button>
 
         <p className="fn-mobile__version">FastNote Mobile v{__APP_VERSION__}</p>

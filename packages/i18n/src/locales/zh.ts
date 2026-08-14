@@ -330,6 +330,9 @@ export const zh = {
     cloudReturningHint: '输入云账号与主密码，解锁本地库并从服务器同步最新笔记。',
     serverUrlPlaceholder: '服务器地址',
     serverChangedReloading: '服务器地址已保存，页面即将自动刷新以应用新地址，刷新后请重新输入密码登录',
+    biometricUnlock: '指纹解锁',
+    biometricPromptReason: '验证指纹以解锁 FastNote 密码库',
+    biometricStale: '指纹解锁保存的密码已失效（主密码可能已修改），请用密码解锁后重新开启指纹解锁。',
     usernamePlaceholder: '用户名',
     loggingIn: '登录同步中…',
     loginAndSync: '登录并同步',
@@ -376,6 +379,8 @@ export const zh = {
     empty: '暂无会话',
     attachmentPreview: '📎 附件',
     startFailed: '无法开始会话',
+    selfChat: '文件传输助手',
+    selfChatHint: '给自己发消息或文件，在所有已登录设备间同步',
   },
   chatAttachment: {
     deleteConfirm: '删除附件「{name}」？',
@@ -427,6 +432,7 @@ export const zh = {
     numberFormatCurrency: '货币',
     numberFormatPercent: '百分比',
     decimals: '小数位数',
+    mixedValue: '（混合）',
     decimalsOption: '{n} 位小数',
     currencySymbol: '货币符号',
     alignH: '水平对齐（作用于选中单元格）',
@@ -609,6 +615,11 @@ export const zh = {
     cloudNotSupported: '移动版暂不支持云账号登录同步，请使用"密码解锁"。',
     copiedAsMarkdown: '已将所选问答以 Markdown 格式复制到剪贴板。',
     copyFailed: '复制失败，请重试。',
+    bioSection: '安全',
+    bioUnlockLabel: '指纹解锁',
+    bioUnlockHint: '开启后主密码将由系统生物识别密钥库（Android Keystore）加密保存，每次读取都需要通过指纹验证。更换指纹录入后需重新开启。',
+    bioNeedPassword: '请先用主密码解锁一次，再开启指纹解锁。',
+    bioEnrollFailed: '开启指纹解锁失败，请确认设备已录入指纹后重试。',
   },
 } as const;
 

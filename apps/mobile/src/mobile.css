@@ -24,6 +24,15 @@ body,
   min-height: 100%;
 }
 
+/* Session-expired banner: keep it clear of the status bar notch and readable on small screens. */
+.fn-session-expired-banner--mobile {
+  top: calc(8px + env(safe-area-inset-top));
+  width: calc(100vw - 16px);
+  max-width: none;
+  flex-wrap: wrap;
+  font-size: 0.9rem;
+}
+
 .fn-mobile__header {
   flex: 0 0 auto;
   display: flex;

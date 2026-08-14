@@ -81,6 +81,8 @@ MVP（`docs/PHASE1.md` M1–M8）已全部完成并在 M8 之后继续做了大�
 - [x] 表格多格粘贴锚定选区（2026-08-03）：`handleGridPaste` dataset 分支改用 `selectionRangeRef` 左上角作为起点（避免插行后残留焦点 textarea 的过期 data-row-idx）；`handleAddRow`/`handleAddColumn` 结束后焦点归还网格容器
 - [x] 聊天实时上传 + 手动同步按钮（2026-08-03）：`SyncClient.pushChatMessages`（push-only）+ `scheduleChatPush` 3s 防抖（VaultApp/MobileApp 的 `persistChatMessage`）；`ChatPanel` 头部"⟳ 同步历史"按钮（`onSyncHistory` prop，完整 push+pull 后刷新）
 - [x] 多端登录收不到聊天消息（2026-08-03，**需重新部署 server**）：`onlineSockets` 改为 `Map<string, Set<WebSocket>>` 全设备扇出（message/delivery_ack/read_ack）；`IMClient.setOnConnected` 重连时整账户聊天历史补拉（60s 节流），覆盖离线期间被其它设备 ack 删除的队列消息
+- [x] 安卓运行日志 + 渲染模式多行选区回车修复（2026-08-13）：移动端 installConsoleCapture + 设置内 LogsModal；NoteEditor 拦截跨块选区 Enter 改走 PM 先删后分命令链（绕过 Tiptap v3 splitBlock pre-delete canSplit 缺陷）
+- [x] AI 草稿保留 + 表格格式全选区生效（2026-08-11）：composerDrafts 按会话保留未发送输入（切会话/切标签均保留）；表格工具栏 formatSummary 混合占位、加粗 Excel 语义（任一非粗→全粗，取消时显式 false 覆盖行列默认）
 - [x] 表格剪切 Ctrl+X（2026-08-07）：单格/多格选区剪切（公式保留源码），事件路径 + 键盘回退 + 右键菜单"剪切"，可撤销
 - [x] 公式绝对引用 $ + F4 循环（2026-08-06）：$A$1/A$1/$A1/$C:$C 求值忽略 $、填充位移固定锚定轴、结构性编辑保留 $ 并照常调整下标；编辑公式按 F4 循环光标处引用形式（cycleRefAnchorAtCaret）
 - [x] 单元格级数字格式（2026-08-06）：`TableCellStyle.format` 随样式合并链（cell>row>col.cellStyle）覆盖列格式，`kind:'none'` 作单元格显式退出；工具栏整列选中写列级并清单元格覆盖、其他选区写单元格级；`resolveCellFormat` 统一渲染/自动列宽/工具栏指示
@@ -89,6 +91,15 @@ MVP（`docs/PHASE1.md` M1–M8）已全部完成并在 M8 之后继续做了大�
 - [x] Alt+方向键交换公式引用跟随（2026-08-06）：`rewriteFormulaRefsForSwap`（行/列 i↔j 置换，引用跟随内容、结果不变，范围端点映射+归一化，整列引用支持）+ `rewriteFormulaRefsForCellSwap`（单格交换只重写精确指向的单元引用），接线于 utils 的 swapRows/swapColumns/swapCells
 - [x] Win 版解锁页焦点 + 服务器地址手动输入（2026-08-03）：`UnlockScreen` 密码框显式聚焦（多次重试 + window focus 兜底，新增 `initialTab` prop）；desktop main.ts 在 `did-finish-load`/窗口 focus 时 `webContents.focus()`；解锁页云登录换新地址时不再中途弹原生 confirm——保存地址 + 提示 + 自动 reload 并经 `sessionStorage.fastnote_unlock_tab` 回到云同步 tab
 
+- [x] 安卓登录过期显著提示（2026-08-13）：`IMClient.setOnAuthError`（pending 拉取 401 触发）+ 移动端 `sessionExpired` banner（复用桌面样式，safe-area 适配），401 时丢弃死 session 并引导去设置重新登录；桌面 initIM 同步接线
+- [x] 安卓首条消息收发提速（2026-08-13）：公钥上传不再阻塞 WS 连接（后台化）；登录/解锁不再 await 全量聊天历史同步（统一走 onConnected 后台 catch-up，消除重复拉取）；initIM 重置 catch-up 节流
+- [x] 安卓指纹解锁（2026-08-13）：`@capgo/capacitor-native-biometric`，主密码存 Keystore（BIOMETRY_CURRENT_SET，读取强制指纹），设置开关 + 解锁屏自动弹窗 + 次级按钮，密码变更自动失效回退
+
+- [x] 文件传输助手（2026-08-14）：自聊复用 1:1 E2E 通道（自身密钥对 ECDH，各设备根密钥一致）；`IMClient.setSelfId` + 自会话计数绕过（跨设备 sendCounter 不单调，靠消息 id 去重防重放）；入站自消息按 'out' 落库、跳过提示音；侧栏置顶"📁 文件传输助手"入口；实时走 WS fan-out，离线补齐走既有历史 blob 同步；服务器零改动
+
+- [x] 自聊实时投递修复（2026-08-14）：E2E 定位两个根因——回显回执删掉 pending 副本（服务器改为自消息不回显来源 socket）、WS 无心跳导致假死连接（IMClient 20s 心跳 + 50s 无帧强制重连 + `nudge()`）；安卓回前台主动补拉；onConnected 节流 60s→15s；**需重新部署 relay**
+- [x] 安卓打包自动递增版本（2026-08-14）：versionCode=构建 epoch 秒、versionName=包版本+时间戳，gradle 配置期自动生成
+
 ## 已知问题 / 技术债
 
 1. ~~`packages/im`、`packages/sync`、`packages/table` 缺少 `tsconfig.json`~~ **已修复（2026-07-09）**：三个包都已补上标准 `tsconfig.json`，typecheck 通过。
@@ -96,7 +107,7 @@ MVP（`docs/PHASE1.md` M1–M8）已全部完成并在 M8 之后继续做了大�
 3. **`server` 默认 `JWT_SECRET` 是明文占位符**，生产部署必须显式覆盖，目前只在文档里提示，没有启动时的强校验/警告。
 4. **主 JS bundle 体积较大**（~1.46MB，gzip ~480KB），Vite 已给出分包建议，尚未实施代码分割。
 5. **群聊、加密文件传输（聊天里更大的文件）、多设备 Ratchet 同步优化**——按 `docs/PHASE1.md` Phase 2 预留，明确不在当前范围。
-6. **Android 移动版（apps/mobile）当前只覆盖解锁 + AI 助手**：无笔记/表格/聊天/云同步；`onCloudSync` 直接报"暂不支持"；APK 构建依赖本机 Android Studio/SDK（仓库内未配 CI）；移动库与桌面库是各自设备独立的 IndexedDB（无同步桥接）。
+6. **Android 移动版（apps/mobile）当前覆盖解锁（含指纹）+ AI 助手 + 聊天**：无笔记/表格编辑；APK 构建依赖本机 Android Studio/SDK（仓库内未配 CI）；移动库与桌面库是各自设备独立的 IndexedDB（笔记无同步桥接，聊天/AI 会话经账号云同步）。
 
 ## Phase 2 候选（未开始）
 

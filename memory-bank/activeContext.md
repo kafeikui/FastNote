@@ -445,6 +445,46 @@
 - i18n 新 key `tableEditor.ctxCut`（剪切/Cut），`helpExcel` 帮助文案补 Ctrl+X。
 - 剪切走 emitChange 历史，Ctrl+Z 可撤销。
 
+## 本次会话的实质性变更（AI 草稿保留 + 表格格式全选区生效，2026-08-11）
+
+- **AI 输入草稿保留**（`AiWorkbench.tsx`）：模块级 `composerDrafts: Map<sessionId, {text, attachments}>`。state 懒初始化从 store 读；会话切换 effect（`draftSessionIdRef` 变化时）先把旧会话草稿 stash 再恢复新会话的；卸载 cleanup（切到笔记/表格标签）也 stash；`handleSend` 发送后 `composerDrafts.delete(session.id)`；空草稿从 store 删除。移动端复用同组件自动生效。
+- **表格格式对全选区统一生效**（`TableEditor.tsx`）：
+  - 新 `formatSummary` useMemo：遍历 formatTargets 算每格有效样式（cell>row>col.cellStyle 合并 + resolveCellFormat），对 bold/fontSize/align/valign/数字格式 kind/小数位求"统一值或 MIXED（'__mixed__'）"。
+  - 加粗改 Excel 语义 `toggleBold`：选区内任一格非粗 → 全部加粗；全粗 → 取消。取消时行/列默认为粗的格写显式 `bold: false` 覆盖（仅删 per-cell 键会回落到默认继续显示粗体），其余格删键，分两组 applyCellStyle 一次 emitChange。
+  - 字号/水平/垂直对齐/数字格式/小数位下拉：混合时显示禁用隐藏的"（混合）"占位 option（value='__mixed__'），避免"下拉显示锚点格的值、选同值不触发 change、混合选区永远无法统一"的问题。对齐下拉在表头选择激活时仍走 alignStyleSource。
+  - i18n 新 key `tableEditor.mixedValue`（（混合）/(mixed)）。
+- 已知取舍：正值（具体字号/颜色/对齐/格式）统一应用到所有选中格；选"默认/原始值"仍是删除 per-cell 覆盖，行/列级默认存在时会回落到该默认（与清除格式语义一致）——bold 因有布尔 false 可显式覆盖故做了特殊处理。
+
+## 本次会话的实质性变更（安卓日志 + 渲染模式多行选区回车，2026-08-13）
+
+- **安卓日志查看**（`MobileApp.tsx`）：模块级 `installConsoleCapture()`（启动即捕获，覆盖连接失败日志）；设置面板底部新增"运行日志"区块和按钮（`MobileSettings` 新 `onShowLogs` prop），复用 `LogsModal`（entries/formatted/clear + logsTick 重渲染），样式复用 web 的 `.fn-logs*`。
+- **渲染模式多行选区 Enter 无反应**（`NoteEditor.tsx`）：根因是 Tiptap v3 `splitBlock` 在删除选区**之前**用 `$from.pos` 算 `canSplit`（ProseMirror 原版先 `deleteSelection` 再在 mapped 位置上判断）。两个后果：① Ctrl+A 的 AllSelection 时整条 Enter 链（newlineInCode/createParagraphNear/liftEmptyBlock/splitBlock）全 false → 无反应；② 选区尾部落在列表内时 pre-delete 误判 can=true、删除后 split 位置失效。修复：`editorProps.handleKeyDown` 拦截无修饰键 Enter + 非空跨块选区（`!$from.sameParent($to)` 或 AllSelection），改走 `@tiptap/pm/commands` 的 `chainCommands(newlineInCode, createParagraphNear, liftEmptyBlock, splitBlock)`（先删后分）；链失败时兜底 `deleteSelection` 后重试链。headless 复现/验证脚本（getSchema + EditorState，无需 jsdom）6 场景全过。单块内选区仍走 Tiptap 原生路径（keepMarks 等行为不变）。
+- **服务器 502 诊断（未改代码）**：PUT /vault-salt、/keys 返回 nginx 502 = nginx 后面的 relay 服务进程未响应（宕机/未启动），客户端无问题；安卓"消息服务未连接"大概率同因。需在服务器上重启 relay（docker compose restart / 查容器日志）。
+
+## 本次会话的实质性变更（安卓：过期提示 / 首条消息提速 / 指纹解锁，2026-08-13）
+
+- **安卓登录过期显著提示**：`MobileApp.tsx` 新增 `sessionExpired` state + `expireSession()`（复用 handleLogout 后置 banner），复用桌面 `.fn-session-expired-banner` 样式（i18n 键 `vaultApp.sessionExpired*`），加 `--mobile` 变体（safe-area top、全宽换行）。401 探测点：`syncChatHistory` catch、initIM 的后台公钥上传 catch、解锁恢复 IM catch，以及 `IMClient` 新增的 `setOnAuthError` 回调（pending 拉取 `/messages/pending` 返回 401 时触发——WS 层只能看到 close 分不清网络抖动和 token 过期，这是 IM 侧唯一可靠的过期信号）。桌面 `VaultApp` 的 initIM 也接了同一回调（`expireSession` 声明移到 initIM 之前，否则 useCallback deps 数组渲染期求值会踩 TDZ）。登录成功清 flag。
+- **首条消息收发提速**（`MobileApp.tsx` initIM 重排）：原来 `ensureLocalPubkeys` + `updateKeys`（一次网络往返）**串行阻塞** WS `connect()`，且登录路径还 `await` 全量 `syncChatHistory` + `loadChatHistoryFor`，与 onConnected 的 catch-up 同步**重复拉两遍**。现在：① 公钥上传改为后台 void（只影响别人向我们发起新会话，不该阻塞连接）；② 登录/解锁路径删掉显式 syncChatHistory，历史拉取统一走 onConnected 回调（后台），登录只 `void loadChatHistoryFor`（本地解密展示）；③ initIM 开头重置 `lastChatCatchupRef=0`，防止上一次登录的节流吞掉新连接的首次 catch-up。
+- **安卓指纹解锁**：新依赖 `@capgo/capacitor-native-biometric@^8`（版本跟随 Capacitor 主版本；`cap sync` 已注册，AndroidManifest 加 `USE_BIOMETRIC` 权限；debug APK 用 Android Studio JBR 21 构建验证通过）。新模块 `apps/mobile/src/biometric.ts`：主密码经 `setCredentials(accessControl: BIOMETRY_CURRENT_SET)` 存 Android Keystore（硬件保护、每次读取都强制 BiometricPrompt，`getSecureCredentials` 读取；换指纹录入即失效自动回退密码解锁），localStorage 只存每库开关 flag（`fastnote_bio_unlock_<ns>`）。`MobileApp`：`masterPasswordRef` 在密码解锁/建库/云登录时捕获（仅内存，锁定清空），设置里"安全"区新增指纹开关（开=录入 Keystore，会弹指纹；关=删除凭据）；解锁屏出现时自动弹一次指纹（`bioAutoPromptedRef` 每次锁定周期一次），`UnlockScreen`（packages/ui）新增可选 `onBiometricUnlock` prop 渲染次级"指纹解锁"按钮（样式 `.fn-unlock__bio`）。存储密码被拒（主密码已改）时自动禁用指纹并抛 `unlockScreen.biometricStale` 提示。
+- i18n 新键：`unlockScreen.biometricUnlock/biometricPromptReason/biometricStale`、`mobileApp.bioSection/bioUnlockLabel/bioUnlockHint/bioNeedPassword/bioEnrollFailed`。
+
+## 本次会话的实质性变更（文件传输助手 / 自聊，2026-08-14）
+
+- **文件传输助手（自己给自己发消息/文件，多设备同步）**：自聊复用现有 1:1 E2E 通道——peer 就是自己的 userId，x25519 用自己的密钥对做 ECDH（同账号所有设备从主密码派生同一交换密钥对 → 根密钥天然一致，冒烟测试验证过）。服务器零改动：`sendToUser` 本来就 fan-out 给收件人（=自己）的所有设备；发送设备收到回显后被应用层按消息 id 去重（两端 `processIncomingChat` 已有 dedup），并顺手 delivery_ack 清掉 pending 队列；离线设备靠既有的聊天历史 blob 同步在重连时补齐（与多设备 'in' 消息"first ack wins + history catch-up"同一套语义）。
+- **IMClient 自会话计数绕过**（`packages/im`）：新增 `setSelfId(userId)`；自聊各设备共享一个 session 但各自维护独立 sendCounter，入站 counter 不是全局单调的（A 发 #5 可能晚于 B 的 #7 到达），严格递增的重放检查会误拒——`processEnvelope` 对 self 消息用 `{...session, recvCounter: envelope.counter - 1}` 绕过检查（重放防护交给应用层的消息 id 去重），存回时保留原 counters（max recvCounter）。同 counter 不同设备 → 同消息密钥但随机 nonce，GCM 安全。
+- **入站自消息按 'out' 落库**（VaultApp + MobileApp `processIncomingChat`）：本来就是自己写的内容，方向存 'out'，桌面跳过提示音（保留未读角标）；自动选中会话时标题用本地化的"文件传输助手"。
+- **`ensureChatPeerSession` 自聊特判**（两端）：peerName 传进来的是本地化助手标签而非真实用户名，peerId===自己时强制走 `lookupUserById`（服务器 lookup 端点对自己同样返回 exchange_pubkey，无需特殊接口）。
+- **ChatSidebar 置顶入口**：新 `selfPeerId` prop；登录后列表顶部固定渲染"📁 文件传输助手"（样式 `.fn-chat-sidebar__item--self`，淡 accent 底），常规列表过滤掉 self 会话避免重复；无消息时显示提示语 `chatSidebar.selfChatHint`。i18n 新键 `chatSidebar.selfChat/selfChatHint`。
+
+## 本次会话的实质性变更（自聊实时投递修复 + 安卓自动版本，2026-08-14）
+
+- **文件传输助手跨设备不实时的根因（E2E 测试定位）**：本地起真实 relay + 两个真实 IMClient 设备做了端到端测试（`packages/im` 临时脚本，已删）。发现：① 双方真在线时实时投递本来就通（说明用户环境里另有问题，见③）；② **回显回执 bug**：发送设备收到服务器回显的自消息后 delivery_ack，导致服务器把 pending 队列里的副本删掉，离线设备永远拉不到（测试 T2 复现：队列为空）；③ **WS 假死（zombie）**：客户端只在连接时 ping 一次、无心跳，安卓 WebView 切后台/网络切换后 TCP 假死，`readyState` 仍 OPEN——实时收不到、发送悄悄丢，只有 HTTP 的历史同步能补，与用户症状完全吻合。
+- **修复**：
+  - `server/src/index.ts`：`sendToUser` 加 `exclude` 参数，自消息（to===from）不回显给来源 socket → 来源不再瞬间 ack 删队列，离线设备可通过 15s pending 轮询拿到（测试 T2 通过）。**需要用户重新部署 relay 服务器**（同时确认部署版本已包含更早的多设备 fan-out 改造，否则第二台设备登录会顶掉第一台的推送）。
+  - `packages/im`：心跳机制——每 20s ping，任何入站帧刷新 `lastAliveAt`，50s 无帧强制 close 触发重连循环；新增 `nudge()`（回前台时：已断则立即重连、OPEN 则发 ping 让心跳快速甄别假死）。
+  - `MobileApp`：`visibilitychange`→visible 时 `imRef.nudge()` + 强制补拉聊天历史；两端 onConnected 补拉节流 60s→15s。
+- **安卓自动版本**（`apps/mobile/android/app/build.gradle`）：`versionCode` = 构建时刻 epoch 秒（严格递增，2036 年前不超 Play 上限），`versionName` = `package.json` 版本 + 构建时间戳（如 `0.24.0-260814.1754`），每次打包自动递增、无需手动改 gradle。已实际构建 APK 验证。
+
 ## 活跃的技术决策 / 约定（后续开发请遵守）
 
 - **新增持久化设置**一律走 `packages/api/src/index.ts` 的 `loadXxx`/`saveXxx` 命名对模式，`VaultApp.tsx` 里用 `useState(() => loadXxx())` 初始化。

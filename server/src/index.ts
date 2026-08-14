@@ -328,12 +328,16 @@ function unregisterSocket(userId: string, socket: WebSocket) {
   if (set.size === 0) onlineSockets.delete(userId);
 }
 
-/** Sends a frame to every open socket of a user; returns how many sockets it reached. */
-function sendToUser(userId: string, frame: string): number {
+/** Sends a frame to every open socket of a user; returns how many sockets it reached.
+ *  `exclude` skips one socket — used for self-chat so the origin device doesn't get its own
+ *  message echoed back (it would instantly delivery-ack and delete the queued copy that
+ *  offline devices still need to pull). */
+function sendToUser(userId: string, frame: string, exclude?: WebSocket): number {
   const set = onlineSockets.get(userId);
   if (!set) return 0;
   let sent = 0;
   for (const socket of set) {
+    if (socket === exclude) continue;
     if (socket.readyState === 1) {
       socket.send(frame);
       sent += 1;
@@ -402,7 +406,11 @@ app.register(async (fastify) => {
             JSON.stringify(msg.payload),
             sentAt,
           );
-          const reached = sendToUser(msg.to, JSON.stringify(envelope));
+          const reached = sendToUser(
+            msg.to,
+            JSON.stringify(envelope),
+            msg.to === userId ? socket : undefined,
+          );
           if (reached > 0) {
             app.log.info({ from: userId, to: msg.to, id, devices: reached }, 'im message pushed');
           } else {

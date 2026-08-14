@@ -333,6 +333,9 @@ export const en: Dictionary = {
     cloudReturningHint: 'Enter your cloud account and master password to unlock the local vault and sync the latest notes from the server.',
     serverUrlPlaceholder: 'Server address',
     serverChangedReloading: 'Server address saved — the page will reload to apply it; enter your password again afterwards to sign in',
+    biometricUnlock: 'Fingerprint unlock',
+    biometricPromptReason: 'Verify your fingerprint to unlock the FastNote vault',
+    biometricStale: 'The password saved for fingerprint unlock is no longer valid (the master password may have changed). Unlock with your password, then re-enable fingerprint unlock.',
     usernamePlaceholder: 'Username',
     loggingIn: 'Signing in & syncing…',
     loginAndSync: 'Log in & sync',
@@ -379,6 +382,8 @@ export const en: Dictionary = {
     empty: 'No conversations yet',
     attachmentPreview: '📎 Attachment',
     startFailed: 'Could not start the conversation',
+    selfChat: 'File Transfer',
+    selfChatHint: 'Message yourself — synced across all your signed-in devices',
   },
   chatAttachment: {
     deleteConfirm: 'Delete attachment "{name}"?',
@@ -431,6 +436,7 @@ export const en: Dictionary = {
     numberFormatCurrency: 'Currency',
     numberFormatPercent: 'Percent',
     decimals: 'Decimal places',
+    mixedValue: '(mixed)',
     decimalsOption: '{n} decimals',
     currencySymbol: 'Currency symbol',
     alignH: 'Horizontal alignment (applies to selected cells)',
@@ -616,6 +622,12 @@ export const en: Dictionary = {
     cloudNotSupported:
       'Cloud account login/sync is not supported in the mobile build yet; please use password unlock.',
     copiedAsMarkdown: 'The selected Q&A has been copied to the clipboard as Markdown.',
+    bioSection: 'Security',
+    bioUnlockLabel: 'Fingerprint unlock',
+    bioUnlockHint:
+      'When enabled, the master password is stored encrypted by the system biometric keystore (Android Keystore); every read requires a fingerprint check. Re-enable after changing enrolled fingerprints.',
+    bioNeedPassword: 'Unlock once with your master password first, then enable fingerprint unlock.',
+    bioEnrollFailed: 'Failed to enable fingerprint unlock — make sure a fingerprint is enrolled on this device and try again.',
     copyFailed: 'Copy failed, please try again.',
   },
 };
