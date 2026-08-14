@@ -485,6 +485,13 @@
   - `MobileApp`：`visibilitychange`→visible 时 `imRef.nudge()` + 强制补拉聊天历史；两端 onConnected 补拉节流 60s→15s。
 - **安卓自动版本**（`apps/mobile/android/app/build.gradle`）：`versionCode` = 构建时刻 epoch 秒（严格递增，2036 年前不超 Play 上限），`versionName` = `package.json` 版本 + 构建时间戳（如 `0.24.0-260814.1754`），每次打包自动递增、无需手动改 gradle。已实际构建 APK 验证。
 
+## 本次会话的实质性变更（自聊密钥根因修复 + 指纹降级 + IM 调试日志，2026-08-14）
+
+- **自聊 `invalid ghash tag` 根因**：x25519 交换密钥对是**每台设备随机生成**的（`generateIdentityKeypair` 用 `randomSecretKey`，私钥本地 wrap 存储、公钥上传服务器后者覆盖），并非从主密码派生——此前"所有设备密钥一致"的假设错误，own-key ECDH 在不同设备算出不同根密钥，跨设备自聊解密必然失败。
+- **修复：自聊根密钥改为从 masterKey 派生**（`deriveSelfChatRootKey` = HKDF(masterKey, 'fastnote-selfchat-v1')，在 `packages/im` 导出）。`IMClient.setSelfId` 改为 `setSelfChat(userId, rootKeyB64)`；`upsertSession`→`buildSession` 对 self 用固定根密钥（`peerExchangePubkey: 'self'`）；`loadSession` 迁移旧 ECDH 根的持久化自会话（重置计数）。两端 app 的 `ensurePeerSession`/`ensureChatPeerSession` 对 self 短路——不再查服务器公钥。E2E 用**不同设备私钥**复测（T1 实时/T2 离线补拉/T3 反向）全过。
+- **IM 调试日志**（进运行日志缓冲）：`setSelfChat` 打印 key 指纹（`keyFingerprint` = sha256 前 4 字节 hex，不泄密钥，两台设备对比 fp 即可判断密钥一致性）；send/recv 各打一行（peer/id/counter/keyfp/self 标记）；ws connected/closed/heartbeat 假死回收各有日志。
+- **指纹录入失败（"Failed to encrypt credentials: null"）降级策略**（`biometric.ts` 重写）：三级尝试——`BIOMETRY_CURRENT_SET` → `BIOMETRY_ANY` → 软模式（`verifyIdentity()` UI 门控 + 无 accessControl 的 Keystore 存储）。localStorage flag 从 '1' 改为 'hw'|'soft'（兼容旧 '1'→hw），读取按模式走 `getSecureCredentials` 或 `verifyIdentity+getCredentials`。每级失败有 console.warn 日志。软模式是 UI 门控而非密码学门控（root 可绕过），注释中已说明取舍。
+
 ## 活跃的技术决策 / 约定（后续开发请遵守）
 
 - **新增持久化设置**一律走 `packages/api/src/index.ts` 的 `loadXxx`/`saveXxx` 命名对模式，`VaultApp.tsx` 里用 `useState(() => loadXxx())` 初始化。

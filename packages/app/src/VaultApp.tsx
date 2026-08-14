@@ -89,7 +89,7 @@ import {
   type AiChatMessage,
   type AiContentBlock,
 } from '@fastnote/ai';
-import { IMClient, verifyExchangeKeypair } from '@fastnote/im';
+import { IMClient, deriveSelfChatRootKey, verifyExchangeKeypair } from '@fastnote/im';
 import { CollabSession, generateCollabRoomCode, normalizeCollabRoomCode, type CollabStatus } from '@fastnote/collab';
 import { NoteSearchIndex } from '@fastnote/search';
 import type { ChatMessage, EditorMode, NodeType, NoteAttachment, NoteNode, UserSession, TreeDropPosition, ChatAttachmentRef, ChatWireAttachment, TabGroupState, ShortcutBindings, AiSettings, AiSessionNode, AiMessage, AiAttachment, FindReplaceController } from '@fastnote/shared';
@@ -1074,7 +1074,7 @@ export function VaultApp() {
       await new ApiClient(serverUrl, locale).updateKeys(userSession.token, identity, derivedPub);
       imRef.current?.disconnect();
       const client = new IMClient(serverUrl, userSession.token, priv);
-      client.setSelfId(userSession.userId);
+      client.setSelfChat(userSession.userId, toBase64(deriveSelfChatRootKey(derived.masterKey)));
       imRef.current = client;
       const vaultNs = loadStorageNamespace();
       for (const s of loadChatSessions(vaultNs)) client.loadSession(s);
@@ -1083,6 +1083,12 @@ export function VaultApp() {
 
       client.setEnsurePeerSession(async (peerId: string) => {
         try {
+          // Self-chat needs no server lookup — the root key is master-key-derived.
+          if (peerId === userSession.userId) {
+            client.upsertSession(peerId, userSession.username, '');
+            persistSessions();
+            return true;
+          }
           const peer = await new ApiClient(serverUrl, locale).lookupUserById(userSession.token, peerId);
           if (!peer.exchangePubkey) return false;
           client.upsertSession(peer.userId, peer.username, peer.exchangePubkey);
@@ -1152,13 +1158,17 @@ export function VaultApp() {
     async (peerId: string, peerName?: string | null) => {
       const client = await ensureImReady();
       if (!session) throw new Error(t('vaultApp.loginRequired'));
+      // Self-chat: no server lookup — the session root key is master-key-derived and
+      // `peerName` is the localized assistant label, not a real username.
+      if (peerId === session.userId) {
+        client.upsertSession(peerId, session.username, '');
+        saveChatSessions(client.allSessions(), loadStorageNamespace());
+        return client;
+      }
       const api = new ApiClient(serverUrl, locale);
-      // Self-chat: `peerName` is the localized "file transfer assistant" label, not an actual
-      // username — always resolve by id (returns our own exchange pubkey).
-      const peer =
-        peerName && peerId !== session.userId
-          ? await api.lookupUser(session.token, peerName)
-          : await api.lookupUserById(session.token, peerId);
+      const peer = peerName
+        ? await api.lookupUser(session.token, peerName)
+        : await api.lookupUserById(session.token, peerId);
       if (!peer.exchangePubkey) {
         throw new Error(t('vaultApp.peerKeyNotReady', { username: peer.username }));
       }

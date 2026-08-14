@@ -100,6 +100,10 @@ MVP（`docs/PHASE1.md` M1–M8）已全部完成并在 M8 之后继续做了大�
 - [x] 自聊实时投递修复（2026-08-14）：E2E 定位两个根因——回显回执删掉 pending 副本（服务器改为自消息不回显来源 socket）、WS 无心跳导致假死连接（IMClient 20s 心跳 + 50s 无帧强制重连 + `nudge()`）；安卓回前台主动补拉；onConnected 节流 60s→15s；**需重新部署 relay**
 - [x] 安卓打包自动递增版本（2026-08-14）：versionCode=构建 epoch 秒、versionName=包版本+时间戳，gradle 配置期自动生成
 
+- [x] 自聊密钥根因修复（2026-08-14）：交换密钥对为每设备随机（非主密码派生），own-key ECDH 跨设备根密钥不一致 → `invalid ghash tag`；自聊根密钥改为 HKDF(masterKey)（`deriveSelfChatRootKey`），self 会话不查服务器公钥，旧会话自动迁移；E2E 不同私钥拓扑验证通过
+- [x] IM 调试日志（2026-08-14）：self-chat key 指纹、send/recv（id/counter/keyfp）、ws 生命周期、心跳回收——两台设备对比 keyfp 即可定位密钥不一致
+- [x] 指纹录入降级（2026-08-14）：CURRENT_SET→BIOMETRY_ANY→verifyIdentity 软门控三级降级，flag 存 'hw'/'soft'，各级失败留日志
+
 ## 已知问题 / 技术债
 
 1. ~~`packages/im`、`packages/sync`、`packages/table` 缺少 `tsconfig.json`~~ **已修复（2026-07-09）**：三个包都已补上标准 `tsconfig.json`，typecheck 通过。

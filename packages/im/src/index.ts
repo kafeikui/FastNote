@@ -24,6 +24,25 @@ export function deriveSharedRoot(myPrivateKey: Uint8Array, peerPublicKey: Uint8A
   return hkdf(sha256, shared, undefined, utf8ToBytes(HKDF_INFO.im), 32);
 }
 
+/**
+ * Root key for the self-chat ("file transfer assistant"). Derived from the vault master key —
+ * NOT from the x25519 exchange keypair, because that keypair is generated randomly per device:
+ * two devices of one account hold different private keys, so an own-key ECDH yields different
+ * roots and cross-device self messages fail with a GCM tag mismatch. Every device of an
+ * account derives the same master key from the password + salt, so this is identical
+ * everywhere by construction.
+ */
+export function deriveSelfChatRootKey(masterKey: Uint8Array): Uint8Array {
+  return hkdf(sha256, masterKey, undefined, utf8ToBytes('fastnote-selfchat-v1'), 32);
+}
+
+/** Short non-reversible key fingerprint for debug logs — lets two devices' logs be compared
+ *  to spot root-key mismatches without leaking key material. */
+export function keyFingerprint(rootKeyB64: string): string {
+  const digest = sha256(utf8ToBytes(rootKeyB64));
+  return [...digest.slice(0, 4)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 export function createSession(
   peerId: string,
   peerUsername: string,
@@ -141,6 +160,7 @@ export class IMClient {
   private onConnected?: () => void;
   private onAuthError?: () => void;
   private selfId: string | null = null;
+  private selfRootKey: string | null = null;
 
   constructor(
     private wsBaseUrl: string,
@@ -180,10 +200,14 @@ export class IMClient {
     this.onAuthError = handler;
   }
 
-  /** Own user id — enables the self-chat ("file transfer assistant") session, where the peer
-   *  is this same account on other devices. */
-  setSelfId(userId: string): void {
+  /** Own user id + master-key-derived root key — enables the self-chat ("file transfer
+   *  assistant") session, where the peer is this same account on other devices. The root key
+   *  must come from `deriveSelfChatRootKey` so all devices agree on it (the per-device x25519
+   *  keypair must NOT be used here). */
+  setSelfChat(userId: string, rootKeyB64: string): void {
     this.selfId = userId;
+    this.selfRootKey = rootKeyB64;
+    console.info(`[IM] self-chat key fp=${keyFingerprint(rootKeyB64)} user=${userId.slice(0, 8)}`);
   }
 
   upsertSession(
@@ -191,10 +215,29 @@ export class IMClient {
     peerUsername: string,
     peerExchangePubkeyB64: string,
   ): IMSessionState {
-    const fresh = createSession(peerId, peerUsername, peerExchangePubkeyB64, this.myPrivateKey);
+    const fresh = this.buildSession(peerId, peerUsername, peerExchangePubkeyB64);
     const merged = mergeSessionState(this.sessions.get(peerId), fresh);
     this.sessions.set(peerId, merged);
     return merged;
+  }
+
+  /** Self sessions use the master-key-derived root; everything else does x25519 ECDH. */
+  private buildSession(
+    peerId: string,
+    peerUsername: string,
+    peerExchangePubkeyB64: string,
+  ): IMSessionState {
+    if (peerId === this.selfId && this.selfRootKey) {
+      return {
+        peerId,
+        peerUsername,
+        peerExchangePubkey: 'self',
+        sendCounter: 0,
+        recvCounter: 0,
+        rootKey: this.selfRootKey,
+      };
+    }
+    return createSession(peerId, peerUsername, peerExchangePubkeyB64, this.myPrivateKey);
   }
 
   ensureSession(peerId: string, peerUsername: string, peerExchangePubkey: string): IMSessionState {
@@ -229,6 +272,7 @@ export class IMClient {
     this.ws = new WebSocket(url);
     this.ws.onmessage = (ev) => void this.handleRaw(ev.data as string);
     this.ws.onopen = () => {
+      console.info('[IM] ws connected');
       this.lastAliveAt = Date.now();
       this.ws?.send(JSON.stringify({ type: 'ping' }));
       this.openResolve?.();
@@ -240,6 +284,7 @@ export class IMClient {
       this.openPromise = null;
       this.openResolve = null;
       if (!this.disposed) {
+        console.info('[IM] ws closed, reconnecting in 2.5s');
         setTimeout(() => {
           if (!this.disposed && !this.isConnected()) this.connect();
         }, 2500);
@@ -260,6 +305,7 @@ export class IMClient {
     this.heartbeatTimer = setInterval(() => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
       if (this.lastAliveAt && Date.now() - this.lastAliveAt > 50_000) {
+        console.warn('[IM] heartbeat: no frames for 50s, closing zombie connection');
         this.ws.close();
         return;
       }
@@ -306,6 +352,14 @@ export class IMClient {
   }
 
   loadSession(state: IMSessionState): void {
+    // Migration: self sessions persisted by older builds carry an ECDH-derived root that
+    // differs between devices — replace it with the master-key-derived one (counters reset;
+    // the self-chat decrypt path doesn't rely on them anyway).
+    if (state.peerId === this.selfId && this.selfRootKey && state.rootKey !== this.selfRootKey) {
+      console.info('[IM] migrating persisted self-chat session to master-key root');
+      this.sessions.set(state.peerId, { ...state, rootKey: this.selfRootKey, sendCounter: 0, recvCounter: 0, peerExchangePubkey: 'self' });
+      return;
+    }
     this.sessions.set(state.peerId, state);
   }
 
@@ -338,6 +392,9 @@ export class IMClient {
     const { envelope, state } = encryptMessage(session, wire);
     this.sessions.set(peerId, state);
     const id = messageId ?? crypto.randomUUID();
+    console.info(
+      `[IM] send -> ${peerId.slice(0, 8)} id=${id.slice(0, 8)} counter=${envelope.counter} keyfp=${keyFingerprint(session.rootKey)}${peerId === this.selfId ? ' (self)' : ''}`,
+    );
     this.ws.send(
       JSON.stringify({
         type: 'message',
@@ -378,6 +435,9 @@ export class IMClient {
       // would wrongly reject those, so bypass it — the app layer dedupes by message id.
       const isSelf = from === this.selfId;
       const effective = isSelf ? { ...session, recvCounter: envelope.counter - 1 } : session;
+      console.info(
+        `[IM] recv <- ${from.slice(0, 8)} id=${msgId.slice(0, 8)} counter=${envelope.counter} keyfp=${keyFingerprint(session.rootKey)}${isSelf ? ' (self)' : ''}`,
+      );
       const { plaintext, state } = decryptMessage(effective, envelope);
       if (this.onMessage) {
         await this.onMessage(from, plaintext, msgId, sentAt);

@@ -30,7 +30,7 @@ import {
   unwrapKey,
   wrapKey,
 } from '@fastnote/crypto';
-import { IMClient, verifyExchangeKeypair } from '@fastnote/im';
+import { IMClient, deriveSelfChatRootKey, verifyExchangeKeypair } from '@fastnote/im';
 import { SyncClient } from '@fastnote/sync';
 import { createStorage } from '@fastnote/storage';
 import {
@@ -458,7 +458,7 @@ export function MobileApp() {
 
     imRef.current?.disconnect();
     const client = new IMClient(serverUrl(), userSession.token, priv);
-    client.setSelfId(userSession.userId);
+    client.setSelfChat(userSession.userId, toBase64(deriveSelfChatRootKey(derived.masterKey)));
     imRef.current = client;
     const vaultNs = loadStorageNamespace();
     for (const s of loadChatSessions(vaultNs)) client.loadSession(s);
@@ -466,6 +466,12 @@ export function MobileApp() {
 
     client.setEnsurePeerSession(async (peerId: string) => {
       try {
+        // Self-chat needs no server lookup — the root key is master-key-derived.
+        if (peerId === userSession.userId) {
+          client.upsertSession(peerId, userSession.username, '');
+          persistSessions();
+          return true;
+        }
         const peer = await new ApiClient(serverUrl(), locale).lookupUserById(userSession.token, peerId);
         if (!peer.exchangePubkey) return false;
         client.upsertSession(peer.userId, peer.username, peer.exchangePubkey);
@@ -548,12 +554,17 @@ export function MobileApp() {
     const client = await ensureImReady();
     const userSession = sessionRef.current;
     if (!userSession) throw new Error(t('vaultApp.loginRequired'));
+    // Self-chat: no server lookup — the session root key is master-key-derived and
+    // `peerName` is the localized assistant label, not a real username.
+    if (peerId === userSession.userId) {
+      client.upsertSession(peerId, userSession.username, '');
+      saveChatSessions(client.allSessions(), loadStorageNamespace());
+      return client;
+    }
     const api = new ApiClient(serverUrl(), locale);
-    // Self-chat: `peerName` is the localized assistant label, not a username — resolve by id.
-    const peer =
-      peerName && peerId !== userSession.userId
-        ? await api.lookupUser(userSession.token, peerName)
-        : await api.lookupUserById(userSession.token, peerId);
+    const peer = peerName
+      ? await api.lookupUser(userSession.token, peerName)
+      : await api.lookupUserById(userSession.token, peerId);
     if (!peer.exchangePubkey) {
       throw new Error(t('vaultApp.peerKeyNotReady', { username: peer.username }));
     }
@@ -956,7 +967,10 @@ export function MobileApp() {
       return;
     }
     try {
-      await enableBiometricUnlock(ns, password);
+      await enableBiometricUnlock(ns, password, {
+        title: t('unlockScreen.biometricUnlock'),
+        reason: t('unlockScreen.biometricPromptReason'),
+      });
       setBioEnabled(true);
     } catch (err) {
       console.warn('[bio] enroll failed', err);
