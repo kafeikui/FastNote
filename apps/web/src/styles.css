@@ -4363,3 +4363,188 @@ mark.fn-ai-find-mark--current {
   color: var(--text-muted);
 }
 
+/* —— Tools view (password generator, base converter) —— */
+.fn-tools {
+  height: 100%;
+  overflow-y: auto;
+  padding: 1.25rem;
+}
+
+.fn-tools__card {
+  max-width: 720px;
+  margin: 0 auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  padding: 1.1rem 1.25rem 1.25rem;
+}
+
+.fn-tools__card h3 {
+  margin: 0 0 0.35rem;
+}
+
+.fn-tools__hint {
+  margin: 0 0 0.75rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.fn-tools__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.fn-tools__row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.88rem;
+}
+
+.fn-tools__row input[type='number'] {
+  width: 5.5rem;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-elevated);
+  color: var(--text);
+  font: inherit;
+}
+
+.fn-tools__row select {
+  padding: 0.3rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-elevated);
+  color: var(--text);
+  font: inherit;
+}
+
+.fn-tools__row button,
+.fn-tools__copy {
+  padding: 0.35rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-elevated);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.fn-tools__row button:hover:not(:disabled),
+.fn-tools__copy:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.fn-tools__primary {
+  background: var(--accent-dark) !important;
+  border-color: var(--accent-dark) !important;
+  color: var(--on-accent-dark) !important;
+}
+
+.fn-tools__primary:hover {
+  background: var(--accent-hover) !important;
+  border-color: var(--accent-hover) !important;
+}
+
+.fn-tools__pwlist {
+  margin: 0.5rem 0 0;
+  padding-left: 2.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.fn-tools__pwlist li::marker {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.fn-tools__pwlist code {
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.95rem;
+  letter-spacing: 0.03em;
+  padding: 0.15rem 0.45rem;
+  border-radius: 6px;
+  background: var(--bg-soft);
+  cursor: pointer;
+  user-select: all;
+}
+
+.fn-tools__pwlist code:hover {
+  background: var(--accent-soft);
+}
+
+.fn-tools__copied-tag {
+  margin-left: 0.5rem;
+  color: var(--accent);
+  font-size: 0.78rem;
+}
+
+.fn-tools__input,
+.fn-tools__output textarea {
+  width: 100%;
+  resize: vertical;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-elevated);
+  color: var(--text);
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+
+.fn-tools__output {
+  margin-bottom: 0.75rem;
+}
+
+.fn-tools__output-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.fn-tools__error {
+  color: #d33;
+  font-size: 0.85rem;
+}
+
+.fn-tools-sidebar {
+  list-style: none;
+  margin: 0;
+  padding: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.fn-tools-sidebar button {
+  width: 100%;
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.fn-tools-sidebar button:hover {
+  background: var(--bg-soft);
+}
+
+.fn-tools-sidebar button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+}

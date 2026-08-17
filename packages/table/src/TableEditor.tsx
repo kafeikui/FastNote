@@ -35,6 +35,7 @@ import {
   computeRangeStats,
   cycleRefAnchorAtCaret,
   evaluateCellFormula,
+  extractFormulaRefs,
   formatColumnNumber,
   formatFormulaNumber,
   isFormulaValue,
@@ -62,6 +63,7 @@ import {
   setColumnFormat,
   setColumnWidth,
   setRowHeight,
+  setRowHeights,
   sortRows,
   swapCells,
   swapColumns,
@@ -111,6 +113,10 @@ const FONT_SIZES = [12, 13, 14, 16, 18, 20, 24, 28];
  * columns to fit (the wrap stretches narrow tables back to full width via min-width: 100%).
  */
 const DEFAULT_COL_WIDTH = 180;
+
+/** Excel-style palette for the reference boxes drawn while editing a formula: the Nth
+ *  reference in the formula gets the Nth color (cycling). */
+const FORMULA_REF_COLORS = ['#2f6fed', '#e8453c', '#8e44ad', '#1e9e58', '#b7791f', '#0e9aa7'];
 
 /** Formats a Date as a local "YYYY-MM-DD HH:mm:ss" string for the insert-time toolbar button. */
 function formatLocalTime(d: Date): string {
@@ -533,6 +539,43 @@ export function TableEditor({
   const lastFormulaRefRef = useRef<Omit<FormulaPick, 'anchor' | 'rowId' | 'colId'> | null>(null);
   /** Set on the column letter's mousedown to make the subsequent click skip selectColumn. */
   const suppressColSelectRef = useRef(false);
+
+  // Excel-style reference highlighting: while a formula cell is being edited, every cell/range
+  // the formula references gets a colored box. Edits commit into the doc per keystroke, so the
+  // highlight set recomputes from the doc; this state only tracks *which* cell is in edit mode.
+  const [editingPos, setEditingPos] = useState<{ rowIdx: number; colIdx: number } | null>(null);
+  const formulaRefHighlights = useMemo(() => {
+    if (!editingPos) return null;
+    const row = displayRows[editingPos.rowIdx];
+    const col = doc.columns[editingPos.colIdx];
+    if (!row || !col) return null;
+    const raw = doc.rows.find((r) => r.id === row.id)?.cells[col.id] ?? '';
+    if (!isFormulaValue(raw)) return null;
+    const refs = extractFormulaRefs(raw, doc.columns.length, doc.rows.length);
+    if (refs.length === 0) return null;
+    // References use document row numbers, so highlight membership is checked in document
+    // coordinates (stays correct under sort/filter).
+    const docIdxById = new Map(doc.rows.map((r, i) => [r.id, i] as const));
+    return { refs, docIdxById };
+  }, [editingPos, doc, displayRows]);
+
+  /** Color of the reference box covering this cell, or null. First matching reference wins,
+   *  so repeated mentions of the same cell keep one stable color. */
+  const refHighlightColor = (rowId: string, colIdx: number): string | null => {
+    const fh = formulaRefHighlights;
+    if (!fh) return null;
+    const docRow = fh.docIdxById.get(rowId);
+    if (docRow === undefined) return null;
+    for (let i = 0; i < fh.refs.length; i++) {
+      const r = fh.refs[i];
+      if (colIdx < r.colStart || colIdx > r.colEnd) continue;
+      if (r.rowStart !== null && (docRow < r.rowStart || docRow > (r.rowEnd ?? r.rowStart))) {
+        continue;
+      }
+      return FORMULA_REF_COLORS[i % FORMULA_REF_COLORS.length];
+    }
+    return null;
+  };
 
   /** The formula-cell textarea currently being edited, or null. */
   const activeFormulaEdit = () => {
@@ -1858,7 +1901,9 @@ export function TableEditor({
    * Alt+Arrow reordering. What moves depends on the selection shape:
    * - a whole row selected (via its row number): Alt+Up/Down swaps it with the neighbouring row;
    * - a whole column selected (via its letter): Alt+Left/Right swaps it with the neighbour;
-   * - a single cell: Alt+Arrow swaps its content (and per-cell style) with the adjacent cell.
+   * - any rectangular selection (a single cell included): Alt+Arrow moves the whole block one
+   *   step, swapping it with the adjacent strip of cells (content + per-cell styles travel,
+   *   and formula references follow via the cell-swap rewriting).
    * Returns false when the selection/direction doesn't fit any of these, so the key keeps its
    * default behaviour (e.g. Alt+Left = word jump inside a cell input with no selection).
    * Row swaps reorder the underlying document, so with an active sort the display order (and the
@@ -1896,30 +1941,74 @@ export function TableEditor({
       setSelFocus({ rowIdx: displayRows.length - 1, colIdx: target });
       return true;
     }
-    if (singleRow && singleCol) {
-      const targetRow = range.rowStart + (vertical ? delta : 0);
-      const targetCol = range.colStart + (vertical ? 0 : delta);
-      const fromRow = displayRows[range.rowStart];
-      const toRow = displayRows[targetRow];
-      const fromCol = doc.columns[range.colStart];
-      const toCol = doc.columns[targetCol];
-      if (!fromRow || !toRow || !fromCol || !toCol) return false;
-      // Whether the swap started from inside the cell's editor (vs. a mere selection) decides
-      // if the moved cell should stay in edit mode afterwards.
-      const wasEditing = isEditingCell(range.rowStart, range.colStart);
-      emitChange(
-        swapCells(
-          docRef.current,
-          { rowId: fromRow.id, colId: fromCol.id },
-          { rowId: toRow.id, colId: toCol.id },
-        ),
-      );
-      setSelAnchor({ rowIdx: targetRow, colIdx: targetCol });
-      setSelFocus({ rowIdx: targetRow, colIdx: targetCol });
-      if (wasEditing) requestAnimationFrame(() => focusCellInput(targetRow, targetCol));
-      return true;
+    // Any rectangular block: the strip of cells the block moves onto "bubbles" through it via
+    // successive adjacent swaps (per column for vertical moves, per row for horizontal), so
+    // after the move the block sits one step over and the displaced strip lands on the side
+    // the block vacated. Chaining swapCells keeps formula references tracking every cell.
+    const stripIdx = vertical
+      ? delta < 0
+        ? range.rowStart - 1
+        : range.rowEnd + 1
+      : delta < 0
+        ? range.colStart - 1
+        : range.colEnd + 1;
+    if (vertical && (stripIdx < 0 || stripIdx >= displayRows.length)) return false;
+    if (!vertical && (stripIdx < 0 || stripIdx >= doc.columns.length)) return false;
+    // Whether the move started from inside a cell's editor (vs. a mere selection) decides if
+    // the moved cell should stay in edit mode afterwards (single-cell moves only).
+    const wasEditing =
+      singleRow && singleCol && isEditingCell(range.rowStart, range.colStart);
+    let next = docRef.current;
+    if (vertical) {
+      for (let c = range.colStart; c <= range.colEnd; c++) {
+        const col = doc.columns[c];
+        if (!col) return false;
+        if (delta < 0) {
+          for (let r = range.rowStart - 1; r < range.rowEnd; r++) {
+            const a = displayRows[r];
+            const b = displayRows[r + 1];
+            if (!a || !b) return false;
+            next = swapCells(next, { rowId: a.id, colId: col.id }, { rowId: b.id, colId: col.id });
+          }
+        } else {
+          for (let r = range.rowEnd + 1; r > range.rowStart; r--) {
+            const a = displayRows[r];
+            const b = displayRows[r - 1];
+            if (!a || !b) return false;
+            next = swapCells(next, { rowId: a.id, colId: col.id }, { rowId: b.id, colId: col.id });
+          }
+        }
+      }
+    } else {
+      for (let r = range.rowStart; r <= range.rowEnd; r++) {
+        const row = displayRows[r];
+        if (!row) return false;
+        if (delta < 0) {
+          for (let c = range.colStart - 1; c < range.colEnd; c++) {
+            const a = doc.columns[c];
+            const b = doc.columns[c + 1];
+            if (!a || !b) return false;
+            next = swapCells(next, { rowId: row.id, colId: a.id }, { rowId: row.id, colId: b.id });
+          }
+        } else {
+          for (let c = range.colEnd + 1; c > range.colStart; c--) {
+            const a = doc.columns[c];
+            const b = doc.columns[c - 1];
+            if (!a || !b) return false;
+            next = swapCells(next, { rowId: row.id, colId: a.id }, { rowId: row.id, colId: b.id });
+          }
+        }
+      }
     }
-    return false;
+    emitChange(next);
+    const dr = vertical ? delta : 0;
+    const dc = vertical ? 0 : delta;
+    setSelAnchor({ rowIdx: range.rowStart + dr, colIdx: range.colStart + dc });
+    setSelFocus({ rowIdx: range.rowEnd + dr, colIdx: range.colEnd + dc });
+    if (wasEditing) {
+      requestAnimationFrame(() => focusCellInput(range.rowStart + dr, range.colStart + dc));
+    }
+    return true;
   };
 
   const handleContainerKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -2179,6 +2268,23 @@ export function TableEditor({
                   }}
                 >
                   {t('tableEditor.uniformRowHeightApply')}
+                </button>
+                <button
+                  type="button"
+                  disabled={!selectionRange}
+                  title={t('tableEditor.uniformRowHeightApplySelectedHint')}
+                  onClick={() => {
+                    const h = Math.round(Number(rowHeightDraft));
+                    if (!Number.isFinite(h) || !selectionRange) return;
+                    // A row counts as selected as soon as the selection covers any of its cells.
+                    const rowIds = displayRows
+                      .slice(selectionRange.rowStart, selectionRange.rowEnd + 1)
+                      .map((r) => r.id);
+                    emitChange(setRowHeights(docRef.current, rowIds, h));
+                    setShowRowHeightPop(false);
+                  }}
+                >
+                  {t('tableEditor.uniformRowHeightApplySelected')}
                 </button>
                 <button
                   type="button"
@@ -2762,20 +2868,23 @@ export function TableEditor({
                     !!findMark?.current &&
                     findMark.current.rowIdx === rowIdx &&
                     findMark.current.colIdx === colIdx;
+                  const refColor = refHighlightColor(row.id, colIdx);
                   const tdClass = [
                     'fn-table__cell',
                     isFillPreviewCell(rowIdx, colIdx) && 'fn-table__cell--fill-preview',
                     doc.freezeFirstColumn && colIdx === 0 && 'fn-table__col--frozen',
                     findHit && 'fn-table__cell--find',
                     findCurrent && 'fn-table__cell--find-current',
+                    refColor && 'fn-table__cell--formula-ref',
                   ]
                     .filter(Boolean)
                     .join(' ');
                   const tdStyle: CSSProperties | undefined =
-                    cellStyle?.fill || cellStyle?.valign
+                    cellStyle?.fill || cellStyle?.valign || refColor
                       ? {
                           ...(cellStyle?.fill ? { background: cellStyle.fill } : {}),
                           ...(cellStyle?.valign ? { verticalAlign: cellStyle.valign } : {}),
+                          ...(refColor ? { boxShadow: `inset 0 0 0 2px ${refColor}` } : {}),
                         }
                       : undefined;
                   return (
@@ -2795,6 +2904,7 @@ export function TableEditor({
                         onChange={(next) => emitChange(updateCell(doc, row.id, col.id, next))}
                         onFocus={() => {
                           setFocusCell({ rowId: row.id, colId: col.id });
+                          setEditingPos({ rowIdx, colIdx });
                           // Snapshot for Esc: reverts the cell to this value if editing is canceled.
                           editStartValueRef.current = {
                             rowId: row.id,
@@ -2802,7 +2912,12 @@ export function TableEditor({
                             value: docRef.current.rows.find((r) => r.id === row.id)?.cells[col.id] ?? '',
                           };
                         }}
-                        onEditBlur={() => handleEditBlur(row.id, col.id)}
+                        onEditBlur={() => {
+                          setEditingPos((cur) =>
+                            cur && cur.rowIdx === rowIdx && cur.colIdx === colIdx ? null : cur,
+                          );
+                          handleEditBlur(row.id, col.id);
+                        }}
                         onDownload={(id) => onAttachmentDownload?.(id)}
                         onEdit={(id, desc) => onAttachmentEdit?.(id, desc)}
                         selected={isCellSelected(rowIdx, colIdx)}

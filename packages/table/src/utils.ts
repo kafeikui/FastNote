@@ -596,6 +596,30 @@ export function setRowHeight(doc: TableDocument, rowId: string, height: number):
   };
 }
 
+/** Sets one height on the listed rows only (or clears their explicit heights with undefined). */
+export function setRowHeights(
+  doc: TableDocument,
+  rowIds: string[],
+  height: number | undefined,
+): TableDocument {
+  const ids = new Set(rowIds);
+  if (height === undefined) {
+    return {
+      ...doc,
+      rows: doc.rows.map((r) => {
+        if (!ids.has(r.id) || r.height === undefined) return r;
+        const { height: _drop, ...rest } = r;
+        return rest;
+      }),
+    };
+  }
+  const clamped = Math.round(Math.min(MAX_ROW_HEIGHT, Math.max(MIN_ROW_HEIGHT, height)));
+  return {
+    ...doc,
+    rows: doc.rows.map((r) => (ids.has(r.id) ? { ...r, height: clamped } : r)),
+  };
+}
+
 /** Sets every row to the same height, or clears all explicit heights (auto) with undefined. */
 export function setAllRowHeights(doc: TableDocument, height: number | undefined): TableDocument {
   if (height === undefined) {

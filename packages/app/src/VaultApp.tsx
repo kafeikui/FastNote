@@ -136,11 +136,14 @@ import {
   FindReplaceBar,
   NoteAttachments,
   DropdownMenu,
+  ToolsPanel,
+  ToolsSidebar,
+  type ToolId,
   type VaultListItem,
 } from '@fastnote/ui';
 
 type VaultKeys = Awaited<ReturnType<typeof deriveKeysFromPassword>>;
-type AppView = 'notes' | 'chat';
+type AppView = 'notes' | 'chat' | 'tools';
 
 const SAVE_DEBOUNCE_MS = 500;
 
@@ -286,6 +289,7 @@ export function VaultApp() {
     saveTabState({ groups, activeGroupId }, loadStorageNamespace());
   }, [keys, groups, activeGroupId]);
   const [appView, setAppView] = useState<AppView>('notes');
+  const [activeTool, setActiveTool] = useState<ToolId>('password');
   const [searchQuery, setSearchQuery] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [showAuth, setShowAuth] = useState(false);
@@ -3934,6 +3938,13 @@ export function VaultApp() {
                 <span className="fn-unread-badge">{totalUnread > 99 ? '99+' : totalUnread}</span>
               ) : null}
             </button>
+            <button
+              type="button"
+              className={`fn-toolbar__tab${appView === 'tools' ? ' active' : ''}`}
+              onClick={() => setAppView('tools')}
+            >
+              {t('vaultApp.navTools')}
+            </button>
             {appView === 'notes' && (
               <>
                 <DropdownMenu label={`+ ${t('vaultApp.newMenu')}`}>
@@ -3980,6 +3991,8 @@ export function VaultApp() {
               }}
               onStartChat={handleStartChat}
             />
+          ) : appView === 'tools' ? (
+            <ToolsSidebar active={activeTool} onSelect={setActiveTool} />
           ) : expandedSearch && searchQuery ? (
             <ul className="fn-tree fn-tree--search">
               {searchResults.length === 0 ? (
@@ -4080,6 +4093,8 @@ export function VaultApp() {
               onLoadAttachmentPreview={handleChatAttachmentPreview}
               onSyncHistory={handleChatHistorySync}
             />
+          ) : appView === 'tools' ? (
+            <ToolsPanel tool={activeTool} />
           ) : activeAiSession ? (
             <AiWorkbench
               session={activeAiSession}

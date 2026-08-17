@@ -74,6 +74,73 @@ export function letterToColumnIndex(letters: string): number {
   return n - 1;
 }
 
+/** One reference occurrence inside a formula, resolved to document coordinates for the
+ *  Excel-style colored highlight boxes shown while editing. Rows are 0-based document
+ *  indices; `rowStart === null` marks a whole-column reference. */
+export interface FormulaRefHighlight {
+  colStart: number;
+  colEnd: number;
+  rowStart: number | null;
+  rowEnd: number | null;
+}
+
+// Ordered alternation: cell ranges (incl. the open "C1:C" form) before whole-column ranges
+// before single cells, so the longest interpretation wins. Function names never match (no
+// digits and no colon), and $ anchors are accepted anywhere Excel accepts them.
+const REF_SCAN =
+  /(\$?)([A-Za-z]{1,3})(\$?)(\d+)\s*:\s*(\$?)([A-Za-z]{1,3})(\$?)(\d*)|(\$?)([A-Za-z]{1,3})\s*:\s*(\$?)([A-Za-z]{1,3})|(\$?)([A-Za-z]{1,3})(\$?)(\d+)/g;
+
+/** Extracts every cell/range/column reference of a formula in source order. Out-of-bounds
+ *  columns are skipped; row indices are clamped to the document. */
+export function extractFormulaRefs(
+  formula: string,
+  columnCount: number,
+  rowCount: number,
+): FormulaRefHighlight[] {
+  const src = formula.trim().startsWith(FORMULA_PREFIX) ? formula.trim().slice(1) : formula;
+  const out: FormulaRefHighlight[] = [];
+  const clampRow = (n: number) => Math.min(Math.max(n, 0), Math.max(rowCount - 1, 0));
+  for (const m of src.matchAll(REF_SCAN)) {
+    let colA: number;
+    let colB: number;
+    let rowA: number | null;
+    let rowB: number | null;
+    if (m[2] !== undefined && m[4] !== undefined && m[6] !== undefined) {
+      // Range: A1:B3, or the open form A1:B (whole-column semantics, like the evaluator).
+      colA = letterToColumnIndex(m[2].toUpperCase());
+      colB = letterToColumnIndex(m[6].toUpperCase());
+      if (m[8]) {
+        rowA = clampRow(Number(m[4]) - 1);
+        rowB = clampRow(Number(m[8]) - 1);
+      } else {
+        rowA = null;
+        rowB = null;
+      }
+    } else if (m[10] !== undefined && m[12] !== undefined) {
+      // Whole-column range: C:C / A:C.
+      colA = letterToColumnIndex(m[10].toUpperCase());
+      colB = letterToColumnIndex(m[12].toUpperCase());
+      rowA = null;
+      rowB = null;
+    } else if (m[14] !== undefined && m[16] !== undefined) {
+      colA = letterToColumnIndex(m[14].toUpperCase());
+      colB = colA;
+      rowA = clampRow(Number(m[16]) - 1);
+      rowB = rowA;
+    } else {
+      continue;
+    }
+    if (Math.min(colA, colB) >= columnCount) continue;
+    out.push({
+      colStart: Math.min(colA, colB),
+      colEnd: Math.min(Math.max(colA, colB), columnCount - 1),
+      rowStart: rowA === null ? null : Math.min(rowA, rowB ?? rowA),
+      rowEnd: rowA === null ? null : Math.max(rowA, rowB ?? rowA),
+    });
+  }
+  return out;
+}
+
 interface CellRef {
   col: number;
   row: number;

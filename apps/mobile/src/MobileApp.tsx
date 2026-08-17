@@ -74,8 +74,11 @@ import {
   ChatPanel,
   ChatSidebar,
   LogsModal,
+  ToolsPanel,
+  ToolsSidebar,
   UnlockScreen,
   buildChatSessions,
+  type ToolId,
   type VaultListItem,
 } from '@fastnote/ui';
 import {
@@ -183,7 +186,8 @@ export function MobileApp() {
   const activePeerRef = useRef<string | null>(null);
 
   // --- UI state ---------------------------------------------------------------
-  const [view, setView] = useState<'ai' | 'chat'>('ai');
+  const [view, setView] = useState<'ai' | 'chat' | 'tools'>('ai');
+  const [activeTool, setActiveTool] = useState<ToolId>('password');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
@@ -1413,9 +1417,11 @@ export function MobileApp() {
           <div className="fn-mobile__header-title">
             {view === 'chat'
               ? (activePeerName ?? t('mobileApp.chat'))
-              : activeAiSession
-                ? activeAiSession.title
-                : t('aiPanel.title')}
+              : view === 'tools'
+                ? t('vaultApp.navTools')
+                : activeAiSession
+                  ? activeAiSession.title
+                  : t('aiPanel.title')}
           </div>
           <div className="fn-mobile__header-actions">
             <button
@@ -1431,6 +1437,17 @@ export function MobileApp() {
               {view !== 'chat' && totalUnread > 0 && (
                 <span className="fn-mobile__badge">{totalUnread > 99 ? '99+' : totalUnread}</span>
               )}
+            </button>
+            <button
+              type="button"
+              className={`fn-mobile__header-btn${view === 'tools' ? ' fn-mobile__header-btn--active' : ''}`}
+              title={t('vaultApp.navTools')}
+              onClick={() => {
+                setView((v) => (v === 'tools' ? 'ai' : 'tools'));
+                setDrawerOpen(false);
+              }}
+            >
+              🛠
             </button>
             <button
               type="button"
@@ -1465,6 +1482,8 @@ export function MobileApp() {
               onLoadAttachmentPreview={handleChatAttachmentPreview}
               onSyncHistory={handleChatHistorySync}
             />
+          ) : view === 'tools' ? (
+            <ToolsPanel tool={activeTool} />
           ) : activeAiSession ? (
             <AiWorkbench
               session={activeAiSession}
@@ -1504,9 +1523,21 @@ export function MobileApp() {
           <div className="fn-mobile__drawer-backdrop" onClick={() => setDrawerOpen(false)}>
             <div className="fn-mobile__drawer" onClick={(e) => e.stopPropagation()}>
               <div className="fn-mobile__drawer-title">
-                {view === 'chat' ? t('mobileApp.chat') : t('aiPanel.title')}
+                {view === 'chat'
+                  ? t('mobileApp.chat')
+                  : view === 'tools'
+                    ? t('vaultApp.navTools')
+                    : t('aiPanel.title')}
               </div>
-              {view === 'chat' ? (
+              {view === 'tools' ? (
+                <ToolsSidebar
+                  active={activeTool}
+                  onSelect={(id) => {
+                    setActiveTool(id);
+                    setDrawerOpen(false);
+                  }}
+                />
+              ) : view === 'chat' ? (
                 <ChatSidebar
                   sessions={chatSessions}
                   activePeerId={activePeerId}

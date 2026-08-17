@@ -26,3 +26,5 @@ export { EmbeddedAttachmentChip } from './EmbeddedAttachmentChip';
 export type { EmbeddedAttachmentChipProps } from './EmbeddedAttachmentChip';
 export { DropdownMenu } from './DropdownMenu';
 export type { DropdownMenuProps } from './DropdownMenu';
+export { ToolsPanel, ToolsSidebar } from './ToolsPanel';
+export type { ToolId } from './ToolsPanel';
