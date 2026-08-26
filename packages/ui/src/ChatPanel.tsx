@@ -168,6 +168,25 @@ export function ChatPanel({
     resetFileInput();
   }
 
+  /** Files pasted into the composer (screenshots, files copied from the OS file manager)
+   *  become pending attachments instead of inserting their name as text. */
+  function handleComposerPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const files = Array.from(e.clipboardData?.files ?? []);
+    if (files.length === 0) return;
+    e.preventDefault();
+    const named = files.map((f) => {
+      // Clipboard screenshots arrive as a generic "image.png" with no meaningful name;
+      // timestamp them so repeated pastes stay distinguishable in the thread.
+      if (f.name && f.name !== 'image.png') return f;
+      const ext = f.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png';
+      const d = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const ts = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+      return new File([f], `pasted-${ts}.${ext}`, { type: f.type });
+    });
+    setPendingFiles((prev) => [...prev, ...named]);
+  }
+
   async function handleSyncHistory() {
     if (!onSyncHistory || syncingHistory) return;
     setSyncingHistory(true);
@@ -316,6 +335,7 @@ export function ChatPanel({
           value={draft}
           disabled={!activePeerId}
           rows={1}
+          onPaste={handleComposerPaste}
           onChange={(e) => {
             setDraft(e.target.value);
             // Auto-grow up to the CSS max-height, then let the textarea scroll internally.

@@ -213,6 +213,74 @@ app.get('/api/v1/sync/chat', async (req, reply) => {
   };
 });
 
+// Chat attachment blobs (meta + data encrypted client-side). Pushed after send; other devices
+// fetch the payload on demand (GET one) rather than bulk-downloading. The meta-only list is for
+// deletion propagation.
+app.put<{
+  Params: { attachmentId: string };
+  Body: {
+    message_id: string;
+    peer_id: string;
+    meta_ciphertext: string;
+    data_ciphertext: string;
+    deleted?: boolean;
+    updated_at: string;
+  };
+}>('/api/v1/sync/chat-attachments/:attachmentId', async (req, reply) => {
+  const userId = authUser(req.headers.authorization);
+  if (!userId) return reply.code(401).send({ error: 'unauthorized' });
+  const { attachmentId } = req.params;
+  const { message_id, peer_id, meta_ciphertext, data_ciphertext, deleted, updated_at } = req.body ?? {};
+  if (!message_id || !peer_id || !updated_at || (!deleted && (!meta_ciphertext || !data_ciphertext))) {
+    return reply.code(400).send({ error: 'missing fields' });
+  }
+  store.upsertChatAttachment(
+    userId,
+    attachmentId,
+    message_id,
+    peer_id,
+    meta_ciphertext ?? '',
+    data_ciphertext ?? '',
+    !!deleted,
+    updated_at,
+  );
+  return { ok: true };
+});
+
+app.get('/api/v1/sync/chat-attachments', async (req, reply) => {
+  const userId = authUser(req.headers.authorization);
+  if (!userId) return reply.code(401).send({ error: 'unauthorized' });
+  const rows = store.listChatAttachmentsMeta(userId);
+  return {
+    items: rows.map((r) => ({
+      attachment_id: r.attachment_id,
+      message_id: r.message_id,
+      peer_id: r.peer_id,
+      deleted: r.deleted === 1,
+      updated_at: r.updated_at,
+    })),
+  };
+});
+
+app.get<{ Params: { attachmentId: string } }>(
+  '/api/v1/sync/chat-attachments/:attachmentId',
+  async (req, reply) => {
+    const userId = authUser(req.headers.authorization);
+    if (!userId) return reply.code(401).send({ error: 'unauthorized' });
+    const row = store.getChatAttachment(userId, req.params.attachmentId);
+    if (!row || row.deleted === 1) return reply.code(404).send({ error: 'not found' });
+    return {
+      attachment_id: row.attachment_id,
+      message_id: row.message_id,
+      peer_id: row.peer_id,
+      meta_ciphertext: row.meta_ciphertext,
+      data_ciphertext: row.data_ciphertext,
+      deleted: false,
+      updated_at: row.updated_at,
+    };
+  },
+);
+
 // AI Workbench sessions: opaque encrypted blobs (encrypted client-side with the vault's notes
 // key — the server never sees plaintext), merged last-writer-wins on `updated_at`.
 app.put<{

@@ -43,6 +43,26 @@ export interface SyncChatMessageItem {
   ciphertext: string;
 }
 
+/** Full chat attachment blob (meta + data ciphertext), fetched on demand per attachment. */
+export interface SyncChatAttachmentItem {
+  attachment_id: string;
+  message_id: string;
+  peer_id: string;
+  meta_ciphertext: string;
+  data_ciphertext: string;
+  deleted: boolean;
+  updated_at: string;
+}
+
+/** List form without the data ciphertext — used for deletion propagation, not bulk download. */
+export interface SyncChatAttachmentMetaItem {
+  attachment_id: string;
+  message_id: string;
+  peer_id: string;
+  deleted: boolean;
+  updated_at: string;
+}
+
 export interface SyncAiSessionItem {
   session_id: string;
   ciphertext: string;
@@ -351,6 +371,54 @@ export class ApiClient {
     if (!res.ok) throw await this.httpError(res, "GET /sync/chat", "apiClient.syncPullFailed");
     const data = (await res.json()) as { items: SyncChatMessageItem[] };
     return data.items;
+  }
+
+  async pushChatAttachment(
+    token: string,
+    attachmentId: string,
+    body: {
+      message_id: string;
+      peer_id: string;
+      meta_ciphertext: string;
+      data_ciphertext: string;
+      deleted: boolean;
+      updated_at: string;
+    },
+  ): Promise<void> {
+    const res = await fetch(this.url(`/api/v1/sync/chat-attachments/${attachmentId}`), {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(body),
+    });
+    this.assertAuthed(res);
+    if (!res.ok)
+      throw await this.httpError(res, `PUT /sync/chat-attachments/${attachmentId}`, "apiClient.attachmentPushFailed");
+  }
+
+  /** Metadata-only list (no blob payloads) — used to propagate deletions across devices. */
+  async pullChatAttachmentsMeta(token: string): Promise<SyncChatAttachmentMetaItem[]> {
+    const res = await fetch(this.url("/api/v1/sync/chat-attachments"), {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertAuthed(res);
+    if (!res.ok) throw await this.httpError(res, "GET /sync/chat-attachments", "apiClient.attachmentPullFailed");
+    const data = (await res.json()) as { items: SyncChatAttachmentMetaItem[] };
+    return data.items;
+  }
+
+  /** Fetches one chat attachment blob on demand. Null when the server doesn't have it. */
+  async getChatAttachment(token: string, attachmentId: string): Promise<SyncChatAttachmentItem | null> {
+    const res = await fetch(this.url(`/api/v1/sync/chat-attachments/${attachmentId}`), {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertAuthed(res);
+    if (res.status === 404) return null;
+    if (!res.ok)
+      throw await this.httpError(res, `GET /sync/chat-attachments/${attachmentId}`, "apiClient.attachmentPullFailed");
+    return (await res.json()) as SyncChatAttachmentItem;
   }
 
   async pushAiSession(
@@ -706,6 +774,18 @@ export function saveShowLineNumbers(show: boolean): void {
   localStorage.setItem(SHOW_LINE_NUMBERS_KEY, show ? "1" : "0");
 }
 
+const SOURCE_WRAP_KEY = "fastnote_source_wrap";
+
+// Default on: long lines wrap in source mode; off shows a horizontal scrollbar instead.
+export function loadSourceWrap(): boolean {
+  const raw = localStorage.getItem(SOURCE_WRAP_KEY);
+  return raw === null ? true : raw === "1";
+}
+
+export function saveSourceWrap(wrap: boolean): void {
+  localStorage.setItem(SOURCE_WRAP_KEY, wrap ? "1" : "0");
+}
+
 const ENABLE_MATH_KEY = "fastnote_enable_math";
 
 // Default off: KaTeX parsing/rendering can make very long notes noticeably slow to open.
@@ -725,6 +805,21 @@ export function loadAiPanelOpen(): boolean {
 
 export function saveAiPanelOpen(open: boolean): void {
   localStorage.setItem(AI_PANEL_OPEN_KEY, open ? "1" : "0");
+}
+
+// User-dragged height of the AI panel in the notes sidebar. null = automatic (CSS max-height cap).
+const AI_PANEL_HEIGHT_KEY = "fastnote_ai_panel_height";
+export const AI_PANEL_HEIGHT_MIN = 72;
+
+export function loadAiPanelHeight(): number | null {
+  const raw = localStorage.getItem(AI_PANEL_HEIGHT_KEY);
+  const n = raw === null ? NaN : Number(raw);
+  return Number.isFinite(n) && n >= AI_PANEL_HEIGHT_MIN ? n : null;
+}
+
+export function saveAiPanelHeight(height: number | null): void {
+  if (height === null) localStorage.removeItem(AI_PANEL_HEIGHT_KEY);
+  else localStorage.setItem(AI_PANEL_HEIGHT_KEY, String(Math.round(height)));
 }
 
 export const SIDEBAR_WIDTH_MIN = 180;
@@ -781,6 +876,35 @@ export function saveCollapsedFolderIds(ids: Set<string>, namespace?: string): vo
   const key = collapsedFolderIdsKey(namespace);
   if (ids.size === 0) localStorage.removeItem(key);
   else localStorage.setItem(key, JSON.stringify(Array.from(ids)));
+}
+
+// Recently opened/edited notes, most recent first. Stored per vault; only ids — titles and
+// liveness are resolved against the decrypted note list at render time (nothing sensitive here,
+// note ids are random UUIDs that already appear in plaintext IndexedDB row keys).
+function recentNoteIdsKey(namespace?: string): string {
+  const ns = sanitizeStorageNamespace(namespace ?? loadStorageNamespace());
+  return ns === "default" ? "fastnote_recent_notes" : `fastnote_recent_notes_${ns}`;
+}
+
+// Keep more ids than the UI shows so trashed/deleted entries still leave a full list.
+export const RECENT_NOTES_STORED_MAX = 30;
+export const RECENT_NOTES_SHOWN_MAX = 10;
+
+export function loadRecentNoteIds(namespace?: string): string[] {
+  try {
+    const raw = localStorage.getItem(recentNoteIdsKey(namespace));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as string[];
+    return Array.isArray(parsed) ? parsed.filter((id) => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveRecentNoteIds(ids: string[], namespace?: string): void {
+  const key = recentNoteIdsKey(namespace);
+  if (ids.length === 0) localStorage.removeItem(key);
+  else localStorage.setItem(key, JSON.stringify(ids.slice(0, RECENT_NOTES_STORED_MAX)));
 }
 
 export interface TabState {

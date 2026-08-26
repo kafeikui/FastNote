@@ -23,11 +23,11 @@ function fileIcon(mime: string): string {
 }
 
 function confirmRemoveAttachment(
-  direction: ChatMessage['direction'],
+  _direction: ChatMessage['direction'],
   fileName: string,
   t: TFunction,
 ): boolean {
-  if (direction !== 'in') return true;
+  // Deletion propagates to the cloud and every synced device, so always confirm.
   return confirm(t('chatAttachment.deleteConfirm', { name: fileName }));
 }
 

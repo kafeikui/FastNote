@@ -6,7 +6,7 @@ import { Mathematics } from '@tiptap/extension-mathematics';
 import { Markdown } from '@tiptap/markdown';
 import { Marked, marked as markedGlobal } from 'marked';
 import { EditorView, keymap, rectangularSelection } from '@codemirror/view';
-import { Prec } from '@codemirror/state';
+import { Compartment, Prec } from '@codemirror/state';
 import { deleteLine, indentWithTab } from '@codemirror/commands';
 import {
   search as cmSearch,
@@ -73,6 +73,8 @@ export interface NoteEditorProps {
   onAttachmentEdit?: (attachmentId: string, description: string) => void | Promise<void>;
   placeholder?: string;
   showLineNumbers?: boolean;
+  /** Source mode: wrap long lines (on by default). Off = horizontal scrollbar on overflow. */
+  sourceWrap?: boolean;
   /** Off by default: KaTeX parsing/rendering can be slow on very long documents. */
   enableMath?: boolean;
   /**
@@ -105,6 +107,7 @@ export function NoteEditor({
   onAttachmentEdit,
   placeholder,
   showLineNumbers = true,
+  sourceWrap = true,
   enableMath = false,
   externalContentNonce = 0,
 }: NoteEditorProps) {
@@ -112,6 +115,11 @@ export function NoteEditor({
   const effectivePlaceholder = placeholder ?? t('noteEditor.placeholder');
   const cmRef = useRef<HTMLDivElement>(null);
   const cmView = useRef<EditorView | null>(null);
+  // Line wrapping is a Compartment so toggling reconfigures the live view in place instead of
+  // recreating it (which would drop the scroll position and selection).
+  const wrapCompartment = useRef(new Compartment());
+  const sourceWrapRef = useRef(sourceWrap);
+  sourceWrapRef.current = sourceWrap;
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
   const modeRef = useRef(mode);
@@ -482,6 +490,7 @@ export function NoteEditor({
         // vertical block of text can be selected and edited at once. basicSetup already provides
         // the same via Alt+drag; this only adds the middle-button trigger.
         rectangularSelection({ eventFilter: (e) => e.button === 1 }),
+        wrapCompartment.current.of(sourceWrapRef.current ? EditorView.lineWrapping : []),
         markdown(),
         // Provides the search state used by the shared find/replace bar (driven programmatically
         // below — CodeMirror's own panel stays hidden).
@@ -620,6 +629,13 @@ export function NoteEditor({
       cmView.current = null;
     };
   }, [noteId, mode]);
+
+  useEffect(() => {
+    if (mode !== 'source' || !cmView.current) return;
+    cmView.current.dispatch({
+      effects: wrapCompartment.current.reconfigure(sourceWrap ? EditorView.lineWrapping : []),
+    });
+  }, [sourceWrap, mode]);
 
   useEffect(() => {
     if (mode !== 'source' || !cmView.current) return;

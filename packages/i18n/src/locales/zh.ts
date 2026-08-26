@@ -381,7 +381,7 @@ export const zh = {
     deleteMessage: '删除此消息',
     copyMessage: '复制完整消息',
     attachBtn: '添加附件',
-    composerPlaceholderActive: '输入消息…（Shift+Enter 换行）',
+    composerPlaceholderActive: '输入消息…（Shift+Enter 换行，可直接粘贴文件/截图）',
     composerPlaceholderInactive: '先选择会话',
     send: '发送',
     sending: '…',
@@ -394,6 +394,7 @@ export const zh = {
     statusSent: '已发送',
     statusDelivered: '对方已收到',
     statusRead: '对方已读',
+    attachmentMissing: '未找到附件内容：本设备和云端都没有该附件。可能已被删除，或原设备尚未联网上传，请稍后重试。',
   },
   chatSidebar: {
     tagline: '1:1 E2E 加密聊天',
@@ -408,7 +409,7 @@ export const zh = {
     selfChatHint: '给自己发消息或文件，在所有已登录设备间同步',
   },
   chatAttachment: {
-    deleteConfirm: '删除附件「{name}」？',
+    deleteConfirm: '删除附件「{name}」？将同时从云端删除，其他设备同步后也会移除，此操作不可恢复。',
     delete: '删除附件',
     download: '下载',
   },
@@ -576,6 +577,8 @@ export const zh = {
     navNotes: '笔记',
     navChat: '聊天',
     navTools: '工具',
+    recentNotes: '最近使用',
+    aiPanelResizeTitle: '拖拽调整 AI 助手面板高度，双击恢复自动',
     newMenu: '新建',
     newNote: '新建笔记',
     newTable: '新建表格',
@@ -594,6 +597,7 @@ export const zh = {
     modeWysiwyg: '渲染',
     modeSource: '源码',
     toggleLineNumbers: '显示/隐藏行号',
+    toggleSourceWrap: '源码自动换行（关闭时超宽内容显示水平滚动条）',
     exportNoteMd: '导出为无加密 Markdown (.md) 文件',
     formatJsonTitle: '格式化 JSON（未选中时格式化全文，选中时格式化选中部分）',
     jsonFormatFailed: 'JSON 解析失败，无法格式化。',
@@ -648,6 +652,9 @@ export const zh = {
     bioUnlockHint: '开启后主密码将由系统生物识别密钥库（Android Keystore）加密保存，每次读取都需要通过指纹验证。更换指纹录入后需重新开启。',
     bioNeedPassword: '请先用主密码解锁一次，再开启指纹解锁。',
     bioEnrollFailed: '开启指纹解锁失败，请确认设备已录入指纹后重试。',
+    noNote: '未选择笔记，从列表中选择或新建一篇。',
+    openNoteList: '打开笔记列表',
+    attachmentExportFailed: '附件导出失败，请查看运行日志。',
   },
 } as const;
 

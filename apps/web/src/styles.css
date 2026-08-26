@@ -867,6 +867,43 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   min-height: 360px;
 }
 
+/* Wrap off: long lines overflow into a horizontal scrollbar at the bottom of the editor. */
+.fn-editor--source .cm-scroller {
+  overflow-x: auto;
+}
+
+/* Wrap disabled: same pattern as the table pane — the outer pane stops scrolling vertically
+   and the editor fills it, so CodeMirror scrolls internally on both axes and its horizontal
+   scrollbar stays pinned to the visible bottom instead of below the last line. */
+.fn-tab-group__scroll--src-nowrap {
+  overflow-y: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.fn-tab-group__scroll--src-nowrap .fn-note {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.fn-tab-group__scroll--src-nowrap .fn-editor--source {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.fn-tab-group__scroll--src-nowrap .fn-editor--source .cm-editor {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.fn-tab-group__scroll--src-nowrap .fn-editor--source .cm-scroller {
+  overflow: auto;
+}
+
 .fn-editor--no-line-numbers .cm-gutters {
   display: none;
 }
@@ -3836,6 +3873,83 @@ mark.fn-ai-find-mark--current {
 .fn-ai-panel__chevron {
   width: 1em;
   color: var(--text-muted);
+}
+
+/* Divider under the AI panel: drag to resize the AI/notes split, double-click resets. */
+.fn-ai-panel__resize {
+  flex: 0 0 auto;
+  height: 5px;
+  margin-top: -1px; /* overlap the panel's bottom border so the hit area feels centered */
+  cursor: row-resize;
+  background: transparent;
+}
+
+.fn-ai-panel__resize:hover {
+  background: var(--accent-soft);
+}
+
+body.fn-resizing-ai-panel {
+  cursor: row-resize;
+  user-select: none;
+}
+
+/* Recently opened/edited notes, pinned between the AI panel and the file tree. */
+.fn-recent-panel {
+  flex: 0 0 auto;
+  max-height: 40%;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--border);
+  padding: 0.25rem 0.25rem 0.35rem;
+}
+
+.fn-recent-panel__title {
+  padding: 0.25rem 0.35rem 0.15rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.fn-recent-panel__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.fn-recent-panel__item {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  width: 100%;
+  padding: 0.22rem 0.35rem;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--text);
+  text-align: left;
+}
+
+.fn-recent-panel__item:hover {
+  background: var(--accent-soft);
+}
+
+.fn-recent-panel__item--active {
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+
+.fn-recent-panel__icon {
+  flex: 0 0 auto;
+  font-size: 0.8rem;
+}
+
+.fn-recent-panel__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .fn-ai-tree {

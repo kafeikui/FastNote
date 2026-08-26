@@ -47,6 +47,26 @@ function cleanNumberInput(raw: string): string {
   return raw.replace(/[\s,_]/g, '');
 }
 
+/** Clipboard write via hidden textarea + execCommand — the app's permissionless path
+ *  (navigator.clipboard is rejected wholesale by the Electron permission policy). */
+function copyText(text: string): boolean {
+  const prevFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try {
+    ok = document.execCommand('copy');
+  } finally {
+    ta.remove();
+    prevFocus?.focus();
+  }
+  return ok;
+}
+
 function formatTimestamp(d: Date): string {
   const p = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
@@ -60,10 +80,9 @@ function CopyButton({ text, label, copiedLabel }: { text: string; label: string;
       className="fn-tools__copy"
       disabled={!text}
       onClick={() => {
-        void navigator.clipboard.writeText(text).then(() => {
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1200);
-        });
+        if (!copyText(text)) return;
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1200);
       }}
     >
       {copied ? copiedLabel : label}
@@ -137,10 +156,9 @@ function PasswordTool() {
                 <code
                   title={t('toolsPanel.clickToCopy')}
                   onClick={() => {
-                    void navigator.clipboard.writeText(pw).then(() => {
-                      setCopiedIdx(i);
-                      setTimeout(() => setCopiedIdx((cur) => (cur === i ? null : cur)), 1200);
-                    });
+                    if (!copyText(pw)) return;
+                    setCopiedIdx(i);
+                    setTimeout(() => setCopiedIdx((cur) => (cur === i ? null : cur)), 1200);
                   }}
                 >
                   {pw}

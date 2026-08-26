@@ -38,10 +38,19 @@ import {
   saveTreeSortMode,
   loadShowLineNumbers,
   saveShowLineNumbers,
+  loadSourceWrap,
+  saveSourceWrap,
   loadEnableMath,
   saveEnableMath,
   loadAiPanelOpen,
   saveAiPanelOpen,
+  loadAiPanelHeight,
+  saveAiPanelHeight,
+  AI_PANEL_HEIGHT_MIN,
+  loadRecentNoteIds,
+  saveRecentNoteIds,
+  RECENT_NOTES_STORED_MAX,
+  RECENT_NOTES_SHOWN_MAX,
   loadTabState,
   saveTabState,
   defaultTabState,
@@ -364,6 +373,14 @@ export function VaultApp() {
       return next;
     });
   }, []);
+  const [sourceWrap, setSourceWrap] = useState(() => loadSourceWrap());
+  const toggleSourceWrap = useCallback(() => {
+    setSourceWrap((prev) => {
+      const next = !prev;
+      saveSourceWrap(next);
+      return next;
+    });
+  }, []);
   const sidebarWidthRef = useRef(sidebarWidth);
   sidebarWidthRef.current = sidebarWidth;
   const sidebarDraggedRef = useRef(false);
@@ -394,6 +411,13 @@ export function VaultApp() {
     [storage],
   );
   const [aiPanelOpen, setAiPanelOpen] = useState<boolean>(() => loadAiPanelOpen());
+  // User-dragged AI panel height (px); null = automatic (CSS max-height 45% cap).
+  const [aiPanelHeight, setAiPanelHeight] = useState<number | null>(() => loadAiPanelHeight());
+  const aiPanelHeightRef = useRef(aiPanelHeight);
+  aiPanelHeightRef.current = aiPanelHeight;
+  const notesSidebarRef = useRef<HTMLDivElement | null>(null);
+  // Recently opened/edited notes (most recent first); rendered above the tree, capped at 10.
+  const [recentNoteIds, setRecentNoteIds] = useState<string[]>(() => loadRecentNoteIds());
   // Sidebar multi-selection (Ctrl/Shift+click). The anchor is the row a Shift-range extends from.
   const [treeSelectedIds, setTreeSelectedIds] = useState<Set<string>>(() => new Set());
   const treeAnchorIdRef = useRef<string | null>(null);
@@ -694,15 +718,34 @@ export function VaultApp() {
     [migrateLegacyChat, storage],
   );
 
+  /** Cloud-deleted attachments leave dangling refs inside locally stored messages — strip them
+   *  (local-only rewrite) so the chips disappear instead of erroring on click. */
+  const stripDeletedAttachmentRefs = useCallback(
+    (ids: string[], derived: VaultKeys) => {
+      if (ids.length === 0) return;
+      const gone = new Set(ids);
+      setChatMessages((prev) =>
+        prev.map((m) => {
+          if (!m.attachments?.some((a) => gone.has(a.id))) return m;
+          const updated = { ...m, attachments: m.attachments.filter((a) => !gone.has(a.id)) };
+          void storage.saveChatMessage(updated, derived.notesKey);
+          return updated;
+        }),
+      );
+    },
+    [storage],
+  );
+
   /** Manual "sync history" from the chat header: full push+pull, then refresh the thread. */
   const handleChatHistorySync = useCallback(async () => {
     const k = keysRef.current;
     const s = sessionRef.current;
     if (!k || !s) throw new Error(t('chatPanel.syncNeedsLogin'));
     const client = new SyncClient(new ApiClient(serverUrl, locale), s);
-    const { pulled } = await client.syncChatMessages(storage);
+    const { pulled, deletedAttachmentIds } = await client.syncChatMessages(storage);
     if (pulled > 0 && keysRef.current === k) await loadChatHistory(k);
-  }, [serverUrl, locale, storage, loadChatHistory, t]);
+    if (keysRef.current === k) stripDeletedAttachmentRefs(deletedAttachmentIds, k);
+  }, [serverUrl, locale, storage, loadChatHistory, stripDeletedAttachmentRefs, t]);
 
   const processIncomingChat = useCallback(
     async (peerId: string, plaintext: string, msgId: string, sentAt: string) => {
@@ -1238,6 +1281,8 @@ export function VaultApp() {
       // from older versions can be cleared out here (off the critical path, fire-and-forget).
       if (!session) void storage.purgeDeleted();
       setNotes(decrypted);
+      // Vault switches change the storage namespace without a reload — re-read the recents list.
+      setRecentNoteIds(loadRecentNoteIds());
       // Snapshot deserialization / index rebuild both take seconds of CPU on large vaults, so the
       // whole thing happens in the background — it isn't needed to render the main UI.
       prepareSearchIndexInBackground(derived, decrypted);
@@ -1279,8 +1324,9 @@ export function VaultApp() {
             // Already-logged-in unlock: pull any chat history synced from other devices.
             try {
               const client = new SyncClient(new ApiClient(serverUrl, locale), sessionAtUnlock);
-              const { pulled } = await client.syncChatMessages(storage);
+              const { pulled, deletedAttachmentIds } = await client.syncChatMessages(storage);
               if (pulled > 0 && keysRef.current === derived) await loadChatHistory(derived);
+              if (keysRef.current === derived) stripDeletedAttachmentRefs(deletedAttachmentIds, derived);
               const ai = await client.syncAiSessions(storage, derived.notesKey);
               if (ai.pulled > 0 && keysRef.current === derived) {
                 const aiList = await storage.listAiSessions(derived.notesKey);
@@ -1297,7 +1343,7 @@ export function VaultApp() {
         }
       })();
     },
-    [storage, prepareSearchIndexInBackground, session, initIM, serverUrl, locale, loadChatHistory, restoreTabState, expireSession],
+    [storage, prepareSearchIndexInBackground, session, initIM, serverUrl, locale, loadChatHistory, restoreTabState, expireSession, stripDeletedAttachmentRefs],
   );
 
   const handleCreateVault = async (password: string) => {
@@ -1427,6 +1473,14 @@ export function VaultApp() {
   const collabActiveIds = useMemo(() => new Set(Object.keys(collabUi)), [collabUi]);
 
   const recordEditFocus = useCallback((id: string) => {
+    // Every focus switch also feeds the "recent notes" sidebar list. Same-head updates are
+    // no-ops so per-keystroke edit calls don't thrash state or localStorage.
+    setRecentNoteIds((prev) => {
+      if (prev[0] === id) return prev;
+      const next = [id, ...prev.filter((x) => x !== id)].slice(0, RECENT_NOTES_STORED_MAX);
+      saveRecentNoteIds(next);
+      return next;
+    });
     const h = editHistoryRef.current;
     if (h[editHistoryIdxRef.current] === id) return;
     // Editing after walking back forks the trail: drop the forward entries, like undo history.
@@ -1994,6 +2048,30 @@ export function VaultApp() {
     window.addEventListener('mouseup', onUp);
   };
 
+  /** Vertical drag on the divider under the AI panel: resizes the AI/notes split. */
+  const handleAiPanelResizeStart = (e: ReactMouseEvent) => {
+    e.preventDefault();
+    const container = notesSidebarRef.current;
+    const panel = container?.querySelector<HTMLElement>('.fn-ai-panel');
+    if (!container || !panel) return;
+    const startY = e.clientY;
+    const startHeight = panel.offsetHeight;
+    // Leave room below for the recents section header + a usable slice of the tree.
+    const max = Math.max(AI_PANEL_HEIGHT_MIN, container.clientHeight - 160);
+    const onMove = (ev: MouseEvent) => {
+      setAiPanelHeight(Math.min(max, Math.max(AI_PANEL_HEIGHT_MIN, startHeight + (ev.clientY - startY))));
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.classList.remove('fn-resizing-ai-panel');
+      saveAiPanelHeight(aiPanelHeightRef.current);
+    };
+    document.body.classList.add('fn-resizing-ai-panel');
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
   const handleToggleFolderCollapse = useCallback((id: string) => {
     setCollapsedFolderIds((prev) => {
       const next = new Set(prev);
@@ -2035,6 +2113,19 @@ export function VaultApp() {
     },
     [notes, persistNote],
   );
+
+  /** Live, editable notes from the recents trail, most recent first, capped for display. */
+  const recentItems = useMemo(() => {
+    const byId = new Map(notes.map((n) => [n.id, n]));
+    const out: NoteNode[] = [];
+    for (const id of recentNoteIds) {
+      const n = byId.get(id);
+      if (!n || n.deleted || n.trashed || n.nodeType === 'folder') continue;
+      out.push(n);
+      if (out.length >= RECENT_NOTES_SHOWN_MAX) break;
+    }
+    return out;
+  }, [notes, recentNoteIds]);
 
   const revealNoteInTree = useCallback(
     (id: string) => {
@@ -3186,8 +3277,9 @@ export function VaultApp() {
     void (async () => {
       try {
         const client = new SyncClient(api, s);
-        const { pulled } = await client.syncChatMessages(storage);
+        const { pulled, deletedAttachmentIds } = await client.syncChatMessages(storage);
         if (pulled > 0 && keysRef.current) await loadChatHistory(keysRef.current);
+        if (keysRef.current) stripDeletedAttachmentRefs(deletedAttachmentIds, keysRef.current);
         const k = keysRef.current;
         if (k) {
           const ai = await client.syncAiSessions(storage, k.notesKey);
@@ -3309,18 +3401,44 @@ export function VaultApp() {
     if (!keys) return;
     await storage.deleteChatMessage(messageId, keys.notesKey);
     setChatMessages((prev) => prev.filter((m) => m.id !== messageId));
+    // Its attachments became deletion tombstones — push them so cloud copies go away too.
+    scheduleChatPushRef.current();
+  };
+
+  /** Local load with an on-demand cloud fallback: attachment blobs are not bulk-downloaded
+   *  during history sync, so a device that never held the payload fetches it here when the
+   *  user actually opens the attachment. */
+  const loadChatAttachmentWithCloud = async (attachmentId: string) => {
+    const k = keysRef.current;
+    if (!k) return null;
+    const local = await storage.loadChatAttachmentDecrypted(attachmentId, k.notesKey);
+    if (local) return local;
+    const s = sessionRef.current;
+    if (!s) return null;
+    try {
+      const client = new SyncClient(new ApiClient(serverUrl, locale), s);
+      if (!(await client.fetchChatAttachment(storage, attachmentId))) return null;
+    } catch (err) {
+      console.warn('[FastNote] chat: on-demand attachment fetch failed', attachmentId, err);
+      if (err instanceof ApiAuthError) expireSession();
+      return null;
+    }
+    return storage.loadChatAttachmentDecrypted(attachmentId, k.notesKey);
   };
 
   const handleChatAttachmentDownload = async (attachmentId: string) => {
     if (!keys) return;
-    const loaded = await storage.loadChatAttachmentDecrypted(attachmentId, keys.notesKey);
-    if (!loaded) return;
+    const loaded = await loadChatAttachmentWithCloud(attachmentId);
+    if (!loaded) {
+      alert(t('chatPanel.attachmentMissing'));
+      return;
+    }
     downloadBlob(loaded.meta.fileName, loaded.data, loaded.meta.mimeType);
   };
 
   const handleChatAttachmentPreview = async (attachmentId: string): Promise<Blob | null> => {
     if (!keys) return null;
-    const loaded = await storage.loadChatAttachmentDecrypted(attachmentId, keys.notesKey);
+    const loaded = await loadChatAttachmentWithCloud(attachmentId);
     if (!loaded) return null;
     return new Blob([loaded.data.slice()], { type: loaded.meta.mimeType || 'application/octet-stream' });
   };
@@ -3335,12 +3453,15 @@ export function VaultApp() {
           a.id === attachmentId ? { ...a, description } : a,
         );
         const updated = { ...m, attachments };
-        void storage.saveChatMessage(updated, keys.notesKey);
+        void storage.saveChatMessage(updated, keys.notesKey, { markPending: true });
         return updated;
       }),
     );
+    scheduleChatPushRef.current();
   };
 
+  /** Removes an attachment everywhere: local tombstone → pushed to the cloud → other devices
+   *  purge their copies on the next history sync. */
   const handleChatAttachmentRemove = async (messageId: string, attachmentId: string) => {
     if (!keys) return;
     await storage.deleteChatAttachment(attachmentId);
@@ -3349,10 +3470,11 @@ export function VaultApp() {
         if (m.id !== messageId) return m;
         const attachments = m.attachments?.filter((a) => a.id !== attachmentId) ?? [];
         const updated = { ...m, attachments };
-        void storage.saveChatMessage(updated, keys.notesKey);
+        void storage.saveChatMessage(updated, keys.notesKey, { markPending: true });
         return updated;
       }),
     );
+    scheduleChatPushRef.current();
   };
 
   const handleEditorModeForGroup = (groupId: string, next: EditorMode) => {
@@ -3699,6 +3821,16 @@ export function VaultApp() {
                   >
                     #
                   </button>
+                  {mode === 'source' && (
+                    <button
+                      type="button"
+                      className={sourceWrap ? 'active' : ''}
+                      onClick={toggleSourceWrap}
+                      title={t('vaultApp.toggleSourceWrap')}
+                    >
+                      ↩
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => {
@@ -3781,7 +3913,14 @@ export function VaultApp() {
                 </div>
               </div>
             )}
-            <div className="fn-tab-group__scroll">
+            {/* Wrap disabled in source mode: the pane stops scrolling vertically and CodeMirror
+                scrolls internally instead, pinning the horizontal scrollbar to the visible
+                bottom of the pane (it would otherwise sit below the last line, off-screen). */}
+            <div
+              className={`fn-tab-group__scroll${
+                mode === 'source' && !sourceWrap ? ' fn-tab-group__scroll--src-nowrap' : ''
+              }`}
+            >
               <div className="fn-note" style={{ maxWidth: noteWidth }}>
                 {renderNoteResizeHandle()}
                 <NoteEditor
@@ -3815,6 +3954,7 @@ export function VaultApp() {
                   onAttachmentDownload={handleAttachmentDownload}
                   onAttachmentEdit={handleAttachmentEdit}
                   showLineNumbers={showLineNumbers}
+                  sourceWrap={sourceWrap}
                   enableMath={enableMath}
                   externalContentNonce={collabContentNonce[content.id] ?? 0}
                 />
@@ -4022,8 +4162,11 @@ export function VaultApp() {
           ) : (
             // Flex column: the AI panel is a fixed (non-scrolling) block at the top with its own
             // internal scrolling when expanded; the note tree scrolls independently below it.
-            <div className="fn-notes-sidebar">
-              <div className="fn-ai-panel">
+            <div className="fn-notes-sidebar" ref={notesSidebarRef}>
+              <div
+                className="fn-ai-panel"
+                style={aiPanelOpen && aiPanelHeight !== null ? { height: aiPanelHeight, maxHeight: 'none' } : undefined}
+              >
                 <button type="button" className="fn-ai-panel__header" onClick={handleAiPanelToggle}>
                   <span className="fn-ai-panel__chevron">{aiPanelOpen ? '▾' : '▸'}</span>
                   {t('aiPanel.title')}
@@ -4043,6 +4186,44 @@ export function VaultApp() {
                   />
                 )}
               </div>
+              {aiPanelOpen && (
+                <div
+                  className="fn-ai-panel__resize"
+                  title={t('vaultApp.aiPanelResizeTitle')}
+                  onMouseDown={handleAiPanelResizeStart}
+                  onDoubleClick={() => {
+                    setAiPanelHeight(null);
+                    saveAiPanelHeight(null);
+                  }}
+                />
+              )}
+              {recentItems.length > 0 && (
+                <div className="fn-recent-panel">
+                  <div className="fn-recent-panel__title">{t('vaultApp.recentNotes')}</div>
+                  <ul className="fn-recent-panel__list">
+                    {recentItems.map((n) => (
+                      <li key={n.id}>
+                        <button
+                          type="button"
+                          className={`fn-recent-panel__item${n.id === activeId ? ' fn-recent-panel__item--active' : ''}`}
+                          title={n.title || t('noteTree.untitledNote')}
+                          onClick={() => {
+                            openNote(n.id);
+                            revealNoteInTree(n.id);
+                          }}
+                          onDoubleClick={() => openNote(n.id, { pin: true })}
+                        >
+                          <span className="fn-recent-panel__icon">{n.nodeType === 'table' ? '📊' : '📝'}</span>
+                          <span className="fn-recent-panel__text">
+                            {n.title ||
+                              (n.nodeType === 'table' ? t('noteTree.untitledTable') : t('noteTree.untitledNote'))}
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               <div className="fn-notes-sidebar__tree">
                 <TreeToolbar
                   sortMode={treeSortMode}

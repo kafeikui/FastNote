@@ -3,7 +3,7 @@ import type { NoteAttachment, NoteNode, ChatMessage, ChatAttachmentRef, ChatWire
 import { META_KEYS } from '@fastnote/shared';
 import type { ChatStoredPayload } from '@fastnote/shared';
 import { storedToChatMessage } from '@fastnote/shared';
-import type { SyncAttachmentItem, SyncChatMessageItem } from '@fastnote/api';
+import type { SyncAttachmentItem, SyncChatAttachmentItem, SyncChatMessageItem } from '@fastnote/api';
 import { storageDbName } from '@fastnote/api';
 import {
   decodeWireCiphertext,
@@ -52,6 +52,11 @@ interface StoredChatAttachment {
   dataEnc: string;
   dataNonce: string;
   updatedAt: string;
+  /** Cloud-sync state. Undefined on rows created before chat-attachment sync existed — which
+   * reads as "pending", so pre-existing attachments get uploaded on the next sync. */
+  syncStatus?: 'synced' | 'pending';
+  /** Deletion tombstone (1 = deleted), kept (with ciphertexts cleared) until pushed. */
+  deleted?: number;
 }
 
 /** AI Workbench session/folder row — title and message payload are encrypted with notesKey. */
@@ -157,6 +162,16 @@ export interface ChatMessageWirePayload {
   ciphertext: string;
 }
 
+export interface ChatAttachmentWirePayload {
+  messageId: string;
+  peerId: string;
+  /** Empty strings on deletion tombstones — the server only needs the id + deleted flag. */
+  metaWire: string;
+  dataWire: string;
+  deleted: boolean;
+  updatedAt: string;
+}
+
 export interface StorageAdapter {
   getMeta(key: string): Promise<string | undefined>;
   setMeta(key: string, value: string): Promise<void>;
@@ -193,7 +208,7 @@ export interface StorageAdapter {
   getAttachmentServerVersion(id: string): Promise<number | null>;
   saveAttachmentFromRemote(item: SyncAttachmentItem): Promise<void>;
   listChatMessagesDecrypted(notesKey: Uint8Array): Promise<ChatMessage[]>;
-  saveChatMessage(message: ChatMessage, notesKey: Uint8Array): Promise<void>;
+  saveChatMessage(message: ChatMessage, notesKey: Uint8Array, opts?: { markPending?: boolean }): Promise<void>;
   deleteChatMessage(id: string, notesKey: Uint8Array): Promise<void>;
   hasChatMessage(id: string): Promise<boolean>;
   listPendingChatMessages(): Promise<Array<{ id: string }>>;
@@ -212,6 +227,15 @@ export interface StorageAdapter {
   ): Promise<{ meta: ChatAttachmentRef; data: Uint8Array } | null>;
   updateChatAttachmentDescription(id: string, description: string, notesKey: Uint8Array): Promise<void>;
   deleteChatAttachment(id: string): Promise<void>;
+  /** Not-yet-pushed chat attachments (new blobs and deletion tombstones alike). */
+  listPendingChatAttachments(): Promise<Array<{ id: string }>>;
+  getChatAttachmentWire(id: string): Promise<ChatAttachmentWirePayload | null>;
+  /** Marks pushed; tombstone rows are hard-deleted (the server remembers the deletion). */
+  markChatAttachmentSynced(id: string): Promise<void>;
+  /** Writes an attachment blob fetched from the server (on-demand download). */
+  saveChatAttachmentFromRemote(item: SyncChatAttachmentItem): Promise<void>;
+  /** Hard-deletes a local row without leaving a tombstone (remote deletions). */
+  purgeChatAttachment(id: string): Promise<void>;
   listAiSessions(notesKey: Uint8Array): Promise<AiSessionNode[]>;
   saveAiSession(session: AiSessionNode, notesKey: Uint8Array): Promise<void>;
   deleteAiSession(id: string): Promise<void>;
@@ -268,6 +292,21 @@ function rowFromWire(
     syncStatus: 'synced',
     deleted: deleted ? 1 : 0,
     updatedAt,
+  };
+}
+
+/** Deletion tombstone for a chat attachment: ciphertexts cleared to free space, row kept until
+ * the deletion is pushed to the server (which then propagates it to other devices). */
+function tombstoneChatAttachment(row: StoredChatAttachment): StoredChatAttachment {
+  return {
+    ...row,
+    metaEnc: '',
+    metaNonce: '',
+    dataEnc: '',
+    dataNonce: '',
+    deleted: 1,
+    syncStatus: 'pending',
+    updatedAt: new Date().toISOString(),
   };
 }
 
@@ -661,7 +700,9 @@ export class WebStorageAdapter implements StorageAdapter {
         ) as ChatStoredPayload;
         let msg = storedToChatMessage(row.id, row.peerId, row.direction, row.sentAt, stored);
         if (!msg.attachments?.length) {
-          const attRows = await db.getAllFromIndex('chat_attachments_local', 'by_message', row.id);
+          const attRows = (await db.getAllFromIndex('chat_attachments_local', 'by_message', row.id)).filter(
+            (r) => r.deleted !== 1,
+          );
           if (attRows.length) {
             const attachments = await Promise.all(
               attRows.map(async (attRow) => {
@@ -686,7 +727,11 @@ export class WebStorageAdapter implements StorageAdapter {
     return messages.sort((a, b) => a.sentAt.localeCompare(b.sentAt));
   }
 
-  async saveChatMessage(message: ChatMessage, notesKey: Uint8Array): Promise<void> {
+  async saveChatMessage(
+    message: ChatMessage,
+    notesKey: Uint8Array,
+    opts?: { markPending?: boolean },
+  ): Promise<void> {
     const stored: ChatStoredPayload = {
       v: 1,
       body: message.body,
@@ -699,6 +744,8 @@ export class WebStorageAdapter implements StorageAdapter {
     // Preserve the existing `synced` flag (e.g. a status-only update like a
     // delivery/read ack shouldn't re-mark an already cloud-synced message as
     // pending — that would just get re-pushed as unchanged content forever).
+    // `markPending` overrides this for content edits (e.g. attachment removal)
+    // so the cloud copy gets the updated payload.
     const existing = await db.get('chat_messages_local', message.id);
     await db.put('chat_messages_local', {
       id: message.id,
@@ -707,14 +754,15 @@ export class WebStorageAdapter implements StorageAdapter {
       payloadEnc: enc.enc,
       payloadNonce: enc.nonce,
       sentAt: message.sentAt,
-      synced: existing?.synced ?? false,
+      synced: opts?.markPending ? false : (existing?.synced ?? false),
     });
   }
 
   async deleteChatMessage(id: string, notesKey: Uint8Array): Promise<void> {
     const db = await this.getDb();
+    // Attachments become tombstones (not hard deletes) so the cloud copies get removed too.
     const attRows = await db.getAllFromIndex('chat_attachments_local', 'by_message', id);
-    await Promise.all(attRows.map((row) => db.delete('chat_attachments_local', row.id)));
+    await Promise.all(attRows.map((row) => db.put('chat_attachments_local', tombstoneChatAttachment(row))));
     await db.delete('chat_messages_local', id);
     void notesKey;
   }
@@ -791,6 +839,8 @@ export class WebStorageAdapter implements StorageAdapter {
       dataEnc: dataEnc.enc,
       dataNonce: dataEnc.nonce,
       updatedAt: new Date().toISOString(),
+      syncStatus: 'pending',
+      deleted: 0,
     };
     const db = await this.getDb();
     await db.put('chat_attachments_local', row);
@@ -809,7 +859,7 @@ export class WebStorageAdapter implements StorageAdapter {
   ): Promise<{ meta: ChatAttachmentRef; data: Uint8Array } | null> {
     const db = await this.getDb();
     const row = await db.get('chat_attachments_local', id);
-    if (!row) return null;
+    if (!row || row.deleted === 1) return null;
     const plain = JSON.parse(decryptString(notesKey, unpack(row.metaEnc, row.metaNonce))) as AttachmentMetaPlain;
     const data = decrypt(notesKey, unpack(row.dataEnc, row.dataNonce));
     return {
@@ -838,6 +888,7 @@ export class WebStorageAdapter implements StorageAdapter {
         metaEnc: metaEnc.enc,
         metaNonce: metaEnc.nonce,
         updatedAt: new Date().toISOString(),
+        syncStatus: 'pending',
       });
       return;
     }
@@ -845,6 +896,63 @@ export class WebStorageAdapter implements StorageAdapter {
   }
 
   async deleteChatAttachment(id: string): Promise<void> {
+    const db = await this.getDb();
+    const row = await db.get('chat_attachments_local', id);
+    if (!row) return;
+    await db.put('chat_attachments_local', tombstoneChatAttachment(row));
+  }
+
+  async listPendingChatAttachments(): Promise<Array<{ id: string }>> {
+    const db = await this.getDb();
+    const rows = await db.getAll('chat_attachments_local');
+    return rows.filter((r) => (r.syncStatus ?? 'pending') === 'pending').map((r) => ({ id: r.id }));
+  }
+
+  async getChatAttachmentWire(id: string): Promise<ChatAttachmentWirePayload | null> {
+    const db = await this.getDb();
+    const row = await db.get('chat_attachments_local', id);
+    if (!row) return null;
+    const deleted = row.deleted === 1;
+    return {
+      messageId: row.messageId,
+      peerId: row.peerId,
+      metaWire: deleted ? '' : encodeWireCiphertext(unpack(row.metaEnc, row.metaNonce)),
+      dataWire: deleted ? '' : encodeWireCiphertext(unpack(row.dataEnc, row.dataNonce)),
+      deleted,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  async markChatAttachmentSynced(id: string): Promise<void> {
+    const db = await this.getDb();
+    const row = await db.get('chat_attachments_local', id);
+    if (!row) return;
+    if (row.deleted === 1) {
+      await db.delete('chat_attachments_local', id);
+      return;
+    }
+    await db.put('chat_attachments_local', { ...row, syncStatus: 'synced' });
+  }
+
+  async saveChatAttachmentFromRemote(item: SyncChatAttachmentItem): Promise<void> {
+    const db = await this.getDb();
+    const meta = pack(decodeWireCiphertext(item.meta_ciphertext));
+    const data = pack(decodeWireCiphertext(item.data_ciphertext));
+    await db.put('chat_attachments_local', {
+      id: item.attachment_id,
+      messageId: item.message_id,
+      peerId: item.peer_id,
+      metaEnc: meta.enc,
+      metaNonce: meta.nonce,
+      dataEnc: data.enc,
+      dataNonce: data.nonce,
+      updatedAt: item.updated_at,
+      syncStatus: 'synced',
+      deleted: 0,
+    });
+  }
+
+  async purgeChatAttachment(id: string): Promise<void> {
     const db = await this.getDb();
     await db.delete('chat_attachments_local', id);
   }

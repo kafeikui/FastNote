@@ -285,7 +285,9 @@ export class SyncClient {
    * status refinements) is never clobbered — the trade-off is that status
    * changes made after the first sync don't themselves get re-synced.
    */
-  async syncChatMessages(storage: StorageAdapter): Promise<{ pushed: number; pulled: number }> {
+  async syncChatMessages(
+    storage: StorageAdapter,
+  ): Promise<{ pushed: number; pulled: number; deletedAttachmentIds: string[] }> {
     const pushed = await this.pushChatMessages(storage);
     let pulled = 0;
 
@@ -296,7 +298,19 @@ export class SyncClient {
       pulled++;
     }
 
-    return { pushed, pulled };
+    // Attachment blobs are NOT bulk-downloaded here (they can be large); devices fetch them on
+    // demand via `fetchChatAttachment` when the user opens one. The meta list pull below only
+    // propagates deletions: local blob copies are purged, and the returned ids let the caller
+    // strip the dangling refs out of its message payloads.
+    const remoteAtts = await this.api.pullChatAttachmentsMeta(this.session.token);
+    const deletedAttachmentIds: string[] = [];
+    for (const item of remoteAtts) {
+      if (!item.deleted) continue;
+      await storage.purgeChatAttachment(item.attachment_id);
+      deletedAttachmentIds.push(item.attachment_id);
+    }
+
+    return { pushed, pulled, deletedAttachmentIds };
   }
 
   /**
@@ -320,7 +334,40 @@ export class SyncClient {
       await storage.markChatMessageSynced(id);
       pushed++;
     }
+    pushed += await this.pushChatAttachments(storage);
     return pushed;
+  }
+
+  /** Uploads not-yet-synced chat attachment blobs and deletion tombstones. */
+  async pushChatAttachments(storage: StorageAdapter): Promise<number> {
+    let pushed = 0;
+    const pending = await storage.listPendingChatAttachments();
+    for (const { id } of pending) {
+      const wire = await storage.getChatAttachmentWire(id);
+      if (!wire) continue;
+      await this.api.pushChatAttachment(this.session.token, id, {
+        message_id: wire.messageId,
+        peer_id: wire.peerId,
+        meta_ciphertext: wire.metaWire,
+        data_ciphertext: wire.dataWire,
+        deleted: wire.deleted,
+        updated_at: wire.updatedAt,
+      });
+      await storage.markChatAttachmentSynced(id);
+      pushed++;
+    }
+    return pushed;
+  }
+
+  /**
+   * On-demand download of one chat attachment blob (e.g. the user tapped "download" on a device
+   * that never held the payload locally). Returns true when the blob was fetched and stored.
+   */
+  async fetchChatAttachment(storage: StorageAdapter, attachmentId: string): Promise<boolean> {
+    const item = await this.api.getChatAttachment(this.session.token, attachmentId);
+    if (!item || item.deleted) return false;
+    await storage.saveChatAttachmentFromRemote(item);
+    return true;
   }
 
   /**

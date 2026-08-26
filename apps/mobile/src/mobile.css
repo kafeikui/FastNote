@@ -257,7 +257,15 @@ body,
   .fn-chat__delete {
     opacity: 1;
   }
-}
+
+  .fn-tree-node__actions--hover {
+    display: flex;
+  }
+
+  .fn-tree-node__row {
+    min-height: 2.4rem;
+    align-items: center;
+  }
 
   .fn-ai-msg__actions {
     opacity: 1;
@@ -286,4 +294,153 @@ body,
   .fn-ai-workbench__composer {
     padding: 0.5rem 0.6rem calc(0.5rem + env(safe-area-inset-bottom));
   }
+}
+
+/* --- notes view ------------------------------------------------------------------ */
+
+.fn-mobile__note-pane {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Tables scroll on both axes; the TableEditor grid is usually wider than a phone. */
+.fn-mobile__note-pane--table {
+  display: block;
+  overflow: auto;
+  padding: 0.5rem 0.5rem calc(0.75rem + env(safe-area-inset-bottom));
+}
+
+.fn-mobile__note-controls {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 0.4rem;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface);
+}
+
+.fn-mobile__note-controls button {
+  padding: 0.3rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.fn-mobile__note-controls .fn-mobile__note-mode--active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.fn-mobile__note-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.5rem 0.75rem calc(0.75rem + env(safe-area-inset-bottom));
+}
+
+/* The desktop editor min-height targets a large pane; on the phone let content size itself. */
+.fn-mobile__note-scroll .fn-editor {
+  min-height: 100%;
+}
+
+/* --- note tree in the drawer ------------------------------------------------------ */
+
+/* Global note search: input pinned at the top of the drawer, results replace the tree. */
+.fn-mobile__notes-search {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0 0.5rem 0.6rem;
+}
+
+.fn-mobile__notes-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 0.9rem;
+}
+
+.fn-mobile__notes-search button {
+  flex: 0 0 auto;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.fn-mobile__search-empty {
+  padding: 1rem 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.88rem;
+}
+
+.fn-mobile__search-results {
+  list-style: none;
+  margin: 0;
+  padding: 0 0.35rem 0.75rem;
+}
+
+.fn-mobile__search-results button {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  width: 100%;
+  padding: 0.5rem 0.5rem;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fn-mobile__search-title {
+  font-size: 0.92rem;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fn-mobile__search-snippet {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.fn-mobile__notes-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0 0.5rem 0.6rem;
+}
+
+.fn-mobile__notes-actions button {
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.fn-mobile__notes-actions button:disabled {
+  opacity: 0.6;
+}
+
+/* The desktop tree sidebar has its own width/border; the drawer owns those here. */
+.fn-mobile__notes-drawer .fn-tree,
+.fn-mobile__notes-drawer .fn-tree-empty {
+  width: 100%;
 }

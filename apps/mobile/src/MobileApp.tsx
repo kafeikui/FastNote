@@ -24,6 +24,7 @@ import {
   fromBase64,
   generateIdentityKeypair,
   generateSalt,
+  hashContent,
   packEncrypted,
   toBase64,
   unpackEncrypted,
@@ -33,6 +34,8 @@ import {
 import { IMClient, deriveSelfChatRootKey, verifyExchangeKeypair } from '@fastnote/im';
 import { SyncClient } from '@fastnote/sync';
 import { createStorage } from '@fastnote/storage';
+import { NoteEditor } from '@fastnote/editor';
+import { TableEditor, createEmptyTable, parseTableDocument, serializeTable, tableToSearchText } from '@fastnote/table';
 import {
   AI_MAX_TOKENS_DEFAULT,
   AI_MAX_TOKENS_LIMIT,
@@ -42,6 +45,7 @@ import {
   AI_WEB_SEARCH_USES_MIN,
   META_KEYS,
   clearCapturedLogs,
+  computeTreeMove,
   decodeChatWire,
   formatCapturedLogs,
   getCapturedLogs,
@@ -56,6 +60,10 @@ import {
   type ChatAttachmentRef,
   type ChatMessage,
   type ChatWireAttachment,
+  type EditorMode,
+  type NodeType,
+  type NoteNode,
+  type TreeDropPosition,
   type UserSession,
 } from '@fastnote/shared';
 import {
@@ -74,6 +82,7 @@ import {
   ChatPanel,
   ChatSidebar,
   LogsModal,
+  NoteTree,
   ToolsPanel,
   ToolsSidebar,
   UnlockScreen,
@@ -103,10 +112,49 @@ import {
   enableBiometricUnlock,
   readBiometricPassword,
 } from './biometric';
+import { exportFileNative } from './fileExport';
 
 type VaultKeys = Awaited<ReturnType<typeof deriveKeysFromPassword>>;
 
 const CHAT_STATUS_RANK: Record<ChatMessage['status'], number> = { sent: 0, delivered: 1, read: 2 };
+
+const NOTE_SAVE_DEBOUNCE_MS = 500;
+
+/** Same node constructor as the desktop VaultApp — vault format stays byte-compatible. */
+function newNode(nodeType: NodeType, parentId: string | null, sortOrder: number, locale: Locale): NoteNode {
+  const contentMd = nodeType === 'table' ? serializeTable(createEmptyTable(locale)) : '';
+  return {
+    id: crypto.randomUUID(),
+    parentId,
+    nodeType,
+    title:
+      nodeType === 'folder'
+        ? translate(locale, 'noteTree.untitledFolder')
+        : nodeType === 'table'
+          ? translate(locale, 'noteTree.untitledTable')
+          : translate(locale, 'noteTree.untitledNote'),
+    contentMd,
+    sortOrder,
+    version: 1,
+    serverVersion: 0,
+    contentHash: hashContent(contentMd),
+    syncStatus: 'pending',
+    deleted: false,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function buildUpdated(current: NoteNode, patch: Partial<NoteNode>): NoteNode {
+  const contentMd = patch.contentMd ?? current.contentMd;
+  return {
+    ...current,
+    ...patch,
+    version: current.version + 1,
+    contentHash: hashContent(contentMd),
+    syncStatus: 'pending',
+    updatedAt: new Date().toISOString(),
+  };
+}
 
 interface AiRunState {
   sessionId: string;
@@ -170,6 +218,21 @@ export function MobileApp() {
   const [aiRunError, setAiRunError] = useState<{ sessionId: string; message: string } | null>(null);
   const aiAbortRef = useRef<AbortController | null>(null);
 
+  // --- notes state --------------------------------------------------------------
+  const [notes, setNotes] = useState<NoteNode[]>([]);
+  const notesRef = useRef<NoteNode[]>([]);
+  notesRef.current = notes;
+  // Notes decrypt in the background after unlock; cloud sync must not run against an
+  // empty array (it would re-pull everything and skip pushing pending local edits).
+  const notesLoadedRef = useRef(false);
+  const [notesLoading, setNotesLoading] = useState(false);
+  const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
+  const [noteMode, setNoteMode] = useState<EditorMode>('wysiwyg');
+  const [collapsedFolderIds, setCollapsedFolderIds] = useState<Set<string>>(new Set());
+  const [notesSyncing, setNotesSyncing] = useState(false);
+  const [noteSearch, setNoteSearch] = useState('');
+  const noteSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // --- chat / IM state ----------------------------------------------------------
   const [session, setSession] = useState<UserSession | null>(null);
   const [boundUsername, setBoundUsername] = useState<string | null>(null);
@@ -186,7 +249,7 @@ export function MobileApp() {
   const activePeerRef = useRef<string | null>(null);
 
   // --- UI state ---------------------------------------------------------------
-  const [view, setView] = useState<'ai' | 'chat' | 'tools'>('ai');
+  const [view, setView] = useState<'ai' | 'chat' | 'tools' | 'notes'>('ai');
   const [activeTool, setActiveTool] = useState<ToolId>('password');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -294,6 +357,172 @@ export function MobileApp() {
       .filter((s) => s.kind === 'session')
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     setActiveAiSessionId(sessionsOnly[0]?.id ?? null);
+  };
+
+  // --- notes logic (a trimmed port of the desktop VaultApp wiring) ---------------
+
+  /** Decrypts the full note list in the background; unlock does not wait for this. */
+  const loadNotesFor = async (derived: VaultKeys) => {
+    setNotesLoading(true);
+    try {
+      const decrypted = await storage.loadAllNotesDecrypted(derived.notesKey);
+      if (keysRef.current !== derived) return;
+      setNotes(decrypted);
+      notesLoadedRef.current = true;
+      // Local-only vaults never push tombstones anywhere, so drop them right away.
+      if (!sessionRef.current) void storage.purgeDeleted();
+    } catch (err) {
+      console.error('[notes] load failed', err);
+    } finally {
+      setNotesLoading(false);
+    }
+  };
+
+  const persistNote = async (note: NoteNode) => {
+    const k = keysRef.current;
+    if (!k) return;
+    await storage.saveNote(note, k.notesKey);
+  };
+
+  /** Immediate save (used by create/sync); also swaps the node into React state. */
+  const saveNoteNow = async (note: NoteNode) => {
+    setNotes((prev) => {
+      const idx = prev.findIndex((n) => n.id === note.id);
+      return idx >= 0 ? prev.map((n) => (n.id === note.id ? note : n)) : [...prev, note];
+    });
+    await persistNote(note);
+  };
+
+  const pendingNoteSaveRef = useRef<NoteNode | null>(null);
+  const scheduleNotePersist = (note: NoteNode) => {
+    if (noteSaveTimerRef.current) clearTimeout(noteSaveTimerRef.current);
+    pendingNoteSaveRef.current = note;
+    noteSaveTimerRef.current = setTimeout(() => {
+      pendingNoteSaveRef.current = null;
+      void persistNote(note);
+    }, NOTE_SAVE_DEBOUNCE_MS);
+  };
+
+  const updateNoteById = (id: string, patch: Partial<NoteNode>) => {
+    const current = notesRef.current.find((n) => n.id === id);
+    if (!current) return;
+    const updated = buildUpdated(current, patch);
+    setNotes((prev) => prev.map((n) => (n.id === id ? updated : n)));
+    scheduleNotePersist(updated);
+  };
+
+  const handleCreateNode = async (nodeType: NodeType, parentId: string | null) => {
+    const sortOrder = notesRef.current.filter((n) => n.parentId === parentId && !n.deleted).length;
+    const node = newNode(nodeType, parentId, sortOrder, locale);
+    await saveNoteNow(node);
+    if (parentId) {
+      setCollapsedFolderIds((prev) => {
+        const next = new Set(prev);
+        next.delete(parentId);
+        return next;
+      });
+    }
+    if (node.nodeType !== 'folder') {
+      setActiveNoteId(node.id);
+      setNoteMode('wysiwyg');
+      setDrawerOpen(false);
+    }
+  };
+
+  /** A node plus all its descendants (folders trash/delete their whole subtree). */
+  const collectSubtree = (rootId: string): NoteNode[] => {
+    const all = notesRef.current;
+    const out: NoteNode[] = [];
+    const walk = (id: string) => {
+      const node = all.find((n) => n.id === id);
+      if (!node) return;
+      out.push(node);
+      for (const child of all.filter((n) => n.parentId === id && !n.deleted)) walk(child.id);
+    };
+    walk(rootId);
+    return out;
+  };
+
+  const handleTrashNote = (id: string) => {
+    const subtree = collectSubtree(id).filter((n) => !n.trashed);
+    if (subtree.length === 0) return;
+    const updates = new Map(subtree.map((n) => [n.id, buildUpdated(n, { trashed: true })]));
+    setNotes((prev) => prev.map((n) => updates.get(n.id) ?? n));
+    for (const u of updates.values()) void persistNote(u);
+    setActiveNoteId((cur) => (cur && updates.has(cur) ? null : cur));
+  };
+
+  const handleRestoreNote = (id: string) => {
+    const node = notesRef.current.find((n) => n.id === id);
+    if (!node) return;
+    // Re-parent to root when the original folder is gone or itself trashed.
+    const parent = node.parentId ? notesRef.current.find((n) => n.id === node.parentId) : null;
+    const parentId = parent && !parent.trashed && !parent.deleted ? node.parentId : null;
+    const updated = buildUpdated(node, { trashed: false, parentId });
+    setNotes((prev) => prev.map((n) => (n.id === id ? updated : n)));
+    void persistNote(updated);
+  };
+
+  /** Hard delete: logged-in vaults keep a tombstone for sync; local-only vaults purge. */
+  const handleDeleteForever = async (ids: string[]) => {
+    const k = keysRef.current;
+    if (!k) return;
+    const doomed = new Set(ids.flatMap((id) => collectSubtree(id).map((n) => n.id)));
+    for (const id of doomed) {
+      const node = notesRef.current.find((n) => n.id === id);
+      if (!node) continue;
+      await storage.deleteAttachmentsByNote(id, k.notesKey);
+      if (sessionRef.current) {
+        await storage.saveNote(buildUpdated(node, { deleted: true, title: '', contentMd: '' }), k.notesKey);
+      } else {
+        await storage.deleteNote(id);
+      }
+    }
+    if (!sessionRef.current) await storage.purgeDeleted();
+    setNotes((prev) => prev.filter((n) => !doomed.has(n.id)));
+    setActiveNoteId((cur) => (cur && doomed.has(cur) ? null : cur));
+  };
+
+  const handleEmptyTrash = async () => {
+    await handleDeleteForever(notesRef.current.filter((n) => n.trashed && !n.deleted).map((n) => n.id));
+  };
+
+  const handleMoveNode = async (dragId: string, targetId: string | null, position: TreeDropPosition) => {
+    const prev = notesRef.current;
+    const next = computeTreeMove(prev, dragId, targetId, position);
+    if (!next) return;
+    setNotes(next);
+    for (const n of next) {
+      const old = prev.find((x) => x.id === n.id);
+      if (!old || old.parentId !== n.parentId || old.sortOrder !== n.sortOrder) await persistNote(n);
+    }
+  };
+
+  /** Full notes push+pull against the account (tombstones, conflicts, remote deletes). */
+  const syncNotes = async (derived: VaultKeys, userSession: UserSession) => {
+    if (!notesLoadedRef.current) return;
+    setNotesSyncing(true);
+    try {
+      const client = new SyncClient(new ApiClient(serverUrl(), locale), userSession);
+      const { notes: merged } = await client.syncAll(notesRef.current, derived.notesKey, saveNoteNow, storage);
+      if (keysRef.current === derived) {
+        setNotes(merged);
+        setActiveNoteId((cur) => (cur && merged.some((n) => n.id === cur && !n.trashed) ? cur : null));
+      }
+    } catch (err) {
+      console.warn('[notes] sync failed', err);
+      if (err instanceof ApiAuthError) expireSession();
+      throw err;
+    } finally {
+      setNotesSyncing(false);
+    }
+  };
+
+  const handleNotesSyncClick = () => {
+    const k = keysRef.current;
+    const s = sessionRef.current;
+    if (!k || !s) return;
+    void syncNotes(k, s).catch(() => undefined);
   };
 
   // --- chat / IM logic (a trimmed port of the desktop VaultApp wiring) -----------
@@ -515,12 +744,28 @@ export function MobileApp() {
     void pullPending().catch((err) => console.error('fetchPending failed', err));
   };
 
+  /** Cloud-deleted attachments leave dangling refs inside locally stored messages — strip them
+   *  (local-only rewrite) so the chips disappear instead of erroring on tap. */
+  const stripDeletedAttachmentRefs = (ids: string[], derived: VaultKeys) => {
+    if (ids.length === 0) return;
+    const gone = new Set(ids);
+    setChatMessages((prev) =>
+      prev.map((m) => {
+        if (!m.attachments?.some((a) => gone.has(a.id))) return m;
+        const updated = { ...m, attachments: m.attachments.filter((a) => !gone.has(a.id)) };
+        void storage.saveChatMessage(updated, derived.notesKey);
+        return updated;
+      }),
+    );
+  };
+
   /** Pull the full chat history from the server (messages synced by other devices). */
   const syncChatHistory = async (userSession: UserSession, derived: VaultKeys) => {
     try {
       const client = new SyncClient(new ApiClient(serverUrl(), locale), userSession);
-      const { pulled } = await client.syncChatMessages(storage);
+      const { pulled, deletedAttachmentIds } = await client.syncChatMessages(storage);
       if (pulled > 0 && keysRef.current === derived) await loadChatHistoryFor(derived);
+      if (keysRef.current === derived) stripDeletedAttachmentRefs(deletedAttachmentIds, derived);
       // AI sessions ride the same account sync (encrypted whole-node blobs, LWW).
       const ai = await client.syncAiSessions(storage, derived.notesKey);
       if (ai.pulled > 0 && keysRef.current === derived) {
@@ -540,8 +785,9 @@ export function MobileApp() {
     const s = sessionRef.current;
     if (!k || !s) throw new Error(t('chatPanel.syncNeedsLogin'));
     const client = new SyncClient(new ApiClient(serverUrl(), locale), s);
-    const { pulled } = await client.syncChatMessages(storage);
+    const { pulled, deletedAttachmentIds } = await client.syncChatMessages(storage);
     if (pulled > 0 && keysRef.current === k) await loadChatHistoryFor(k);
+    if (keysRef.current === k) stripDeletedAttachmentRefs(deletedAttachmentIds, k);
   };
 
   const ensureImReady = async (): Promise<IMClient> => {
@@ -634,14 +880,51 @@ export function MobileApp() {
     if (!k) return;
     await storage.deleteChatMessage(messageId, k.notesKey);
     setChatMessages((prev) => prev.filter((m) => m.id !== messageId));
+    // Its attachments became deletion tombstones — push them so cloud copies go away too.
+    scheduleChatPush();
   };
 
-  /** Attachment "download" on mobile: Android share sheet when possible, clipboard-less fallback. */
+  /** Local load with an on-demand cloud fallback: attachment blobs are not bulk-downloaded
+   *  during history sync, so a device that never held the payload fetches it here when the
+   *  user actually opens the attachment. */
+  const loadChatAttachmentWithCloud = async (attachmentId: string) => {
+    const k = keysRef.current;
+    if (!k) return null;
+    const local = await storage.loadChatAttachmentDecrypted(attachmentId, k.notesKey);
+    if (local) return local;
+    const s = sessionRef.current;
+    if (!s) return null;
+    try {
+      const client = new SyncClient(new ApiClient(serverUrl(), locale), s);
+      if (!(await client.fetchChatAttachment(storage, attachmentId))) return null;
+    } catch (err) {
+      console.warn('[chat] on-demand attachment fetch failed', attachmentId, err);
+      if (err instanceof ApiAuthError) expireSession();
+      return null;
+    }
+    return storage.loadChatAttachmentDecrypted(attachmentId, k.notesKey);
+  };
+
+  /** Attachment "download" on mobile: native share sheet (save to Files / send to apps).
+   *  The Android WebView supports neither the Web Share API nor blob-anchor downloads,
+   *  so on-device this must go through the Capacitor Filesystem + Share plugins. */
   const handleChatAttachmentDownload = async (attachmentId: string) => {
     const k = keysRef.current;
     if (!k) return;
-    const loaded = await storage.loadChatAttachmentDecrypted(attachmentId, k.notesKey);
-    if (!loaded) return;
+    const loaded = await loadChatAttachmentWithCloud(attachmentId);
+    if (!loaded) {
+      console.warn('[chat] attachment payload missing locally and in cloud', attachmentId);
+      alert(t('chatPanel.attachmentMissing'));
+      return;
+    }
+    try {
+      if (await exportFileNative(loaded.meta.fileName, loaded.data)) return;
+    } catch (err) {
+      console.error('[chat] native attachment export failed', err);
+      alert(t('mobileApp.attachmentExportFailed'));
+      return;
+    }
+    // Browser (dev) fallback: Web Share if available, else a regular anchor download.
     const mime = loaded.meta.mimeType || 'application/octet-stream';
     const file = new File([loaded.data.slice()], loaded.meta.fileName, { type: mime });
     if (typeof navigator.share === 'function' && navigator.canShare?.({ files: [file] })) {
@@ -661,9 +944,7 @@ export function MobileApp() {
   };
 
   const handleChatAttachmentPreview = async (attachmentId: string): Promise<Blob | null> => {
-    const k = keysRef.current;
-    if (!k) return null;
-    const loaded = await storage.loadChatAttachmentDecrypted(attachmentId, k.notesKey);
+    const loaded = await loadChatAttachmentWithCloud(attachmentId);
     if (!loaded) return null;
     return new Blob([loaded.data.slice()], { type: loaded.meta.mimeType || 'application/octet-stream' });
   };
@@ -677,12 +958,15 @@ export function MobileApp() {
         if (!m.attachments?.some((a) => a.id === attachmentId)) return m;
         const attachments = m.attachments.map((a) => (a.id === attachmentId ? { ...a, description } : a));
         const updated = { ...m, attachments };
-        void storage.saveChatMessage(updated, k.notesKey);
+        void storage.saveChatMessage(updated, k.notesKey, { markPending: true });
         return updated;
       }),
     );
+    scheduleChatPush();
   };
 
+  /** Removes an attachment everywhere: local tombstone → pushed to the cloud → other devices
+   *  purge their copies on the next history sync. */
   const handleChatAttachmentRemove = async (messageId: string, attachmentId: string) => {
     const k = keysRef.current;
     if (!k) return;
@@ -692,10 +976,11 @@ export function MobileApp() {
         if (m.id !== messageId) return m;
         const attachments = m.attachments?.filter((a) => a.id !== attachmentId) ?? [];
         const updated = { ...m, attachments };
-        void storage.saveChatMessage(updated, k.notesKey);
+        void storage.saveChatMessage(updated, k.notesKey, { markPending: true });
         return updated;
       }),
     );
+    scheduleChatPush();
   };
 
   /** Restores a persisted login (if any) after unlock and brings chat online in the background. */
@@ -772,12 +1057,14 @@ export function MobileApp() {
       setVaultListItems((prev) =>
         prev.map((v) => (v.id === activeVaultId ? { ...v, initialized: true, boundUsername: username.trim() } : v)),
       );
-      // Login returns as soon as the message service is connecting; the full history pull
-      // (potentially heavy) rides the on-connect callback in the background.
-      await initIM(derived, userSession);
-      void loadChatHistoryFor(derived);
-      return;
-    }
+    // Login returns as soon as the message service is connecting; the full history pull
+    // (potentially heavy) rides the on-connect callback in the background.
+    await initIM(derived, userSession);
+    void loadChatHistoryFor(derived);
+    // New device: pull the account's notes right after the local (empty) list is ready.
+    void loadNotesFor(derived).then(() => syncNotes(derived, userSession)).catch(() => undefined);
+    return;
+  }
 
     derived = await deriveKeysFromPassword(password, fromBase64(saltB64));
     const verifier = await storage.getMeta(META_KEYS.passwordVerifier);
@@ -806,6 +1093,11 @@ export function MobileApp() {
     // Same as the new-device path: connect fast, sync history in the background on connect.
     await initIM(derived, userSession);
     void loadChatHistoryFor(derived);
+    if (alreadyUnlocked) {
+      void syncNotes(derived, userSession).catch(() => undefined);
+    } else {
+      void loadNotesFor(derived).then(() => syncNotes(derived, userSession)).catch(() => undefined);
+    }
   };
 
   /** Logs out of the cloud account (chat goes offline); the vault stays unlocked. */
@@ -894,6 +1186,53 @@ export function MobileApp() {
     [unreadByPeer],
   );
 
+  const activeNote = useMemo(
+    () => notes.find((n) => n.id === activeNoteId && !n.deleted && !n.trashed) ?? null,
+    [notes, activeNoteId],
+  );
+
+  // Global note search runs as a plain in-memory substring scan: all notes are already decrypted
+  // in state, so no index is needed at mobile scale. The searchable text (tables flattened to
+  // cell text) is precomputed per notes change, not per keystroke.
+  const noteSearchCorpus = useMemo(
+    () =>
+      notes
+        .filter((n) => !n.deleted && !n.trashed && n.nodeType !== 'folder')
+        .map((n) => {
+          const text = n.nodeType === 'table' ? tableToSearchText(parseTableDocument(n.contentMd, locale)) : n.contentMd;
+          return {
+            id: n.id,
+            title: n.title,
+            nodeType: n.nodeType,
+            text,
+            titleLower: n.title.toLowerCase(),
+            textLower: text.toLowerCase(),
+          };
+        }),
+    [notes, locale],
+  );
+
+  const noteSearchResults = useMemo(() => {
+    const q = noteSearch.trim().toLowerCase();
+    if (!q) return null;
+    const out: { id: string; title: string; nodeType: NodeType; snippet: string }[] = [];
+    for (const item of noteSearchCorpus) {
+      const inTitle = item.titleLower.includes(q);
+      const idx = item.textLower.indexOf(q);
+      if (!inTitle && idx < 0) continue;
+      let snippet = '';
+      if (idx >= 0) {
+        const start = Math.max(0, idx - 24);
+        const end = Math.min(item.text.length, idx + q.length + 48);
+        snippet =
+          (start > 0 ? '…' : '') + item.text.slice(start, end).replace(/\s+/g, ' ').trim() + (end < item.text.length ? '…' : '');
+      }
+      out.push({ id: item.id, title: item.title, nodeType: item.nodeType, snippet });
+      if (out.length >= 50) break;
+    }
+    return out;
+  }, [noteSearch, noteSearchCorpus]);
+
   const handleCreateVault = async (password: string) => {
     const salt = generateSalt();
     await storage.setMeta(META_KEYS.salt, toBase64(salt));
@@ -906,6 +1245,7 @@ export function MobileApp() {
     setKeys(derived);
     setIsFirstRun(false);
     setVaultListItems((prev) => prev.map((v) => (v.id === activeVaultId ? { ...v, initialized: true } : v)));
+    void loadNotesFor(derived);
   };
 
   const handleUnlockLocal = async (password: string) => {
@@ -920,7 +1260,13 @@ export function MobileApp() {
     masterPasswordRef.current = password;
     await loadAiState(derived);
     setKeys(derived);
+    // restoreChatAfterUnlock restores the session synchronously first, so the notes loader
+    // (and its purge-vs-sync decision) sees the correct logged-in state.
     restoreChatAfterUnlock(derived);
+    void loadNotesFor(derived).then(() => {
+      const s = sessionRef.current;
+      if (s) void syncNotes(derived, s).catch(() => undefined);
+    });
   };
 
   /** Fingerprint unlock: BiometricPrompt-gated Keystore read of the master password, then the
@@ -988,6 +1334,15 @@ export function MobileApp() {
       clearTimeout(aiPushTimerRef.current);
       aiPushTimerRef.current = null;
     }
+    if (noteSaveTimerRef.current) {
+      clearTimeout(noteSaveTimerRef.current);
+      noteSaveTimerRef.current = null;
+    }
+    // Flush the debounced note save so locking within 500ms of typing loses nothing.
+    if (pendingNoteSaveRef.current && keysRef.current) {
+      void storage.saveNote(pendingNoteSaveRef.current, keysRef.current.notesKey);
+      pendingNoteSaveRef.current = null;
+    }
     imRef.current?.disconnect();
     imRef.current = null;
     keysRef.current = null;
@@ -1005,6 +1360,13 @@ export function MobileApp() {
     setActivePeerName(null);
     setUnreadByPeer({});
     setImConnected(false);
+    setNotes([]);
+    notesLoadedRef.current = false;
+    setNotesLoading(false);
+    setActiveNoteId(null);
+    setNoteMode('wysiwyg');
+    setCollapsedFolderIds(new Set());
+    setNoteSearch('');
     setView('ai');
     setDrawerOpen(false);
     setSettingsOpen(false);
@@ -1419,11 +1781,25 @@ export function MobileApp() {
               ? (activePeerName ?? t('mobileApp.chat'))
               : view === 'tools'
                 ? t('vaultApp.navTools')
-                : activeAiSession
-                  ? activeAiSession.title
-                  : t('aiPanel.title')}
+                : view === 'notes'
+                  ? (activeNote?.title ?? t('vaultApp.navNotes'))
+                  : activeAiSession
+                    ? activeAiSession.title
+                    : t('aiPanel.title')}
           </div>
           <div className="fn-mobile__header-actions">
+            <button
+              type="button"
+              className={`fn-mobile__header-btn${view === 'notes' ? ' fn-mobile__header-btn--active' : ''}`}
+              title={t('vaultApp.navNotes')}
+              onClick={() => {
+                setView((v) => (v === 'notes' ? 'ai' : 'notes'));
+                // Opening the notes view with nothing selected drops straight into the tree.
+                setDrawerOpen(view !== 'notes' && !activeNoteId);
+              }}
+            >
+              📝
+            </button>
             <button
               type="button"
               className={`fn-mobile__header-btn${view === 'chat' ? ' fn-mobile__header-btn--active' : ''}`}
@@ -1484,6 +1860,55 @@ export function MobileApp() {
             />
           ) : view === 'tools' ? (
             <ToolsPanel tool={activeTool} />
+          ) : view === 'notes' ? (
+            activeNote ? (
+              activeNote.nodeType === 'table' ? (
+                <div className="fn-mobile__note-pane fn-mobile__note-pane--table">
+                  <TableEditor
+                    key={activeNote.id}
+                    document={parseTableDocument(activeNote.contentMd, locale)}
+                    onChange={(doc) => updateNoteById(activeNote.id, { contentMd: serializeTable(doc) })}
+                  />
+                </div>
+              ) : (
+                <div className="fn-mobile__note-pane">
+                  <div className="fn-mobile__note-controls">
+                    <button
+                      type="button"
+                      className={noteMode === 'wysiwyg' ? 'fn-mobile__note-mode--active' : ''}
+                      onClick={() => setNoteMode('wysiwyg')}
+                    >
+                      {t('vaultApp.modeWysiwyg')}
+                    </button>
+                    <button
+                      type="button"
+                      className={noteMode === 'source' ? 'fn-mobile__note-mode--active' : ''}
+                      onClick={() => setNoteMode('source')}
+                    >
+                      {t('vaultApp.modeSource')}
+                    </button>
+                  </div>
+                  <div className="fn-mobile__note-scroll">
+                    <NoteEditor
+                      key={activeNote.id}
+                      noteId={activeNote.id}
+                      mode={noteMode}
+                      content={activeNote.contentMd}
+                      onChange={(md) => updateNoteById(activeNote.id, { contentMd: md })}
+                    />
+                  </div>
+                </div>
+              )
+            ) : (
+              <div className="fn-mobile__empty">
+                <p>{notesLoading ? t('vaultApp.loading') : t('mobileApp.noNote')}</p>
+                {!notesLoading && (
+                  <button type="button" onClick={() => setDrawerOpen(true)}>
+                    {t('mobileApp.openNoteList')}
+                  </button>
+                )}
+              </div>
+            )
           ) : activeAiSession ? (
             <AiWorkbench
               session={activeAiSession}
@@ -1527,9 +1952,142 @@ export function MobileApp() {
                   ? t('mobileApp.chat')
                   : view === 'tools'
                     ? t('vaultApp.navTools')
-                    : t('aiPanel.title')}
+                    : view === 'notes'
+                      ? t('vaultApp.navNotes')
+                      : t('aiPanel.title')}
               </div>
-              {view === 'tools' ? (
+              {view === 'notes' ? (
+                <div className="fn-mobile__notes-drawer">
+                  <div className="fn-mobile__notes-search">
+                    <input
+                      type="search"
+                      value={noteSearch}
+                      placeholder={t('vaultApp.searchPlaceholder')}
+                      onChange={(e) => setNoteSearch(e.target.value)}
+                    />
+                    {noteSearch && (
+                      <button type="button" aria-label="clear" onClick={() => setNoteSearch('')}>
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                  {noteSearchResults !== null ? (
+                    noteSearchResults.length === 0 ? (
+                      <div className="fn-mobile__search-empty">{t('vaultApp.noResults')}</div>
+                    ) : (
+                      <ul className="fn-mobile__search-results">
+                        {noteSearchResults.map((r) => (
+                          <li key={r.id}>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActiveNoteId(r.id);
+                                setNoteMode('wysiwyg');
+                                setNoteSearch('');
+                                setDrawerOpen(false);
+                              }}
+                            >
+                              <span className="fn-mobile__search-title">
+                                {r.nodeType === 'table' ? '📊' : '📝'}{' '}
+                                {r.title ||
+                                  (r.nodeType === 'table' ? t('noteTree.untitledTable') : t('noteTree.untitledNote'))}
+                              </span>
+                              {r.snippet && <span className="fn-mobile__search-snippet">{r.snippet}</span>}
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )
+                  ) : (
+                    <>
+                  <div className="fn-mobile__notes-actions">
+                    <button type="button" onClick={() => void handleCreateNode('note', null)}>
+                      {t('vaultApp.newNote')}
+                    </button>
+                    <button type="button" onClick={() => void handleCreateNode('table', null)}>
+                      {t('vaultApp.newTable')}
+                    </button>
+                    <button type="button" onClick={() => void handleCreateNode('folder', null)}>
+                      {t('vaultApp.newFolder')}
+                    </button>
+                    <button
+                      type="button"
+                      title={t('treeToolbar.expandAll')}
+                      onClick={() => setCollapsedFolderIds(new Set())}
+                    >
+                      ⊞
+                    </button>
+                    <button
+                      type="button"
+                      title={t('treeToolbar.collapseAll')}
+                      onClick={() =>
+                        setCollapsedFolderIds(
+                          new Set(
+                            notesRef.current
+                              .filter((n) => n.nodeType === 'folder' && !n.deleted && !n.trashed)
+                              .map((n) => n.id),
+                          ),
+                        )
+                      }
+                    >
+                      ⊟
+                    </button>
+                    {session && (
+                      <button
+                        type="button"
+                        disabled={notesSyncing}
+                        title={t('settingsModal.syncNow')}
+                        onClick={handleNotesSyncClick}
+                      >
+                        {notesSyncing ? t('vaultApp.syncing') : '⟳'}
+                      </button>
+                    )}
+                  </div>
+                  <NoteTree
+                    notes={notes}
+                    activeId={activeNoteId}
+                    collapsedIds={collapsedFolderIds}
+                    onToggleCollapse={(id) =>
+                      setCollapsedFolderIds((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(id)) next.delete(id);
+                        else next.add(id);
+                        return next;
+                      })
+                    }
+                    onSelect={(id) => {
+                      const node = notesRef.current.find((n) => n.id === id);
+                      if (!node) return;
+                      // Folder taps toggle expand/collapse — the dedicated chevron is a small
+                      // touch target, and folders have nothing to "open" on mobile anyway.
+                      if (node.nodeType === 'folder') {
+                        setCollapsedFolderIds((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(id)) next.delete(id);
+                          else next.add(id);
+                          return next;
+                        });
+                        return;
+                      }
+                      setActiveNoteId(id);
+                      setNoteMode('wysiwyg');
+                      setDrawerOpen(false);
+                    }}
+                    onCreateFolder={(parentId) => void handleCreateNode('folder', parentId)}
+                    onCreateNote={(parentId) => void handleCreateNode('note', parentId)}
+                    onCreateTable={(parentId) => void handleCreateNode('table', parentId)}
+                    onRename={(id, title) => updateNoteById(id, { title })}
+                    onDelete={handleTrashNote}
+                    onMove={(dragId, targetId, position) => void handleMoveNode(dragId, targetId, position)}
+                    onRestore={handleRestoreNote}
+                    onDeleteForever={(id) => void handleDeleteForever([id])}
+                    onEmptyTrash={() => void handleEmptyTrash()}
+                    showSyncStatus={!!session}
+                  />
+                    </>
+                  )}
+                </div>
+              ) : view === 'tools' ? (
                 <ToolsSidebar
                   active={activeTool}
                   onSelect={(id) => {

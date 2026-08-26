@@ -50,6 +50,19 @@ export interface ChatBlobRecord {
   updated_at: string;
 }
 
+/** A durable per-account copy of one chat attachment blob (meta + data encrypted client-side).
+ * Deletions keep a tombstone with the ciphertexts cleared so other devices can purge their
+ * local copies on the next sync. */
+export interface ChatAttachmentBlobRecord {
+  attachment_id: string;
+  message_id: string;
+  peer_id: string;
+  meta_ciphertext: string;
+  data_ciphertext: string;
+  deleted: number;
+  updated_at: string;
+}
+
 /** A durable per-account copy of one AI Workbench session/folder as an opaque encrypted blob,
  * merged across devices with last-writer-wins on `updated_at` (tombstones for deletions). */
 export interface AiBlobRecord {
@@ -65,11 +78,20 @@ interface RelayData {
   attachment_blobs: Array<AttachmentBlobRecord & { user_id: string }>;
   message_queue: MessageQueueRecord[];
   chat_blobs: Array<ChatBlobRecord & { user_id: string }>;
+  chat_attachment_blobs: Array<ChatAttachmentBlobRecord & { user_id: string }>;
   ai_blobs: Array<AiBlobRecord & { user_id: string }>;
 }
 
 function emptyData(): RelayData {
-  return { users: [], note_blobs: [], attachment_blobs: [], message_queue: [], chat_blobs: [], ai_blobs: [] };
+  return {
+    users: [],
+    note_blobs: [],
+    attachment_blobs: [],
+    message_queue: [],
+    chat_blobs: [],
+    chat_attachment_blobs: [],
+    ai_blobs: [],
+  };
 }
 
 export class JsonRelayStore {
@@ -93,6 +115,7 @@ export class JsonRelayStore {
         attachment_blobs: parsed.attachment_blobs ?? [],
         message_queue: parsed.message_queue ?? [],
         chat_blobs: parsed.chat_blobs ?? [],
+        chat_attachment_blobs: parsed.chat_attachment_blobs ?? [],
         ai_blobs: parsed.ai_blobs ?? [],
       };
     } catch {
@@ -129,12 +152,20 @@ export class JsonRelayStore {
       this.data.attachment_blobs.length === 0 &&
       this.data.message_queue.length === 0 &&
       this.data.chat_blobs.length === 0 &&
+      this.data.chat_attachment_blobs.length === 0 &&
       this.data.ai_blobs.length === 0
     );
   }
 
-  importAll(data: Omit<RelayData, 'ai_blobs'> & Partial<Pick<RelayData, 'ai_blobs'>>): void {
-    this.data = { ...data, ai_blobs: data.ai_blobs ?? [] };
+  importAll(
+    data: Omit<RelayData, 'ai_blobs' | 'chat_attachment_blobs'> &
+      Partial<Pick<RelayData, 'ai_blobs' | 'chat_attachment_blobs'>>,
+  ): void {
+    this.data = {
+      ...data,
+      ai_blobs: data.ai_blobs ?? [],
+      chat_attachment_blobs: data.chat_attachment_blobs ?? [],
+    };
     this.writeNow();
   }
 
@@ -318,6 +349,65 @@ export class JsonRelayStore {
     return this.data.chat_blobs
       .filter((c) => c.user_id === userId)
       .map(({ user_id: _uid, ...rest }) => rest);
+  }
+
+  /** LWW upsert on `updated_at`; deletions clear the ciphertexts but keep the tombstone row. */
+  upsertChatAttachment(
+    userId: string,
+    attachmentId: string,
+    messageId: string,
+    peerId: string,
+    metaCiphertext: string,
+    dataCiphertext: string,
+    deleted: boolean,
+    updatedAt: string,
+  ): void {
+    const meta = deleted ? '' : metaCiphertext;
+    const data = deleted ? '' : dataCiphertext;
+    const existing = this.data.chat_attachment_blobs.find(
+      (a) => a.user_id === userId && a.attachment_id === attachmentId,
+    );
+    if (existing) {
+      if (updatedAt < existing.updated_at) return;
+      // A deletion is final — never resurrect a tombstone with a late blob re-upload.
+      if (existing.deleted === 1 && !deleted) return;
+      existing.message_id = messageId;
+      existing.peer_id = peerId;
+      existing.meta_ciphertext = meta;
+      existing.data_ciphertext = data;
+      existing.deleted = deleted ? 1 : 0;
+      existing.updated_at = updatedAt;
+    } else {
+      this.data.chat_attachment_blobs.push({
+        user_id: userId,
+        attachment_id: attachmentId,
+        message_id: messageId,
+        peer_id: peerId,
+        meta_ciphertext: meta,
+        data_ciphertext: data,
+        deleted: deleted ? 1 : 0,
+        updated_at: updatedAt,
+      });
+    }
+    this.scheduleSave();
+  }
+
+  getChatAttachment(userId: string, attachmentId: string): ChatAttachmentBlobRecord | undefined {
+    const row = this.data.chat_attachment_blobs.find(
+      (a) => a.user_id === userId && a.attachment_id === attachmentId,
+    );
+    if (!row) return undefined;
+    const { user_id: _uid, ...rest } = row;
+    return rest;
+  }
+
+  /** Meta-only list (ciphertext payloads stripped) — used for deletion propagation. */
+  listChatAttachmentsMeta(
+    userId: string,
+  ): Array<Omit<ChatAttachmentBlobRecord, 'meta_ciphertext' | 'data_ciphertext'>> {
+    return this.data.chat_attachment_blobs
+      .filter((a) => a.user_id === userId)
+      .map(({ user_id: _uid, meta_ciphertext: _m, data_ciphertext: _d, ...rest }) => rest);
   }
 
   /** LWW upsert: a push older than what's stored is ignored (a later pull supplies the newer copy). */
