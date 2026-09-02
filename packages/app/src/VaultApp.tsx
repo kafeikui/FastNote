@@ -50,7 +50,11 @@ import {
   loadRecentNoteIds,
   saveRecentNoteIds,
   RECENT_NOTES_STORED_MAX,
-  RECENT_NOTES_SHOWN_MAX,
+  RECENT_NOTES_LIMIT_OPTIONS,
+  loadRecentPanelOpen,
+  saveRecentPanelOpen,
+  loadRecentNotesLimit,
+  saveRecentNotesLimit,
   loadTabState,
   saveTabState,
   defaultTabState,
@@ -300,6 +304,9 @@ export function VaultApp() {
   const [appView, setAppView] = useState<AppView>('notes');
   const [activeTool, setActiveTool] = useState<ToolId>('password');
   const [searchQuery, setSearchQuery] = useState('');
+  // Bumped on each global-search result click; tells the opened editor to scroll to the first
+  // match of the global query (which stays highlighted independently of the find bar).
+  const [globalHighlightNonce, setGlobalHighlightNonce] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
   const [showAuth, setShowAuth] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
@@ -416,8 +423,11 @@ export function VaultApp() {
   const aiPanelHeightRef = useRef(aiPanelHeight);
   aiPanelHeightRef.current = aiPanelHeight;
   const notesSidebarRef = useRef<HTMLDivElement | null>(null);
-  // Recently opened/edited notes (most recent first); rendered above the tree, capped at 10.
+  // Recently opened/edited notes (most recent first); rendered above the tree.
   const [recentNoteIds, setRecentNoteIds] = useState<string[]>(() => loadRecentNoteIds());
+  const [recentPanelOpen, setRecentPanelOpen] = useState<boolean>(() => loadRecentPanelOpen());
+  // How many recents to show (3/5/10), user-adjustable from the panel header.
+  const [recentLimit, setRecentLimit] = useState<number>(() => loadRecentNotesLimit());
   // Sidebar multi-selection (Ctrl/Shift+click). The anchor is the row a Shift-range extends from.
   const [treeSelectedIds, setTreeSelectedIds] = useState<Set<string>>(() => new Set());
   const treeAnchorIdRef = useRef<string | null>(null);
@@ -2122,10 +2132,10 @@ export function VaultApp() {
       const n = byId.get(id);
       if (!n || n.deleted || n.trashed || n.nodeType === 'folder') continue;
       out.push(n);
-      if (out.length >= RECENT_NOTES_SHOWN_MAX) break;
+      if (out.length >= recentLimit) break;
     }
     return out;
-  }, [notes, recentNoteIds]);
+  }, [notes, recentNoteIds, recentLimit]);
 
   const revealNoteInTree = useCallback(
     (id: string) => {
@@ -3508,9 +3518,10 @@ export function VaultApp() {
   }, [searchQuery, searchTick, notes]);
 
   /**
-   * After a global-search result is opened: switch that note's group to the source view and open
-   * the find bar pre-filled with the query, so the keyword is highlighted and jumped to. Runs on
-   * the next tick so openNote's state updates have landed and the group can be resolved.
+   * After a global-search result is opened: switch that note's group to the source view and jump
+   * to the first match of the query. VSCode style — the global query only drives its own
+   * highlight layer inside the editor; the note-level find bar (and its query) is left alone.
+   * Runs on the next tick so openNote's state updates have landed and the group can be resolved.
    */
   const locateNoteInSource = (noteId: string, query: string) => {
     const q = query.trim();
@@ -3523,9 +3534,7 @@ export function VaultApp() {
       setEditorModeByGroup((prev) =>
         prev[group.id] === 'source' ? prev : { ...prev, [group.id]: 'source' },
       );
-      setFindInitialQuery(q);
-      setFindBarNonce((n) => n + 1);
-      setFindBarGroupId(group.id);
+      setGlobalHighlightNonce((n) => n + 1);
     }, 0);
   };
 
@@ -3950,6 +3959,8 @@ export function VaultApp() {
                   onRegisterSelectAll={(fn) => {
                     selectAllByGroupRef.current[group.id] = fn;
                   }}
+                  globalHighlightQuery={searchQuery}
+                  globalHighlightNonce={globalHighlightNonce}
                   attachments={isFocused ? attachments : []}
                   onAttachmentDownload={handleAttachmentDownload}
                   onAttachmentEdit={handleAttachmentEdit}
@@ -4142,14 +4153,13 @@ export function VaultApp() {
                   <li key={r.id}>
                     <button
                       type="button"
-                      className="fn-search-result"
+                      className={`fn-search-result${r.id === activeId ? ' fn-search-result--active' : ''}`}
                       onClick={() => {
-                        const q = searchQuery;
+                        // VSCode style: the results list stays put (the query is not cleared), so
+                        // the user can walk through several results one after another.
                         openNote(r.id);
-                        setExpandedSearch(false);
-                        setSearchQuery('');
                         revealNoteInTree(r.id);
-                        locateNoteInSource(r.id, q);
+                        locateNoteInSource(r.id, searchQuery);
                       }}
                     >
                       <span className="fn-search-result__title">{r.title || t('common.untitled')}</span>
@@ -4199,29 +4209,62 @@ export function VaultApp() {
               )}
               {recentItems.length > 0 && (
                 <div className="fn-recent-panel">
-                  <div className="fn-recent-panel__title">{t('vaultApp.recentNotes')}</div>
-                  <ul className="fn-recent-panel__list">
-                    {recentItems.map((n) => (
-                      <li key={n.id}>
-                        <button
-                          type="button"
-                          className={`fn-recent-panel__item${n.id === activeId ? ' fn-recent-panel__item--active' : ''}`}
-                          title={n.title || t('noteTree.untitledNote')}
-                          onClick={() => {
-                            openNote(n.id);
-                            revealNoteInTree(n.id);
-                          }}
-                          onDoubleClick={() => openNote(n.id, { pin: true })}
-                        >
-                          <span className="fn-recent-panel__icon">{n.nodeType === 'table' ? '📊' : '📝'}</span>
-                          <span className="fn-recent-panel__text">
-                            {n.title ||
-                              (n.nodeType === 'table' ? t('noteTree.untitledTable') : t('noteTree.untitledNote'))}
-                          </span>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
+                  <div className="fn-recent-panel__head">
+                    <button
+                      type="button"
+                      className="fn-recent-panel__title"
+                      onClick={() => {
+                        setRecentPanelOpen((open) => {
+                          saveRecentPanelOpen(!open);
+                          return !open;
+                        });
+                      }}
+                    >
+                      <span className="fn-ai-panel__chevron">{recentPanelOpen ? '▾' : '▸'}</span>
+                      {t('vaultApp.recentNotes')}
+                    </button>
+                    {recentPanelOpen && (
+                      <span className="fn-recent-panel__limits">
+                        {RECENT_NOTES_LIMIT_OPTIONS.map((n) => (
+                          <button
+                            key={n}
+                            type="button"
+                            className={`fn-recent-panel__limit${n === recentLimit ? ' fn-recent-panel__limit--on' : ''}`}
+                            onClick={() => {
+                              setRecentLimit(n);
+                              saveRecentNotesLimit(n);
+                            }}
+                          >
+                            {n}
+                          </button>
+                        ))}
+                      </span>
+                    )}
+                  </div>
+                  {recentPanelOpen && (
+                    <ul className="fn-recent-panel__list">
+                      {recentItems.map((n) => (
+                        <li key={n.id}>
+                          <button
+                            type="button"
+                            className={`fn-recent-panel__item${n.id === activeId ? ' fn-recent-panel__item--active' : ''}`}
+                            title={n.title || t('noteTree.untitledNote')}
+                            onClick={() => {
+                              openNote(n.id);
+                              revealNoteInTree(n.id);
+                            }}
+                            onDoubleClick={() => openNote(n.id, { pin: true })}
+                          >
+                            <span className="fn-recent-panel__icon">{n.nodeType === 'table' ? '📊' : '📝'}</span>
+                            <span className="fn-recent-panel__text">
+                              {n.title ||
+                                (n.nodeType === 'table' ? t('noteTree.untitledTable') : t('noteTree.untitledNote'))}
+                            </span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               )}
               <div className="fn-notes-sidebar__tree">

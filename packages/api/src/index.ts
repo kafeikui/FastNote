@@ -890,6 +890,28 @@ function recentNoteIdsKey(namespace?: string): string {
 export const RECENT_NOTES_STORED_MAX = 30;
 export const RECENT_NOTES_SHOWN_MAX = 10;
 
+// Recent-notes panel UI prefs (global like the AI panel's, not per-vault).
+const RECENT_PANEL_OPEN_KEY = "fastnote_recent_panel_open";
+const RECENT_NOTES_LIMIT_KEY = "fastnote_recent_notes_limit";
+export const RECENT_NOTES_LIMIT_OPTIONS = [3, 5, 10] as const;
+
+export function loadRecentPanelOpen(): boolean {
+  return localStorage.getItem(RECENT_PANEL_OPEN_KEY) !== "0";
+}
+
+export function saveRecentPanelOpen(open: boolean): void {
+  localStorage.setItem(RECENT_PANEL_OPEN_KEY, open ? "1" : "0");
+}
+
+export function loadRecentNotesLimit(): number {
+  const n = Number(localStorage.getItem(RECENT_NOTES_LIMIT_KEY));
+  return (RECENT_NOTES_LIMIT_OPTIONS as readonly number[]).includes(n) ? n : RECENT_NOTES_SHOWN_MAX;
+}
+
+export function saveRecentNotesLimit(limit: number): void {
+  localStorage.setItem(RECENT_NOTES_LIMIT_KEY, String(limit));
+}
+
 export function loadRecentNoteIds(namespace?: string): string[] {
   try {
     const raw = localStorage.getItem(recentNoteIdsKey(namespace));

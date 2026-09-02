@@ -5,8 +5,17 @@ import Placeholder from '@tiptap/extension-placeholder';
 import { Mathematics } from '@tiptap/extension-mathematics';
 import { Markdown } from '@tiptap/markdown';
 import { Marked, marked as markedGlobal } from 'marked';
-import { EditorView, keymap, rectangularSelection } from '@codemirror/view';
-import { Compartment, Prec } from '@codemirror/state';
+import {
+  Decoration,
+  EditorView,
+  MatchDecorator,
+  ViewPlugin,
+  keymap,
+  rectangularSelection,
+  type DecorationSet,
+  type ViewUpdate,
+} from '@codemirror/view';
+import { Compartment, Prec, type Extension as CmExtension } from '@codemirror/state';
 import { deleteLine, indentWithTab } from '@codemirror/commands';
 import {
   search as cmSearch,
@@ -35,7 +44,7 @@ import { useT } from '@fastnote/i18n';
 import { AttachmentRef } from './AttachmentRefExtension';
 import { EnhancedCodeBlock } from './CodeBlockExtension';
 import { LineEditing } from './LineEditingExtension';
-import { FindReplace, findReplacePluginKey } from './FindReplaceExtension';
+import { FindReplace, findReplacePluginKey, GlobalHighlight, globalHighlightPluginKey } from './FindReplaceExtension';
 import { serializeDocJsonToMarkdown } from './markdownSerialize';
 import { normalizeLatexDelimiters } from '@fastnote/shared';
 import { preserveBlankLines } from './blankLines';
@@ -75,6 +84,13 @@ export interface NoteEditorProps {
   showLineNumbers?: boolean;
   /** Source mode: wrap long lines (on by default). Off = horizontal scrollbar on overflow. */
   sourceWrap?: boolean;
+  /**
+   * Global full-text search query (sidebar search). Highlighted in both views with its own color,
+   * independent of (and concurrently with) the find/replace bar's highlights.
+   */
+  globalHighlightQuery?: string;
+  /** Bump to scroll to the first global-search match (each search-result click bumps it). */
+  globalHighlightNonce?: number;
   /** Off by default: KaTeX parsing/rendering can be slow on very long documents. */
   enableMath?: boolean;
   /**
@@ -88,6 +104,44 @@ export interface NoteEditorProps {
 
 function getMarkdown(editor: NonNullable<ReturnType<typeof useEditor>>): string {
   return serializeDocJsonToMarkdown(editor.getJSON());
+}
+
+/**
+ * CodeMirror extension marking every occurrence of `query` (case-insensitive) with `className`.
+ * When `markCurrent` is set, the occurrence that exactly matches the main selection additionally
+ * gets `${className}--current` — the find controller navigates by moving the selection, so this
+ * is what makes the current match stand out from the rest.
+ *
+ * MatchDecorator matches line by line, so multi-line queries get no bulk highlight (find
+ * navigation still works for them — it runs on @codemirror/search's own cursor).
+ */
+function queryHighlighter(query: string, className: string, markCurrent = false): CmExtension {
+  const q = query.trim();
+  if (!q || q.includes('\n')) return [];
+  const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const decorator = new MatchDecorator({
+    regexp: new RegExp(escaped, 'gi'),
+    decorate: (add, from, to, _match, view) => {
+      const sel = view.state.selection.main;
+      const isCurrent = markCurrent && sel.from === from && sel.to === to;
+      add(from, to, Decoration.mark({ class: isCurrent ? `${className} ${className}--current` : className }));
+    },
+  });
+  return ViewPlugin.fromClass(
+    class {
+      decorations: DecorationSet;
+      constructor(view: EditorView) {
+        this.decorations = decorator.createDeco(view);
+      }
+      update(update: ViewUpdate) {
+        // Selection moves must rebuild (not remap) so the `--current` class follows the match
+        // under the new selection.
+        if (markCurrent && update.selectionSet) this.decorations = decorator.createDeco(update.view);
+        else this.decorations = decorator.updateDeco(update, this.decorations);
+      }
+    },
+    { decorations: (v) => v.decorations },
+  );
 }
 
 export function NoteEditor({
@@ -108,6 +162,8 @@ export function NoteEditor({
   placeholder,
   showLineNumbers = true,
   sourceWrap = true,
+  globalHighlightQuery = '',
+  globalHighlightNonce = 0,
   enableMath = false,
   externalContentNonce = 0,
 }: NoteEditorProps) {
@@ -120,6 +176,13 @@ export function NoteEditor({
   const wrapCompartment = useRef(new Compartment());
   const sourceWrapRef = useRef(sourceWrap);
   sourceWrapRef.current = sourceWrap;
+  // Two independent highlight layers in source mode: the global-search query and the find bar's
+  // query, each a Compartment so query changes reconfigure the live view in place.
+  const globalHlCompartment = useRef(new Compartment());
+  const findHlCompartment = useRef(new Compartment());
+  const globalHighlightQueryRef = useRef(globalHighlightQuery);
+  globalHighlightQueryRef.current = globalHighlightQuery;
+  const globalNonceHandledRef = useRef(globalHighlightNonce);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
   const modeRef = useRef(mode);
@@ -160,6 +223,7 @@ export function NoteEditor({
     EnhancedCodeBlock,
     LineEditing,
     FindReplace,
+    GlobalHighlight,
     Link.configure({
       openOnClick: false,
       autolink: false,
@@ -326,6 +390,13 @@ export function NoteEditor({
     };
   }, [editor, mode]);
 
+  // Render-mode global-search highlight: its own plugin layer, so it coexists with (and colors
+  // differently from) the find/replace bar's highlights.
+  useEffect(() => {
+    if (!editor || mode !== 'wysiwyg' || editor.isDestroyed) return;
+    editor.view.dispatch(editor.state.tr.setMeta(globalHighlightPluginKey, { query: globalHighlightQuery.trim() }));
+  }, [editor, mode, globalHighlightQuery]);
+
   // Render-mode find/replace: driven by the ProseMirror plugin in FindReplaceExtension, which
   // owns match computation and highlight decorations.
   useEffect(() => {
@@ -491,6 +562,8 @@ export function NoteEditor({
         // the same via Alt+drag; this only adds the middle-button trigger.
         rectangularSelection({ eventFilter: (e) => e.button === 1 }),
         wrapCompartment.current.of(sourceWrapRef.current ? EditorView.lineWrapping : []),
+        globalHlCompartment.current.of(queryHighlighter(globalHighlightQueryRef.current, 'cm-fn-global-match')),
+        findHlCompartment.current.of([]),
         markdown(),
         // Provides the search state used by the shared find/replace bar (driven programmatically
         // below — CodeMirror's own panel stays hidden).
@@ -542,9 +615,16 @@ export function NoteEditor({
 
       const applyQuery = (query: string, replacement: string) => {
         cmView.current?.dispatch({
-          effects: setSearchQuery.of(
-            new SearchQuery({ search: query, replace: replacement, caseSensitive: false }),
-          ),
+          effects: [
+            setSearchQuery.of(
+              new SearchQuery({ search: query, replace: replacement, caseSensitive: false }),
+            ),
+            // @codemirror/search only paints .cm-searchMatch decorations while its own panel is
+            // open (this app drives it panel-less), so matches used to show up only as the faint
+            // selection-match tint. Paint them explicitly instead, with the current match (the
+            // one under the selection) getting a stronger --current class.
+            findHlCompartment.current.reconfigure(queryHighlighter(query, 'cm-fn-find-match', true)),
+          ],
         });
       };
 
@@ -636,6 +716,31 @@ export function NoteEditor({
       effects: wrapCompartment.current.reconfigure(sourceWrap ? EditorView.lineWrapping : []),
     });
   }, [sourceWrap, mode]);
+
+  useEffect(() => {
+    if (mode !== 'source' || !cmView.current) return;
+    cmView.current.dispatch({
+      effects: globalHlCompartment.current.reconfigure(
+        queryHighlighter(globalHighlightQuery, 'cm-fn-global-match'),
+      ),
+    });
+  }, [globalHighlightQuery, mode, noteId]);
+
+  // Scroll to the first global-search match. Only on explicit nonce bumps (search-result clicks),
+  // never on plain tab switches — hence the handled-nonce ref rather than plain deps.
+  useEffect(() => {
+    if (globalHighlightNonce === globalNonceHandledRef.current) return;
+    globalNonceHandledRef.current = globalHighlightNonce;
+    const view = cmView.current;
+    const q = globalHighlightQuery.trim().toLowerCase();
+    if (mode !== 'source' || !view || !q) return;
+    const idx = view.state.doc.toString().toLowerCase().indexOf(q);
+    if (idx < 0) return;
+    view.dispatch({
+      selection: { anchor: idx, head: idx + q.length },
+      effects: EditorView.scrollIntoView(idx, { y: 'center' }),
+    });
+  }, [globalHighlightNonce, globalHighlightQuery, mode, noteId]);
 
   useEffect(() => {
     if (mode !== 'source' || !cmView.current) return;

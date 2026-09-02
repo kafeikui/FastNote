@@ -2002,6 +2002,12 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   line-height: 1.35;
 }
 
+/* The result whose note is currently open (the list stays visible after a click). */
+.fn-search-result--active {
+  background: var(--accent-soft);
+  border-radius: 6px;
+}
+
 /*
  * The wrap is the table's own scroll container (both axes): a bounded height makes the sticky
  * header row actually stick, and styling ::-webkit-scrollbar opts out of macOS overlay
@@ -3828,6 +3834,30 @@ mark.fn-ai-find-mark--current {
   outline: 1px solid rgba(230, 126, 0, 0.9);
 }
 
+/* Global full-text search highlights (blue) — deliberately a different hue from the yellow/orange
+   find-bar matches so both can be told apart when active at the same time. */
+.fn-global-match,
+.cm-fn-global-match {
+  background: rgba(59, 130, 246, 0.28);
+  outline: 1px solid rgba(59, 130, 246, 0.55);
+  border-radius: 2px;
+}
+
+/* Source-mode find-bar highlights. @codemirror/search's own .cm-searchMatch decorations only
+   render while its panel is open (we drive it panel-less), so the editor paints these itself;
+   they intentionally mirror the render-mode .fn-find-match colors but stronger, since syntax
+   coloring in source view competes for attention. */
+.cm-fn-find-match {
+  background: rgba(255, 213, 79, 0.55);
+  outline: 1px solid rgba(212, 160, 23, 0.75);
+  border-radius: 2px;
+}
+
+.cm-fn-find-match--current {
+  background: rgba(255, 152, 0, 0.8);
+  outline: 2px solid rgba(230, 126, 0, 1);
+}
+
 /* ---------------------------------------------------------------------------
  * AI Workbench
  * ------------------------------------------------------------------------- */
@@ -3848,6 +3878,18 @@ mark.fn-ai-find-mark--current {
 .fn-ai-panel .fn-ai-tree {
   min-height: 0;
   overflow-y: auto;
+  /* No top padding above the sticky toolbar — otherwise scrolled rows peek through the gap. */
+  padding-top: 0;
+}
+
+/* Keep "new session / new folder / fold-all" reachable while the session list scrolls:
+   the toolbar sticks to the top of the tree's scrollport. Opaque background so rows
+   scrolling underneath don't show through. */
+.fn-ai-panel .fn-ai-tree__toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface);
 }
 
 .fn-ai-panel__header {
@@ -3902,11 +3944,63 @@ body.fn-resizing-ai-panel {
   padding: 0.25rem 0.25rem 0.35rem;
 }
 
+.fn-recent-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+}
+
 .fn-recent-panel__title {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex: 1 1 auto;
+  min-width: 0;
   padding: 0.25rem 0.35rem 0.15rem;
+  border: none;
+  background: none;
+  cursor: pointer;
+  text-align: left;
   font-size: 0.72rem;
   font-weight: 600;
   color: var(--text-muted);
+}
+
+.fn-recent-panel__title:hover {
+  background: var(--accent-soft);
+  border-radius: 6px;
+}
+
+/* 3/5/10 shown-count switch. */
+.fn-recent-panel__limits {
+  display: flex;
+  gap: 2px;
+  flex: 0 0 auto;
+  padding-right: 0.25rem;
+}
+
+.fn-recent-panel__limit {
+  min-width: 1.5rem;
+  padding: 0.1rem 0.25rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+}
+
+.fn-recent-panel__limit:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.fn-recent-panel__limit--on {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--text);
+  font-weight: 600;
 }
 
 .fn-recent-panel__list {

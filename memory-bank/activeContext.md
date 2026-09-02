@@ -1,5 +1,18 @@
 # Active Context — FastNote
 
+**追加（2026-09-02 提交，含 08-28 全文搜索 + 08-30 侧边栏/安卓抽屉 两轮，随 git 提交 bump 至 **v0.29.0**，server 保持 0.11.0 无改动）**：
+
+**第一轮（2026-08-28，VSCode 风格全文搜索）**：
+1. **搜索结果常驻**：点击结果不再清空 `searchQuery`/`expandedSearch`（可逐条浏览），当前打开的结果加 `fn-search-result--active` 底色。
+2. **不劫持查找栏**：`locateNoteInSource` 不再 set findInitialQuery/findBarNonce（Ctrl+F 预填选中文本的路径不受影响），改为切源码视图 + bump `globalHighlightNonce`——`NoteEditor` 用「已处理 nonce ref」区分显式点击与普通切换标签页，只有前者滚动定位到首个匹配（大小写不敏感 indexOf + `EditorView.scrollIntoView` 居中，选区置于匹配上）。
+3. **双高亮共存（颜色不同）**：全局搜索词有独立高亮层，与查找栏互不干扰。渲染模式=新 PM 插件 `GlobalHighlight`（复用 `findMatchesInDoc` 扁平化匹配，class `fn-global-match`）；源码模式=`queryHighlighter`（`MatchDecorator` + ViewPlugin，装在独立 `Compartment`，查询变化就地 reconfigure），class `cm-fn-global-match`。两处都是**蓝色**（rgba(59,130,246)），查找栏保持黄/橙。`globalHighlightQuery` prop 直接绑 `searchQuery`，清空搜索框即清高亮。
+4. **源码查找高亮根治**：@codemirror/search 只在**自带面板打开时**才画 `.cm-searchMatch` 装饰（本应用无面板驱动），此前源码匹配只有淡淡的 selectionMatch。现由 `applyQuery` 顺带 reconfigure `findHlCompartment`（`queryHighlighter(query, 'cm-fn-find-match', markCurrent=true)`）：全部匹配醒目黄底黄框，**当前匹配**（选区所在，`update.selectionSet` 时重建 deco 让 `--current` 类跟随导航）深橙加粗框。已知取舍：多行查询在源码模式无批量高亮（MatchDecorator 按行匹配），导航/替换不受影响。
+
+**第二轮（2026-08-30，侧边栏 + 安卓抽屉）**：
+1. **最近使用可调可收**：面板标题变折叠开关（▾/▸），右侧 3/5/10 档位按钮切显示数量；`packages/api` 新增 `loadRecentPanelOpen/saveRecentPanelOpen`、`loadRecentNotesLimit/saveRecentNotesLimit`（`RECENT_NOTES_LIMIT_OPTIONS=[3,5,10]`，全局 key 非按库，默认展开+10 与旧行为一致）。
+2. **AI 工具栏吸顶**：新建会话/新建文件夹/⊞⊟ 按钮 `position: sticky` 钉在 `.fn-ai-panel .fn-ai-tree` 滚动口顶部（不透明底色防行透出，树的 padding-top 归零防上沿缝隙漏行）；纯 CSS，选择器限定桌面 AI 面板，不影响移动端。
+3. **安卓抽屉满屏 + 折行**：`.fn-mobile__drawer` 宽度 `min(82vw,320px)` → `100%`；满屏后遮罩点不到，抽屉标题行加 ✕ 关闭按钮（`fn-mobile__drawer-close`）；抽屉内 `NoteTree` 与 AI 树标题从省略号截断改为允许折行（`white-space: normal` + `overflow-wrap: anywhere`，触屏无 hover tooltip，折行是唯一能读全名的方式），仅抽屉内生效。
+
 **追加（2026-08-26 第二批，聊天附件云同步 + 云端删除，随 git 提交 bump 至 **v0.28.0**，server 同轮 bump **0.11.0 需重新部署**）**：修复"文件传输助手另一设备下载附件提示不在本设备、同步历史也无效"的根因——聊天附件密文只存本地 `chat_attachments_local`，历史同步只传消息行（正文+附件元数据），云端从来没有附件内容。方案：
 1. **上行**：`StoredChatAttachment` 加 `syncStatus`/`deleted`（旧行无字段读作 pending → 原设备下次同步自动补传存量附件）；`SyncClient.pushChatMessages` 顺带 `pushChatAttachments`（发送后 3s 防抖实时上云）；server 新 `chat_attachment_blobs` 表 + `PUT/GET(list)/GET(one) /api/v1/sync/chat-attachments`，LWW on updated_at。
 2. **下行按需**：刻意**不在历史同步时全量下载附件**（大文件费流量）——两端下载/预览走 `loadChatAttachmentWithCloud`：本地没有 → `fetchChatAttachment(id)` 拉单个密文落库再解密；本地+云端都没有才 alert（`attachmentMissing` 文案已更新）。

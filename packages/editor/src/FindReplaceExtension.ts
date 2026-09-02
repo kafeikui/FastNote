@@ -138,3 +138,54 @@ export const FindReplace = Extension.create({
     ];
   },
 });
+
+interface GlobalHighlightState {
+  query: string;
+  decorations: DecorationSet;
+}
+
+export const globalHighlightPluginKey = new PluginKey<GlobalHighlightState>('fnGlobalHighlight');
+
+function buildGlobalState(doc: PMNode, query: string): GlobalHighlightState {
+  const decorations = DecorationSet.create(
+    doc,
+    findMatchesInDoc(doc, query).map((m) => Decoration.inline(m.from, m.to, { class: 'fn-global-match' })),
+  );
+  return { query, decorations };
+}
+
+const EMPTY_GLOBAL_STATE: GlobalHighlightState = { query: '', decorations: DecorationSet.empty };
+
+/**
+ * Global-search highlight (VSCode style): marks every occurrence of the sidebar full-text search
+ * query in a color distinct from the find/replace bar's, so both can be visible at once. Purely
+ * decorative — no navigation state; driven by a meta carrying `{ query }`.
+ */
+export const GlobalHighlight = Extension.create({
+  name: 'fnGlobalHighlight',
+
+  addProseMirrorPlugins() {
+    return [
+      new Plugin<GlobalHighlightState>({
+        key: globalHighlightPluginKey,
+        state: {
+          init: () => EMPTY_GLOBAL_STATE,
+          apply(tr, prev) {
+            const meta = tr.getMeta(globalHighlightPluginKey) as { query: string } | undefined;
+            if (meta) {
+              return meta.query ? buildGlobalState(tr.doc, meta.query) : EMPTY_GLOBAL_STATE;
+            }
+            if (!prev.query) return prev;
+            if (tr.docChanged) return buildGlobalState(tr.doc, prev.query);
+            return prev;
+          },
+        },
+        props: {
+          decorations(state) {
+            return globalHighlightPluginKey.getState(state)?.decorations ?? DecorationSet.empty;
+          },
+        },
+      }),
+    ];
+  },
+});

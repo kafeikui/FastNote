@@ -1948,13 +1948,23 @@ export function MobileApp() {
           <div className="fn-mobile__drawer-backdrop" onClick={() => setDrawerOpen(false)}>
             <div className="fn-mobile__drawer" onClick={(e) => e.stopPropagation()}>
               <div className="fn-mobile__drawer-title">
-                {view === 'chat'
-                  ? t('mobileApp.chat')
-                  : view === 'tools'
-                    ? t('vaultApp.navTools')
-                    : view === 'notes'
-                      ? t('vaultApp.navNotes')
-                      : t('aiPanel.title')}
+                <span>
+                  {view === 'chat'
+                    ? t('mobileApp.chat')
+                    : view === 'tools'
+                      ? t('vaultApp.navTools')
+                      : view === 'notes'
+                        ? t('vaultApp.navNotes')
+                        : t('aiPanel.title')}
+                </span>
+                <button
+                  type="button"
+                  className="fn-mobile__drawer-close"
+                  aria-label="close"
+                  onClick={() => setDrawerOpen(false)}
+                >
+                  ✕
+                </button>
               </div>
               {view === 'notes' ? (
                 <div className="fn-mobile__notes-drawer">
