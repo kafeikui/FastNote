@@ -21,6 +21,13 @@ export const MAX_AI_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 
 const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
+// Anthropic's documented optimal long-edge limit — anything larger is downscaled server-side
+// anyway, so keeping megapixel photos only wastes memory and tokens.
+const AI_IMAGE_MAX_DIM = 1568;
+// Images below this size are attached as-is even when re-encoding could shave a bit more.
+const AI_IMAGE_REENCODE_BYTES = 512 * 1024;
+const AI_IMAGE_QUALITY = 0.85;
+
 export type AiAttachmentErrorCode = 'tooLarge' | 'unsupported' | 'emptyDoc';
 
 export class AiAttachmentError extends Error {
@@ -124,22 +131,81 @@ function fileExtension(name: string): string {
   return idx >= 0 ? name.slice(idx + 1).toLowerCase() : '';
 }
 
+/**
+ * Downscales/re-encodes an image so its base64 stays small. Attached photos used to go into the
+ * message at full size (several MB each); the base64 blobs then lived inside the session JSON,
+ * which is re-stringified + encrypted on every persist and pushed to the server as one blob —
+ * a few camera photos froze and OOM-crashed the Android WebView. Returns null when the original
+ * bytes should be used (GIFs keep their animation; small images aren't worth re-encoding; any
+ * decode/encode failure falls back to the original).
+ */
+async function downscaleImageForAi(file: File): Promise<{ bytes: Uint8Array; mediaType: string } | null> {
+  if (file.type === 'image/gif') return null;
+  try {
+    // Respects EXIF orientation by default, so rotated phone photos come out upright.
+    const bitmap = await createImageBitmap(file);
+    try {
+      const scale = Math.min(1, AI_IMAGE_MAX_DIM / Math.max(bitmap.width, bitmap.height));
+      if (scale === 1 && file.size <= AI_IMAGE_REENCODE_BYTES) return null;
+      const w = Math.max(1, Math.round(bitmap.width * scale));
+      const h = Math.max(1, Math.round(bitmap.height * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return null;
+      ctx.drawImage(bitmap, 0, 0, w, h);
+      // WebP keeps alpha and compresses well; engines without a WebP encoder (Safari) fall back
+      // to PNG per spec, so trust blob.type rather than the requested type.
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/webp', AI_IMAGE_QUALITY));
+      if (!blob || !IMAGE_TYPES.has(blob.type)) return null;
+      // A PNG-fallback re-encode of an unscaled image can come out larger than the source.
+      if (blob.size >= file.size) return null;
+      return { bytes: new Uint8Array(await blob.arrayBuffer()), mediaType: blob.type };
+    } finally {
+      bitmap.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
 /** Converts a picked File into an AiAttachment; throws AiAttachmentError for unusable files. */
 export async function prepareAiAttachment(file: File): Promise<AiAttachment> {
-  if (file.size > MAX_AI_ATTACHMENT_BYTES) {
-    throw new AiAttachmentError('tooLarge', file.name);
-  }
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  const ext = fileExtension(file.name);
   const base = {
     id: crypto.randomUUID(),
     name: file.name,
     size: file.size,
   };
 
+  // Images: downscale before the size check, so an oversized camera photo becomes sendable
+  // instead of being rejected.
   if (IMAGE_TYPES.has(file.type)) {
-    return { ...base, mediaType: file.type, kind: 'image', dataBase64: toBase64(bytes) };
+    const scaled = await downscaleImageForAi(file);
+    if (scaled) {
+      if (scaled.bytes.length > MAX_AI_ATTACHMENT_BYTES) throw new AiAttachmentError('tooLarge', file.name);
+      return {
+        ...base,
+        size: scaled.bytes.length,
+        mediaType: scaled.mediaType,
+        kind: 'image',
+        dataBase64: toBase64(scaled.bytes),
+      };
+    }
+    if (file.size > MAX_AI_ATTACHMENT_BYTES) throw new AiAttachmentError('tooLarge', file.name);
+    return {
+      ...base,
+      mediaType: file.type,
+      kind: 'image',
+      dataBase64: toBase64(new Uint8Array(await file.arrayBuffer())),
+    };
   }
+
+  if (file.size > MAX_AI_ATTACHMENT_BYTES) {
+    throw new AiAttachmentError('tooLarge', file.name);
+  }
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const ext = fileExtension(file.name);
   if (file.type === 'application/pdf' || ext === 'pdf') {
     return { ...base, mediaType: 'application/pdf', kind: 'pdf', dataBase64: toBase64(bytes) };
   }

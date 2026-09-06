@@ -2308,6 +2308,20 @@ export function VaultApp() {
     }, 5000);
   };
 
+  /** Manual "sync now" from the AI tree toolbar: push pending + pull remote, apply pulls. */
+  const handleAiSyncNow = async () => {
+    const k = keysRef.current;
+    const s = sessionRef.current;
+    if (!k || !s) return;
+    const client = new SyncClient(new ApiClient(serverUrl, locale), s);
+    const { pulled } = await client.syncAiSessions(storage, k.notesKey);
+    if (pulled > 0 && keysRef.current === k) {
+      const list = await storage.listAiSessions(k.notesKey);
+      setAiSessions(list);
+      setActiveAiSessionId((cur) => (cur && list.some((n) => n.id === cur) ? cur : null));
+    }
+  };
+
   const persistAiSession = (node: AiSessionNode) => {
     const k = keysRef.current;
     if (!k) return;
@@ -4193,6 +4207,7 @@ export function VaultApp() {
                     onDeleteForever={handleAiDeleteForever}
                     onEmptyTrash={handleAiEmptyTrash}
                     onMove={handleAiMove}
+                    onSyncNow={session ? handleAiSyncNow : undefined}
                   />
                 )}
               </div>

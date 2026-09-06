@@ -1,5 +1,13 @@
 # Active Context — FastNote
 
+**追加（2026-09-06 提交，含 09-03 解锁页密码可见切换 + 09-06 AI 图片附件崩溃修复/AI 会话同步按钮 两轮，随 git 提交 bump 至 **v0.30.0**，server 保持 0.11.0 无改动）**：
+
+**第一轮（2026-09-03，解锁页显示密码）**：`UnlockScreen` 内新增 `PasswordField` 小组件（输入框 + 右侧内嵌 👁/🙈 切换按钮），替换本地解锁主密码、首次建库确认密码、云登录主密码三处，各自独立切换。按钮 `tabIndex={-1}` + `onMouseDown preventDefault` 不抢焦点不进 Tab 序；`.fn-unlock__card .fn-unlock__pw-toggle` 覆盖卡片级实心按钮样式；输入框右侧留 2.6rem 内边距。既有焦点抢占逻辑经 `inputRef` 透传不受影响。i18n 新键 `unlockScreen.showPassword/hidePassword`。三端共用组件同时生效。
+
+**第二轮（2026-09-06，AI 两项）**：
+1. **安卓 AI 上传几张图片卡死闪退根治**（`packages/ai/attachments.ts`）：根因——图片全量 base64 进消息，而 AI 会话整节点持久化：每次 persist 都把含全部图片 base64 的会话 JSON 重新 stringify + 加密，5s 防抖后整 blob 推服务器，几张照片=几十 MB 字符串反复分配，Android WebView OOM 被杀。修复：新增 `downscaleImageForAi`——附加时长边压到 **1568px**（Anthropic 文档最优上限，更大服务端也会压）、canvas 重编码 **WebP q0.85**（保透明；Safari 无 WebP 编码器按规范回退 PNG，代码信任 `blob.type` 而非请求类型）；GIF 跳过（保动画）、≤512KB 且尺寸达标不重编码、重编码反而变大则用原字节、解码/编码失败全部安全回退原始路径；`createImageBitmap` 默认吃 EXIF 方向。**顺带**：图片改为「先降采样再查 8MB 上限」，超大照片从直接拒绝变为可发。已知残留：老会话里已存的大图 base64 还在（卡就删那几条消息），新附件不复发。
+2. **AI 会话「立即同步」按钮**：`AiSessionTree` 工具栏（⊞⊟ 旁）新增 ⟳，`onSyncNow?: () => Promise<void>` 可选 prop——**桌面/网页（同一 VaultApp）和安卓都传**，未登录不传则按钮隐藏。handler = `syncAiSessions`（推 pending + 拉远端 LWW），`pulled>0` 时刷新会话树并校正 activeAiSessionId。同步中按钮禁用、图标 ⟳→⏳、变淡 opacity .45 + cursor progress——**特意不用旋转动画**（用户反馈眼晕，`fn-ai-tree__sync--busy` 无 animation）；失败 alert `aiPanel.syncFailed` 带错误信息。i18n 新键 `aiPanel.syncNow/syncFailed`。
+
 **追加（2026-09-02 提交，含 08-28 全文搜索 + 08-30 侧边栏/安卓抽屉 两轮，随 git 提交 bump 至 **v0.29.0**，server 保持 0.11.0 无改动）**：
 
 **第一轮（2026-08-28，VSCode 风格全文搜索）**：

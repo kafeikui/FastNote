@@ -178,6 +178,8 @@ export const zh = {
     defaultFolderTitle: '新文件夹',
     expandAll: '展开全部',
     collapseAll: '收起全部',
+    syncNow: '立即同步 AI 会话（推送本地修改并拉取其他设备的更新）',
+    syncFailed: 'AI 会话同步失败',
   },
   aiWorkbench: {
     emptyHint: '输入消息开始与 Claude 对话。',
@@ -347,6 +349,8 @@ export const zh = {
     defaultVaultLabel: '加密库',
     masterPasswordPlaceholder: '主密码',
     confirmPasswordPlaceholder: '确认密码',
+    showPassword: '显示密码',
+    hidePassword: '隐藏密码',
     processing: '处理中…',
     createAndEnter: '创建并进入',
     unlock: '解锁',

@@ -1,6 +1,33 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type InputHTMLAttributes, type Ref } from 'react';
 import { APP_NAME } from '@fastnote/shared';
 import { useT } from '@fastnote/i18n';
+
+/** Password input with an eye button toggling between masked and plain text. */
+function PasswordField({
+  inputRef,
+  ...inputProps
+}: { inputRef?: Ref<HTMLInputElement> } & Omit<InputHTMLAttributes<HTMLInputElement>, 'type'>) {
+  const t = useT();
+  const [show, setShow] = useState(false);
+  return (
+    <div className="fn-unlock__pw">
+      <input ref={inputRef} type={show ? 'text' : 'password'} {...inputProps} />
+      <button
+        type="button"
+        className="fn-unlock__pw-toggle"
+        // Not tab-reachable and never steals focus: the toggle is a mouse/touch affordance,
+        // keyboard users tabbing through the form should land on the next field directly.
+        tabIndex={-1}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => setShow((v) => !v)}
+        title={show ? t('unlockScreen.hidePassword') : t('unlockScreen.showPassword')}
+        aria-label={show ? t('unlockScreen.hidePassword') : t('unlockScreen.showPassword')}
+      >
+        {show ? '🙈' : '👁'}
+      </button>
+    </div>
+  );
+}
 
 export type UnlockTab = 'local' | 'cloud';
 
@@ -289,17 +316,15 @@ export function UnlockScreen({
                 : t('unlockScreen.unlockVaultHint', { label: activeVault?.label ?? t('unlockScreen.defaultVaultLabel') })}
             </p>
             <form onSubmit={handleLocalSubmit}>
-              <input
-                ref={passwordRef}
-                type="password"
+              <PasswordField
+                inputRef={passwordRef}
                 placeholder={t('unlockScreen.masterPasswordPlaceholder')}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 autoFocus
               />
               {isFirstRun && (
-                <input
-                  type="password"
+                <PasswordField
                   placeholder={t('unlockScreen.confirmPasswordPlaceholder')}
                   value={confirm}
                   onChange={(e) => setConfirm(e.target.value)}
@@ -353,9 +378,8 @@ export function UnlockScreen({
                 autoComplete="username"
                 readOnly={!!activeVault?.boundUsername}
               />
-              <input
-                ref={passwordRef}
-                type="password"
+              <PasswordField
+                inputRef={passwordRef}
                 placeholder={t('unlockScreen.masterPasswordPlaceholder')}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}

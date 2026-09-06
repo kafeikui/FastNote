@@ -1394,6 +1394,40 @@ body.fn-resizing-note .fn-note-resize-handle::after {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
+/* Password input + show/hide eye toggle. */
+.fn-unlock__pw {
+  position: relative;
+  display: flex;
+}
+
+.fn-unlock__pw input {
+  flex: 1 1 auto;
+  width: 100%;
+  /* Room for the eye button so long passwords don't run underneath it. */
+  padding-right: 2.6rem;
+}
+
+/* Beats the card-wide accent button styling. */
+.fn-unlock__card .fn-unlock__pw-toggle {
+  position: absolute;
+  right: 0.3rem;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 0.25rem 0.4rem;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-muted);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.fn-unlock__card .fn-unlock__pw-toggle:hover {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
 .fn-unlock__card button {
   padding: 0.65rem;
   background: var(--accent);
@@ -4074,6 +4108,12 @@ body.fn-resizing-ai-panel {
 .fn-ai-tree__toolbar button:hover {
   background: var(--accent-soft);
   border-color: var(--accent);
+}
+
+/* Syncing state: dimmed + progress cursor, deliberately no spin animation (dizzying). */
+.fn-ai-tree__sync--busy {
+  opacity: 0.45;
+  cursor: progress;
 }
 
 .fn-ai-tree__list {

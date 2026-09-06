@@ -180,6 +180,8 @@ export const en: Dictionary = {
     defaultFolderTitle: 'New folder',
     expandAll: 'Expand all',
     collapseAll: 'Collapse all',
+    syncNow: 'Sync AI sessions now (push local changes and pull updates from other devices)',
+    syncFailed: 'AI session sync failed',
   },
   aiWorkbench: {
     emptyHint: 'Type a message to start chatting with Claude.',
@@ -350,6 +352,8 @@ export const en: Dictionary = {
     defaultVaultLabel: 'vault',
     masterPasswordPlaceholder: 'Master password',
     confirmPasswordPlaceholder: 'Confirm password',
+    showPassword: 'Show password',
+    hidePassword: 'Hide password',
     processing: 'Working…',
     createAndEnter: 'Create & enter',
     unlock: 'Unlock',

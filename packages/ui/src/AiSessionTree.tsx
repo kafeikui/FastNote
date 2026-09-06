@@ -18,6 +18,8 @@ interface AiSessionTreeProps {
   /** Permanently deletes everything in the recycle bin. */
   onEmptyTrash?: () => void;
   onMove: (id: string, newParentId: string | null) => void;
+  /** When provided (logged in), the toolbar shows a "sync now" button that triggers this. */
+  onSyncNow?: () => Promise<void>;
 }
 
 interface AiTreeLevel {
@@ -61,9 +63,11 @@ export function AiSessionTree({
   onDeleteForever,
   onEmptyTrash,
   onMove,
+  onSyncNow,
 }: AiSessionTreeProps) {
   const t = useT();
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const [syncing, setSyncing] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
@@ -315,6 +319,31 @@ export function AiSessionTree({
             }
           >
             {anyExpanded ? '⊟' : '⊞'}
+          </button>
+        )}
+        {onSyncNow && (
+          <button
+            type="button"
+            className={`fn-ai-tree__fold-btn${syncing ? ' fn-ai-tree__sync--busy' : ''}`}
+            title={t('aiPanel.syncNow')}
+            disabled={syncing}
+            onClick={() => {
+              if (syncing) return;
+              setSyncing(true);
+              void (async () => {
+                try {
+                  await onSyncNow();
+                } catch (err) {
+                  window.alert(
+                    `${t('aiPanel.syncFailed')}${err instanceof Error && err.message ? `: ${err.message}` : ''}`,
+                  );
+                } finally {
+                  setSyncing(false);
+                }
+              })();
+            }}
+          >
+            {syncing ? '⏳' : '⟳'}
           </button>
         )}
       </div>
