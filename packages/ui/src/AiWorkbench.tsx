@@ -47,10 +47,23 @@ interface AiWorkbenchProps {
   onSend: (text: string, attachments: AiAttachment[]) => void;
   onStop: () => void;
   onDeleteMessage: (index: number) => void;
+  /**
+   * Re-sends the user message at `index` without retyping (e.g. after a failed/crashed reply).
+   * The host re-runs the request in place when the message is the last one, or sends a copy as
+   * a new message otherwise.
+   */
+  onResendMessage?: (index: number) => void;
   /** Converts a picked file into an attachment record; rejects with a user-facing Error. */
   prepareAttachment: (file: File) => Promise<AiAttachment>;
   /** Creates a note from the given messages (a Q&A range or the whole session). */
   onConvertToNote: (messages: AiMessage[]) => void;
+  /**
+   * One-click "summarize & continue": asks the model to summarize this session, then opens a
+   * fresh session seeded with the summary as context. Long image-heavy sessions get slow and
+   * memory-hungry (the whole history is re-sent and re-encrypted every turn); this offers a
+   * lightweight continuation.
+   */
+  onSummarizeToNew?: () => void;
   onOpenSettings: () => void;
   /**
    * Ctrl+F forwarded from the app layer: each nonce bump opens/refocuses the in-session find
@@ -122,8 +135,10 @@ export function AiWorkbench({
   onSend,
   onStop,
   onDeleteMessage,
+  onResendMessage,
   prepareAttachment,
   onConvertToNote,
+  onSummarizeToNew,
   onOpenSettings,
   findRequest = null,
 }: AiWorkbenchProps) {
@@ -439,6 +454,19 @@ export function AiWorkbench({
         >
           📝 {t('aiWorkbench.toNote')}
         </button>
+        {onSummarizeToNew && (
+          <button
+            type="button"
+            className="fn-ai-workbench__tonote"
+            title={t('aiWorkbench.summarizeToNewHint')}
+            disabled={session.messages.length === 0 || busy || !configured}
+            onClick={() => {
+              if (confirm(t('aiWorkbench.summarizeToNewConfirm'))) onSummarizeToNew();
+            }}
+          >
+            📋 {t('aiWorkbench.summarizeToNew')}
+          </button>
+        )}
       </div>
       {findOpen && (
         <div className="fn-ai-findbar">
@@ -594,6 +622,16 @@ export function AiWorkbench({
                   </span>
                 )}
               </span>
+              {m.role === 'user' && onResendMessage && (
+                <button
+                  type="button"
+                  title={t('aiWorkbench.resendMessage')}
+                  disabled={busy}
+                  onClick={() => onResendMessage(i)}
+                >
+                  ↻
+                </button>
+              )}
               <button type="button" title={t('aiWorkbench.deleteMessage')} onClick={() => handleDelete(i)}>
                 ×
               </button>

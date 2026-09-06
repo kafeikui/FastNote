@@ -204,6 +204,7 @@ export const zh = {
     exportAsMd: 'Markdown (.md)',
     exportAsDoc: 'Word 文档 (.doc)',
     deleteMessage: '删除此消息',
+    resendMessage: '重发此消息',
     timeoutConnect:
       '连接 Anthropic 服务器超时（30 秒无响应）。请检查网络能否访问 api.anthropic.com——中国大陆直连不可达，需要可用的代理；也请确认模型 ID 拼写正确（如 claude-sonnet-5）。',
     timeoutStream: '回复流中断（90 秒未收到新内容），请求已停止，可重试。',
@@ -221,6 +222,14 @@ export const zh = {
     truncatedMaxTokens: '回复因达到 token 上限被截断（stop_reason=max_tokens），以上内容可能不完整，可回复"继续"接着生成。',
     emptyReply: '本次回复为空（stop_reason={reason}），请重试。',
     confirmDeleteMessage: '确定删除这条消息？（不影响已发送给 AI 的历史）',
+    summarizeToNew: '总结续聊',
+    summarizeToNewHint: '让 AI 总结本会话内容，并以摘要为上下文开启新会话继续聊（长会话更快、更省内存）',
+    summarizeToNewConfirm: '将请求 AI 总结本会话，并以摘要开启一个新会话继续。原会话保持不变，继续吗？',
+    summarizePrompt:
+      '请把以上全部对话内容总结成一份可作为后续对话上下文的摘要：保留关键事实、结论、代码与数据要点、我的偏好和尚未解决的问题；用条目化的 Markdown 输出，不要寒暄或额外解释。',
+    summarySessionTitle: '{title}·续',
+    summaryContextIntro: '以下是上一个会话的对话摘要，请将其作为本次对话的背景上下文：',
+    summaryContinueReply: '我已了解上述背景，请继续提问或布置任务。',
     toNote: '转为笔记',
     toNoteTitle: '将问答转为笔记',
     toNotePairs: '本会话共 {count} 组问答',

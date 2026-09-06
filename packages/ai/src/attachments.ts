@@ -40,13 +40,22 @@ export class AiAttachmentError extends Error {
   }
 }
 
-function toBase64(bytes: Uint8Array): string {
-  let binary = '';
-  const CHUNK = 0x8000;
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-  }
-  return btoa(binary);
+/**
+ * Base64 via the native FileReader data-URL encoder. The old JS loop
+ * (String.fromCharCode + btoa) built the whole binary string through thousands of
+ * intermediate concatenations — several extra copies of the payload as GC churn, which
+ * matters on the memory-starved Android WebView.
+ */
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => {
+      const dataUrl = fr.result as string;
+      resolve(dataUrl.slice(dataUrl.indexOf(',') + 1));
+    };
+    fr.onerror = () => reject(fr.error ?? new Error('read failed'));
+    fr.readAsDataURL(blob);
+  });
 }
 
 function decodeXmlEntities(s: string): string {
@@ -139,34 +148,65 @@ function fileExtension(name: string): string {
  * bytes should be used (GIFs keep their animation; small images aren't worth re-encoding; any
  * decode/encode failure falls back to the original).
  */
-async function downscaleImageForAi(file: File): Promise<{ bytes: Uint8Array; mediaType: string } | null> {
+async function downscaleImageForAi(file: File): Promise<{ blob: Blob; mediaType: string } | null> {
   if (file.type === 'image/gif') return null;
+  const url = URL.createObjectURL(file);
   try {
-    // Respects EXIF orientation by default, so rotated phone photos come out upright.
-    const bitmap = await createImageBitmap(file);
+    // Intrinsic size comes from the header parse alone — the <img> is never painted, so the
+    // full-resolution pixels are not decoded here. (naturalWidth/Height are already
+    // EXIF-oriented in modern engines.)
+    const img = new Image();
+    img.decoding = 'async';
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('image decode failed'));
+      img.src = url;
+    });
+    const scale = Math.min(1, AI_IMAGE_MAX_DIM / Math.max(img.naturalWidth, img.naturalHeight));
+    if (scale === 1 && file.size <= AI_IMAGE_REENCODE_BYTES) return null;
+    const w = Math.max(1, Math.round(img.naturalWidth * scale));
+    const h = Math.max(1, Math.round(img.naturalHeight * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
     try {
-      const scale = Math.min(1, AI_IMAGE_MAX_DIM / Math.max(bitmap.width, bitmap.height));
-      if (scale === 1 && file.size <= AI_IMAGE_REENCODE_BYTES) return null;
-      const w = Math.max(1, Math.round(bitmap.width * scale));
-      const h = Math.max(1, Math.round(bitmap.height * scale));
-      const canvas = document.createElement('canvas');
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return null;
-      ctx.drawImage(bitmap, 0, 0, w, h);
+      let drawn = false;
+      try {
+        // Decode-time downsampling: with resize options the decoder subsamples while decoding,
+        // so peak memory is bounded by the *target* size. The previous createImageBitmap(file)
+        // call decoded the full-resolution RGBA bitmap first (a 48MP photo is ~190MB), which is
+        // what OOM-crashed the Android WebView before the scaling even started.
+        const bitmap = await createImageBitmap(file, { resizeWidth: w, resizeHeight: h, resizeQuality: 'high' });
+        try {
+          ctx.drawImage(bitmap, 0, 0, w, h);
+          drawn = true;
+        } finally {
+          bitmap.close();
+        }
+      } catch {
+        // Engines without resize-option support: let drawImage decode+scale internally.
+        ctx.drawImage(img, 0, 0, w, h);
+        drawn = true;
+      }
+      if (!drawn) return null;
       // WebP keeps alpha and compresses well; engines without a WebP encoder (Safari) fall back
       // to PNG per spec, so trust blob.type rather than the requested type.
       const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/webp', AI_IMAGE_QUALITY));
       if (!blob || !IMAGE_TYPES.has(blob.type)) return null;
       // A PNG-fallback re-encode of an unscaled image can come out larger than the source.
       if (blob.size >= file.size) return null;
-      return { bytes: new Uint8Array(await blob.arrayBuffer()), mediaType: blob.type };
+      return { blob, mediaType: blob.type };
     } finally {
-      bitmap.close();
+      // Drop the canvas backing store immediately instead of waiting for GC.
+      canvas.width = 0;
+      canvas.height = 0;
     }
   } catch {
     return null;
+  } finally {
+    URL.revokeObjectURL(url);
   }
 }
 
@@ -183,13 +223,13 @@ export async function prepareAiAttachment(file: File): Promise<AiAttachment> {
   if (IMAGE_TYPES.has(file.type)) {
     const scaled = await downscaleImageForAi(file);
     if (scaled) {
-      if (scaled.bytes.length > MAX_AI_ATTACHMENT_BYTES) throw new AiAttachmentError('tooLarge', file.name);
+      if (scaled.blob.size > MAX_AI_ATTACHMENT_BYTES) throw new AiAttachmentError('tooLarge', file.name);
       return {
         ...base,
-        size: scaled.bytes.length,
+        size: scaled.blob.size,
         mediaType: scaled.mediaType,
         kind: 'image',
-        dataBase64: toBase64(scaled.bytes),
+        dataBase64: await blobToBase64(scaled.blob),
       };
     }
     if (file.size > MAX_AI_ATTACHMENT_BYTES) throw new AiAttachmentError('tooLarge', file.name);
@@ -197,18 +237,18 @@ export async function prepareAiAttachment(file: File): Promise<AiAttachment> {
       ...base,
       mediaType: file.type,
       kind: 'image',
-      dataBase64: toBase64(new Uint8Array(await file.arrayBuffer())),
+      dataBase64: await blobToBase64(file),
     };
   }
 
   if (file.size > MAX_AI_ATTACHMENT_BYTES) {
     throw new AiAttachmentError('tooLarge', file.name);
   }
-  const bytes = new Uint8Array(await file.arrayBuffer());
   const ext = fileExtension(file.name);
   if (file.type === 'application/pdf' || ext === 'pdf') {
-    return { ...base, mediaType: 'application/pdf', kind: 'pdf', dataBase64: toBase64(bytes) };
+    return { ...base, mediaType: 'application/pdf', kind: 'pdf', dataBase64: await blobToBase64(file) };
   }
+  const bytes = new Uint8Array(await file.arrayBuffer());
   if (ext === 'docx') {
     let text: string;
     try {

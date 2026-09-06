@@ -1,5 +1,11 @@
 # Active Context — FastNote
 
+**追加（2026-09-06 第二批提交，AI 重发按钮 + 安卓 AI 图片闪退二次根治 + AI 总结续聊，随 git 提交 bump 至 **v0.31.0**，server 保持 0.11.0 无改动）**：
+
+1. **AI 消息重发按钮**（`AiWorkbench` 新 prop `onResendMessage?`，两端 handler `handleAiResendMessage`）：用户消息操作区（导出/删除旁）加 ↻，回复进行中禁用。语义分两种：重发**最后一条**用户消息（崩溃/失败后的典型场景——提问已在会话里但没收到回复）= 直接按现有历史重跑请求、**不重复追加气泡**；重发更早的历史消息 = 其文字+附件作为新消息发到末尾。为此把两端 `runAiRequest` 拆成「追加用户消息」+ `runAiConversation(sessionId, base)`（纯流式段，含 apiKey/并发守卫），重发与总结续聊都复用后者。i18n `aiWorkbench.resendMessage`。
+2. **安卓 AI 发图闪退二次根治**（`packages/ai/attachments.ts`）：v0.30 的降采样修复了「base64 进会话 JSON」，但漏了**解码峰值**——`createImageBitmap(file)` 是先全尺寸解码再缩放，48MP 照片解码即 ~190MB RGBA，缩放前 WebView 就 OOM。现改为：先 `<img>`+objectURL 只做头解析拿 naturalWidth/Height（不解码像素，现代引擎该值已含 EXIF 方向），再 `createImageBitmap(file, { resizeWidth, resizeHeight, resizeQuality:'high' })` **解码时降采样**（峰值内存受目标尺寸约束，1568px 约 10MB）；老 WebView 不支持 resize 选项时回退 `drawImage(img)` 由引擎内部缩放。base64 弃用 `String.fromCharCode` 手工循环（数倍于图片体积的临时字符串 GC churn），改原生 `FileReader.readAsDataURL` 切 data-url 前缀（新 `blobToBase64`，图片和 PDF 附件都不再先读进 JS ArrayBuffer）；canvas 用完 width/height 置零立即释放。老会话里既存的大图 base64 照旧（卡就删消息或用总结续聊逃逸）。
+3. **AI 总结续聊**（`AiWorkbench` 头部「📋 总结续聊」按钮 + confirm，两端 `handleAiSummarizeToNew`）：一键让模型把当前会话总结成要点摘要（`aiWorkbench.summarizePrompt`，流式显示在当前会话、可停止），完成后自动新建同目录会话「原标题·续」，消息预置 [user: `summaryContextIntro`+摘要, assistant: `summaryContinueReply` 本地合成不耗 API] 并切换过去；下一次提问只携带摘要而非全部历史——长会话提速、省 token、降安卓内存压力。**关键**：总结请求里附件只以 `[kind: 文件名]` 占位符出现（`aiMessageToSummaryApi`），绝不重传图片字节——否则总结这步自己就会闪退。原会话不动。i18n `summarizeToNew(+Hint/Confirm)/summarizePrompt/summarySessionTitle/summaryContextIntro/summaryContinueReply`。已知取舍：摘要质量依赖模型；图片内容只有名字进摘要（历史回复里的结论通常已覆盖）。
+
 **追加（2026-09-06 提交，含 09-03 解锁页密码可见切换 + 09-06 AI 图片附件崩溃修复/AI 会话同步按钮 两轮，随 git 提交 bump 至 **v0.30.0**，server 保持 0.11.0 无改动）**：
 
 **第一轮（2026-09-03，解锁页显示密码）**：`UnlockScreen` 内新增 `PasswordField` 小组件（输入框 + 右侧内嵌 👁/🙈 切换按钮），替换本地解锁主密码、首次建库确认密码、云登录主密码三处，各自独立切换。按钮 `tabIndex={-1}` + `onMouseDown preventDefault` 不抢焦点不进 Tab 序；`.fn-unlock__card .fn-unlock__pw-toggle` 覆盖卡片级实心按钮样式；输入框右侧留 2.6rem 内边距。既有焦点抢占逻辑经 `inputRef` 透传不受影响。i18n 新键 `unlockScreen.showPassword/hidePassword`。三端共用组件同时生效。

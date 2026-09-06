@@ -2518,18 +2518,9 @@ export function VaultApp() {
 
   // The in-flight AI run lives here (not in AiWorkbench) so that switching sessions or views
   // never aborts a streaming reply — it finishes in the background and lands in its session.
-  const runAiRequest = async (sessionId: string, text: string, attachments: AiAttachment[]) => {
-    if (!aiSettings?.apiKey || aiAbortRef.current) return;
-    const session = aiSessions.find((s) => s.id === sessionId && s.kind === 'session');
-    if (!session) return;
-    const userMsg: AiMessage = {
-      role: 'user',
-      content: text,
-      ts: new Date().toISOString(),
-      ...(attachments.length > 0 ? { attachments } : {}),
-    };
-    const base = [...session.messages, userMsg];
-    handleAiMessagesChange(sessionId, base);
+  /** Streams a reply for `base` (already persisted); the send/resend wrappers own message appends. */
+  const runAiConversation = async (sessionId: string, base: AiMessage[]) => {
+    if (!aiSettings?.apiKey || aiAbortRef.current || base.length === 0) return;
     setAiRunError(null);
     const startedAt = Date.now();
     setAiRun({ sessionId, text: '', startedAt });
@@ -2601,6 +2592,120 @@ export function VaultApp() {
           ...(receiveStartTs ? { startedTs: receiveStartTs } : {}),
         });
       }
+      if (!(err instanceof DOMException && err.name === 'AbortError')) {
+        const message =
+          err instanceof AnthropicTimeoutError
+            ? t(err.phase === 'connect' ? 'aiWorkbench.timeoutConnect' : 'aiWorkbench.timeoutStream')
+            : err instanceof Error
+              ? err.message
+              : String(err);
+        setAiRunError({ sessionId, message });
+      }
+    } finally {
+      setAiRun(null);
+      aiAbortRef.current = null;
+    }
+  };
+
+  const runAiRequest = async (sessionId: string, text: string, attachments: AiAttachment[]) => {
+    if (!aiSettings?.apiKey || aiAbortRef.current) return;
+    const session = aiSessions.find((s) => s.id === sessionId && s.kind === 'session');
+    if (!session) return;
+    const userMsg: AiMessage = {
+      role: 'user',
+      content: text,
+      ts: new Date().toISOString(),
+      ...(attachments.length > 0 ? { attachments } : {}),
+    };
+    const base = [...session.messages, userMsg];
+    handleAiMessagesChange(sessionId, base);
+    await runAiConversation(sessionId, base);
+  };
+
+  /**
+   * Resends a user message without retyping (the reply failed or the app crashed mid-stream).
+   * The tail message re-runs the request on the history as-is — no duplicate user bubble; an
+   * earlier message is sent again as a new message at the end.
+   */
+  const handleAiResendMessage = (sessionId: string, index: number) => {
+    if (aiAbortRef.current) return;
+    const session = aiSessions.find((s) => s.id === sessionId && s.kind === 'session');
+    const msg = session?.messages[index];
+    if (!session || !msg || msg.role !== 'user') return;
+    if (index === session.messages.length - 1) {
+      void runAiConversation(sessionId, session.messages);
+    } else {
+      void runAiRequest(sessionId, msg.content, msg.attachments ?? []);
+    }
+  };
+
+  /** Text-only view of a message for the summary request: attachment blobs become name tags. */
+  const aiMessageToSummaryApi = (m: AiMessage): AiChatMessage => {
+    let content = m.content;
+    if (m.attachments && m.attachments.length > 0) {
+      const tags = m.attachments.map((a) => `[${a.kind}: ${a.name}]`).join(' ');
+      content = content ? `${tags}\n${content}` : tags;
+    }
+    return { role: m.role, content: content || '…' };
+  };
+
+  /**
+   * One-click continuation for long sessions: asks the model to summarize this session, then
+   * opens a fresh session seeded with the summary as context plus a local (no API call)
+   * assistant prompt to continue. Later turns then carry only the summary instead of the whole
+   * history — faster, cheaper, and far less memory pressure on Android. The summary request
+   * itself sends attachments as name placeholders only, never their bytes.
+   */
+  const handleAiSummarizeToNew = async (sessionId: string) => {
+    if (!aiSettings?.apiKey || aiAbortRef.current) return;
+    const session = aiSessions.find((s) => s.id === sessionId && s.kind === 'session');
+    if (!session || session.messages.length === 0) return;
+    setAiRunError(null);
+    const startedAt = Date.now();
+    setAiRun({ sessionId, text: '', startedAt });
+    const ac = new AbortController();
+    aiAbortRef.current = ac;
+    let acc = '';
+    try {
+      const client = new AnthropicClient(aiSettings.apiKey);
+      const result = await client.streamMessage({
+        model: aiSettings.model || DEFAULT_CLAUDE_MODEL,
+        maxTokens: aiSettings.maxTokens,
+        messages: [
+          ...session.messages.map(aiMessageToSummaryApi),
+          { role: 'user', content: t('aiWorkbench.summarizePrompt') },
+        ],
+        signal: ac.signal,
+        onDelta: (delta) => {
+          acc += delta;
+          setAiRun({ sessionId, text: acc, startedAt });
+        },
+      });
+      const summary = (result.text || acc).trim();
+      if (!summary) {
+        setAiRunError({
+          sessionId,
+          message: t('aiWorkbench.emptyReply', { reason: result.stopReason ?? 'unknown' }),
+        });
+        return;
+      }
+      const now = new Date().toISOString();
+      const node: AiSessionNode = {
+        id: crypto.randomUUID(),
+        parentId: session.parentId,
+        kind: 'session',
+        title: t('aiWorkbench.summarySessionTitle', { title: session.title }),
+        messages: [
+          { role: 'user', content: `${t('aiWorkbench.summaryContextIntro')}\n\n${summary}`, ts: now },
+          { role: 'assistant', content: t('aiWorkbench.summaryContinueReply'), ts: now },
+        ],
+        sortOrder: Date.now(),
+        updatedAt: now,
+      };
+      setAiSessions((prev) => [...prev, node]);
+      persistAiSession(node);
+      setActiveAiSessionId(node.id);
+    } catch (err) {
       if (!(err instanceof DOMException && err.name === 'AbortError')) {
         const message =
           err instanceof AnthropicTimeoutError
@@ -4353,8 +4458,10 @@ export function VaultApp() {
               onSend={(text, attachments) => void runAiRequest(activeAiSession.id, text, attachments)}
               onStop={handleAiStop}
               onDeleteMessage={(index) => handleAiDeleteMessage(activeAiSession.id, index)}
+              onResendMessage={(index) => handleAiResendMessage(activeAiSession.id, index)}
               prepareAttachment={handlePrepareAiAttachment}
               onConvertToNote={(messages) => void handleAiConvertToNote(activeAiSession.id, messages)}
+              onSummarizeToNew={() => void handleAiSummarizeToNew(activeAiSession.id)}
               onOpenSettings={() => setShowSettings(true)}
               findRequest={aiFindRequest}
             />

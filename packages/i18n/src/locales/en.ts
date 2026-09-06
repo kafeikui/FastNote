@@ -206,6 +206,7 @@ export const en: Dictionary = {
     exportAsMd: 'Markdown (.md)',
     exportAsDoc: 'Word document (.doc)',
     deleteMessage: 'Delete this message',
+    resendMessage: 'Resend this message',
     timeoutConnect:
       'Timed out connecting to the Anthropic server (no response in 30s). Check that api.anthropic.com is reachable from your network (a proxy is required in some regions) and that the model ID is spelled correctly (e.g. claude-sonnet-5).',
     timeoutStream: 'The reply stream stalled (no data for 90s); the request was stopped — you can retry.',
@@ -223,6 +224,17 @@ export const en: Dictionary = {
     truncatedMaxTokens: 'The reply was cut off at the token limit (stop_reason=max_tokens); it may be incomplete — reply "continue" to resume.',
     emptyReply: 'The reply came back empty (stop_reason={reason}); please retry.',
     confirmDeleteMessage: 'Delete this message? (history already sent to the AI is unaffected)',
+    summarizeToNew: 'Summarize & continue',
+    summarizeToNewHint:
+      'Have the AI summarize this session, then continue in a fresh session seeded with the summary (faster and lighter for long sessions)',
+    summarizeToNewConfirm:
+      'The AI will summarize this session and a new session seeded with the summary will open. The current session stays unchanged. Continue?',
+    summarizePrompt:
+      'Summarize the entire conversation above into a briefing usable as context for a follow-up conversation: keep key facts, conclusions, code and data specifics, my preferences, and open questions. Output as concise Markdown bullet points, with no greetings or extra commentary.',
+    summarySessionTitle: '{title} (cont.)',
+    summaryContextIntro:
+      'Below is a summary of a previous conversation. Treat it as the background context for this session:',
+    summaryContinueReply: 'Got it — I have absorbed the context above. Please continue with your questions or tasks.',
     toNote: 'To note',
     toNoteTitle: 'Convert Q&A to a note',
     toNotePairs: 'This session has {count} Q&A pair(s)',
