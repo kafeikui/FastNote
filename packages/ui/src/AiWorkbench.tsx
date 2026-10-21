@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { AiAttachment, AiMessage, AiSessionNode } from '@fastnote/shared';
 import { useT } from '@fastnote/i18n';
 import { MarkdownView, renderMarkdownHtml } from './MarkdownView';
+import { nameClipboardFiles } from './clipboardFiles';
 
 /** Splits plain text into React nodes with query occurrences wrapped in find-marks. */
 function renderHighlightedText(text: string, query: string): ReactNode {
@@ -335,7 +336,7 @@ export function AiWorkbench({
     composerDrafts.delete(session.id);
   };
 
-  const handleFilesPicked = async (files: FileList | null) => {
+  const handleFilesPicked = async (files: FileList | File[] | null) => {
     if (!files || files.length === 0) return;
     setAttaching(true);
     try {
@@ -351,6 +352,18 @@ export function AiWorkbench({
       setAttaching(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
+  };
+
+  /**
+   * Ctrl+V with files on the clipboard (screenshots, copied files — one or several) attaches
+   * them instead of pasting text; they go through the same prepareAttachment pipeline as the
+   * 📎 picker (incl. image downscaling), sequentially via handleFilesPicked.
+   */
+  const handleComposerPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(e.clipboardData?.files ?? []);
+    if (files.length === 0) return;
+    e.preventDefault();
+    void handleFilesPicked(nameClipboardFiles(files));
   };
 
   /** Which message's export menu (md / Word) is open, if any. */
@@ -713,6 +726,7 @@ export function AiWorkbench({
               placeholder={t('aiWorkbench.inputPlaceholder')}
               rows={3}
               onChange={(e) => setDraft(e.target.value)}
+              onPaste={handleComposerPaste}
               onKeyDown={(e) => {
                 if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
                   // Type a literal tab character instead of moving focus.

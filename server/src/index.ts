@@ -101,20 +101,52 @@ app.put<{ Body: { vault_salt?: string } }>('/api/v1/vault-salt', async (req, rep
 
 app.put<{
   Params: { noteId: string };
-  Body: { ciphertext: string; version: number; content_hash: string; deleted?: boolean };
+  Body: {
+    ciphertext: string;
+    version: number;
+    content_hash: string;
+    deleted?: boolean;
+    /** Compare-and-set: the server version the client's edit was based on (CAS clients only). */
+    base_version?: number;
+  };
 }>(
   '/api/v1/sync/notes/:noteId',
   async (req, reply) => {
     const userId = authUser(req.headers.authorization);
     if (!userId) return reply.code(401).send({ error: 'unauthorized' });
     const { noteId } = req.params;
-    const { ciphertext, version, content_hash, deleted } = req.body;
-    const existingVersion = store.getNoteVersion(userId, noteId);
-    if (existingVersion !== undefined && version < existingVersion) {
-      return reply.code(409).send({ error: 'version_conflict', server_version: existingVersion });
+    const { ciphertext, version, content_hash, deleted, base_version } = req.body;
+    const existing = store.getNote(userId, noteId);
+    const existingVersion = existing?.version;
+    let conflict = false;
+    if (existingVersion !== undefined) {
+      if (typeof base_version === 'number') {
+        // CAS: anything written since the client's base is a concurrent edit — unless it is the
+        // very same content (e.g. the client re-pushing after a lost response).
+        conflict = base_version !== existingVersion && content_hash !== existing!.content_hash;
+      } else {
+        // Legacy clients (no base): last-writer-wins unless clearly stale.
+        conflict = version < existingVersion;
+      }
     }
-    store.upsertNote(userId, noteId, ciphertext, version, content_hash, new Date().toISOString(), !!deleted);
-    return { ok: true };
+    if (conflict && existing) {
+      return reply.code(409).send({
+        error: 'version_conflict',
+        server_version: existingVersion,
+        current: {
+          note_id: existing.note_id,
+          ciphertext: existing.ciphertext,
+          version: existing.version,
+          content_hash: existing.content_hash ?? '',
+          deleted: existing.deleted === 1,
+          updated_at: existing.updated_at,
+        },
+      });
+    }
+    // Keep the stored version monotonic so other devices' "newer than mine" checks stay valid.
+    const nextVersion = existingVersion !== undefined ? Math.max(version, existingVersion + 1) : version;
+    store.upsertNote(userId, noteId, ciphertext, nextVersion, content_hash, new Date().toISOString(), !!deleted);
+    return { ok: true, server_version: nextVersion };
   },
 );
 

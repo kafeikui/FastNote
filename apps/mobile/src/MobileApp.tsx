@@ -6,6 +6,7 @@ import {
   ensureLegacyVaultInRegistry,
   loadChatSessions,
   loadChatUnread,
+  loadDeviceLabel,
   loadServerUrl,
   loadSession,
   loadStorageNamespace,
@@ -32,7 +33,7 @@ import {
   wrapKey,
 } from '@fastnote/crypto';
 import { IMClient, deriveSelfChatRootKey, verifyExchangeKeypair } from '@fastnote/im';
-import { SyncClient } from '@fastnote/sync';
+import { SyncClient, type SyncClientOptions } from '@fastnote/sync';
 import { createStorage } from '@fastnote/storage';
 import { NoteEditor } from '@fastnote/editor';
 import { TableEditor, createEmptyTable, parseTableDocument, serializeTable, tableToSearchText } from '@fastnote/table';
@@ -81,6 +82,8 @@ import {
   AiWorkbench,
   ChatPanel,
   ChatSidebar,
+  ConflictBanner,
+  ConflictMergeView,
   LogsModal,
   NoteTree,
   ToolsPanel,
@@ -141,6 +144,18 @@ function newNode(nodeType: NodeType, parentId: string | null, sortOrder: number,
     syncStatus: 'pending',
     deleted: false,
     updatedAt: new Date().toISOString(),
+  };
+}
+
+/** Sync-client options: localized conflict-copy titles tagged with this device and the time. */
+function buildSyncOptions(t: TFunction): SyncClientOptions {
+  return {
+    conflictCopyTitle: (title) => {
+      const d = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const time = `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      return t('conflictMerge.copyTitle', { title: title || t('common.untitled'), device: loadDeviceLabel(), time });
+    },
   };
 }
 
@@ -253,6 +268,10 @@ export function MobileApp() {
   const [activeTool, setActiveTool] = useState<ToolId>('password');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** Conflict copy currently open in the side-by-side merge view. */
+  const [conflictMergeId, setConflictMergeId] = useState<string | null>(null);
+  /** Per-note nonce telling the render-mode editor to reload content changed outside it (sync/merge). */
+  const [noteContentNonce, setNoteContentNonce] = useState<Record<string, number>>({});
   const [showLogs, setShowLogs] = useState(false);
   // Bumped on "clear" so the modal re-renders with the emptied buffer.
   const [, setLogsTick] = useState(0);
@@ -498,16 +517,55 @@ export function MobileApp() {
     }
   };
 
+  const bumpNoteContent = (ids: string[]) => {
+    if (ids.length === 0) return;
+    setNoteContentNonce((prev) => {
+      const next = { ...prev };
+      for (const id of ids) next[id] = (next[id] ?? 0) + 1;
+      return next;
+    });
+  };
+
+  // --- Sync conflict copies: merge view actions ---------------------------------
+  const conflictMergeCopy = conflictMergeId ? notes.find((n) => n.id === conflictMergeId && !n.deleted) ?? null : null;
+  const conflictMergeCanonical =
+    conflictMergeCopy?.conflictOf
+      ? notes.find((n) => n.id === conflictMergeCopy.conflictOf && !n.deleted && !n.trashed) ?? null
+      : null;
+
+  const handleConflictSaveMerged = async (content: string) => {
+    if (!conflictMergeCopy || !conflictMergeCanonical) return;
+    setConflictMergeId(null);
+    await handleDeleteForever([conflictMergeCopy.id]);
+    if (content !== conflictMergeCanonical.contentMd) {
+      updateNoteById(conflictMergeCanonical.id, { contentMd: content });
+      bumpNoteContent([conflictMergeCanonical.id]);
+    }
+  };
+
+  const handleConflictDeleteCopy = async () => {
+    if (!conflictMergeCopy) return;
+    setConflictMergeId(null);
+    await handleDeleteForever([conflictMergeCopy.id]);
+  };
+
+  const handleConflictKeepCopy = (copyId: string) => {
+    updateNoteById(copyId, { conflictOf: undefined });
+    setConflictMergeId((cur) => (cur === copyId ? null : cur));
+  };
+
   /** Full notes push+pull against the account (tombstones, conflicts, remote deletes). */
   const syncNotes = async (derived: VaultKeys, userSession: UserSession) => {
     if (!notesLoadedRef.current) return;
     setNotesSyncing(true);
     try {
-      const client = new SyncClient(new ApiClient(serverUrl(), locale), userSession);
+      const client = new SyncClient(new ApiClient(serverUrl(), locale), userSession, buildSyncOptions(t));
+      const before = new Map(notesRef.current.map((n) => [n.id, n.contentMd]));
       const { notes: merged } = await client.syncAll(notesRef.current, derived.notesKey, saveNoteNow, storage);
       if (keysRef.current === derived) {
         setNotes(merged);
         setActiveNoteId((cur) => (cur && merged.some((n) => n.id === cur && !n.trashed) ? cur : null));
+        bumpNoteContent(merged.filter((n) => before.has(n.id) && before.get(n.id) !== n.contentMd).map((n) => n.id));
       }
     } catch (err) {
       console.warn('[notes] sync failed', err);
@@ -1403,11 +1461,16 @@ export function MobileApp() {
     const s = sessionRef.current;
     if (!k || !s) return;
     const client = new SyncClient(new ApiClient(serverUrl(), locale), s);
-    const { pulled } = await client.syncAiSessions(storage, k.notesKey);
+    const { pulled, oversized } = await client.syncAiSessions(storage, k.notesKey);
     if (pulled > 0 && keysRef.current === k) {
       const list = await storage.listAiSessions(k.notesKey);
       setAiSessions(list);
       setActiveAiSessionId((cur) => (cur && list.some((n) => n.id === cur) ? cur : null));
+    }
+    // Everything else synced; thrown last so the tree's alert explains the skipped sessions.
+    if (oversized.length > 0) {
+      const list = oversized.map((o) => `${o.title} (${(o.bytes / 1024 / 1024).toFixed(1)}MB)`).join(', ');
+      throw new Error(t('aiPanel.syncTooLarge', { list }));
     }
   };
 
@@ -1714,11 +1777,31 @@ export function MobileApp() {
     const session = aiSessions.find((s) => s.id === sessionId && s.kind === 'session');
     if (!session || session.messages.length === 0) return;
     setAiRunError(null);
+    // The continuation session is created (in the same folder) and activated up front, so the
+    // summary visibly streams inside the new session rather than in the one being summarized.
+    const node: AiSessionNode = {
+      id: crypto.randomUUID(),
+      parentId: session.parentId,
+      kind: 'session',
+      title: t('aiWorkbench.summarySessionTitle', { title: session.title }),
+      messages: [],
+      sortOrder: Date.now(),
+      updatedAt: new Date().toISOString(),
+    };
+    setAiSessions((prev) => [...prev, node]);
+    persistAiSession(node);
+    setActiveAiSessionId(node.id);
     const startedAt = Date.now();
-    setAiRun({ sessionId, text: '', startedAt });
+    setAiRun({ sessionId: node.id, text: '', startedAt });
     const ac = new AbortController();
     aiAbortRef.current = ac;
     let acc = '';
+    /** Failed/aborted/empty run: drop the still-empty continuation session, return to the original. */
+    const rollback = () => {
+      setAiSessions((prev) => prev.filter((s) => s.id !== node.id));
+      void storage.deleteAiSession(node.id);
+      setActiveAiSessionId(sessionId);
+    };
     try {
       const client = new AnthropicClient(aiSettings.apiKey);
       const result = await client.streamMessage({
@@ -1731,11 +1814,12 @@ export function MobileApp() {
         signal: ac.signal,
         onDelta: (delta) => {
           acc += delta;
-          setAiRun({ sessionId, text: acc, startedAt });
+          setAiRun({ sessionId: node.id, text: acc, startedAt });
         },
       });
       const summary = (result.text || acc).trim();
       if (!summary) {
+        rollback();
         setAiRunError({
           sessionId,
           message: t('aiWorkbench.emptyReply', { reason: result.stopReason ?? 'unknown' }),
@@ -1743,22 +1827,12 @@ export function MobileApp() {
         return;
       }
       const now = new Date().toISOString();
-      const node: AiSessionNode = {
-        id: crypto.randomUUID(),
-        parentId: session.parentId,
-        kind: 'session',
-        title: t('aiWorkbench.summarySessionTitle', { title: session.title }),
-        messages: [
-          { role: 'user', content: `${t('aiWorkbench.summaryContextIntro')}\n\n${summary}`, ts: now },
-          { role: 'assistant', content: t('aiWorkbench.summaryContinueReply'), ts: now },
-        ],
-        sortOrder: Date.now(),
-        updatedAt: now,
-      };
-      setAiSessions((prev) => [...prev, node]);
-      persistAiSession(node);
-      setActiveAiSessionId(node.id);
+      handleAiMessagesChange(node.id, [
+        { role: 'user', content: `${t('aiWorkbench.summaryContextIntro')}\n\n${summary}`, ts: now },
+        { role: 'assistant', content: t('aiWorkbench.summaryContinueReply'), ts: now },
+      ]);
     } catch (err) {
+      rollback();
       if (!(err instanceof DOMException && err.name === 'AbortError')) {
         const message =
           err instanceof AnthropicTimeoutError
@@ -1983,6 +2057,13 @@ export function MobileApp() {
             activeNote ? (
               activeNote.nodeType === 'table' ? (
                 <div className="fn-mobile__note-pane fn-mobile__note-pane--table">
+                  <ConflictBanner
+                    note={activeNote}
+                    notes={notes}
+                    onCompare={setConflictMergeId}
+                    onOpen={(id) => setActiveNoteId(id)}
+                    onKeepCopy={handleConflictKeepCopy}
+                  />
                   <TableEditor
                     key={activeNote.id}
                     document={parseTableDocument(activeNote.contentMd, locale)}
@@ -2007,6 +2088,13 @@ export function MobileApp() {
                       {t('vaultApp.modeSource')}
                     </button>
                   </div>
+                  <ConflictBanner
+                    note={activeNote}
+                    notes={notes}
+                    onCompare={setConflictMergeId}
+                    onOpen={(id) => setActiveNoteId(id)}
+                    onKeepCopy={handleConflictKeepCopy}
+                  />
                   <div className="fn-mobile__note-scroll">
                     <NoteEditor
                       key={activeNote.id}
@@ -2014,6 +2102,7 @@ export function MobileApp() {
                       mode={noteMode}
                       content={activeNote.contentMd}
                       onChange={(md) => updateNoteById(activeNote.id, { contentMd: md })}
+                      externalContentNonce={noteContentNonce[activeNote.id] ?? 0}
                     />
                   </div>
                 </div>
@@ -2291,6 +2380,17 @@ export function MobileApp() {
             bioEnabled={bioEnabled}
             onToggleBiometric={handleToggleBiometric}
             onClose={() => setSettingsOpen(false)}
+          />
+        )}
+
+        {conflictMergeCopy && (
+          <ConflictMergeView
+            canonical={conflictMergeCanonical}
+            copy={conflictMergeCopy}
+            onSaveMerged={handleConflictSaveMerged}
+            onDeleteCopy={handleConflictDeleteCopy}
+            onKeepCopy={() => handleConflictKeepCopy(conflictMergeCopy.id)}
+            onClose={() => setConflictMergeId(null)}
           />
         )}
 

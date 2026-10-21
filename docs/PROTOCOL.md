@@ -90,12 +90,16 @@
 {
   "ciphertext": "<base64>",
   "version": 3,
-  "content_hash": "<hex>"
+  "content_hash": "<hex>",
+  "base_version": 2
 }
 ```
 
-- 若服务端已有更高 `version` → `409 { error: 'version_conflict', server_version }`；客户端策略：保留本地为"冲突副本"（新建节点），不覆盖
-- 成功 → `{ "ok": true }`；`updated_at` 由服务端写入当前时间
+- `base_version`（可选）= 客户端这次编辑所基于的服务端版本（compare-and-set）。带该字段时，只要服务端当前 `version !== base_version` 且 `content_hash` 不同即判定为并发冲突（两台设备同时从 N 改到 N+1 也能被识别）；不带时沿用旧规则（请求 `version` 落后于服务端才冲突）。
+- 冲突 → `409 { error: 'version_conflict', server_version, current: { note_id, ciphertext, version, content_hash, deleted, updated_at } }`，`current` 为服务端当前条目，客户端据此直接合并、无需再 pull。
+- 客户端策略（`packages/sync`）：① 内容相同 → 直接采用服务端；② 文本笔记且本地保存有上次同步的 base 快照（`note_sync_base` 表）→ 用 diff-match-patch 做三方合并（两个方向回放必须都干净且结果一致），合并结果立即以新 base 再推一次；③ 其它（表格、无 base、改动重叠）→ **服务端版本成为正本**，本地改动另存为冲突副本（标题 `<原标题>（冲突副本 · <设备> · <时间>）`，密文内 `conflict_of` 指向正本 id，并作为普通节点同步到各设备），UI 通过左右对比视图合并后删除副本。
+- 删除墓碑同样带 `base_version`；若被 409（对方在我们删除后又编辑过）则"编辑优先"：本地丢弃墓碑，由 pull 恢复带对方改动的笔记。
+- 成功 → `{ "ok": true, "server_version": <n> }`；服务端保证 `version` 单调递增（取 `max(请求 version, 现有 version + 1)`），客户端应以 `server_version` 更新本地 `serverVersion`；`updated_at` 由服务端写入当前时间
 
 ### GET `/api/v1/sync/notes`（需鉴权）
 

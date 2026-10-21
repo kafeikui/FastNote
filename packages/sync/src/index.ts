@@ -10,6 +10,13 @@ import {
 import type { ApiClient, SyncNoteItem } from '@fastnote/api';
 import type { UserSession } from '@fastnote/shared';
 import type { StorageAdapter } from '@fastnote/storage';
+import DiffMatchPatch from 'diff-match-patch';
+
+/**
+ * AI session blobs larger than this are not pushed (the server's request-body limit is 32MB;
+ * an oversized PUT gets the connection reset, surfacing as an opaque "Failed to fetch").
+ */
+const MAX_AI_SESSION_PUSH_BYTES = 30 * 1024 * 1024;
 
 function toPayload(note: NoteNode): SyncNotePayload {
   return {
@@ -20,6 +27,7 @@ function toPayload(note: NoteNode): SyncNotePayload {
     sort_order: note.sortOrder,
     deleted: note.deleted,
     trashed: note.trashed === true,
+    ...(note.conflictOf ? { conflict_of: note.conflictOf } : {}),
     updated_at: note.updatedAt,
   };
 }
@@ -38,8 +46,41 @@ function fromPayload(noteId: string, payload: SyncNotePayload, version: number, 
     syncStatus: 'synced',
     deleted: payload.deleted,
     trashed: payload.trashed === true,
+    ...(payload.conflict_of ? { conflictOf: payload.conflict_of } : {}),
     updatedAt: payload.updated_at,
   };
+}
+
+/**
+ * Three-way text merge: replays the local edits (base → local) onto the remote text and the
+ * remote edits (base → remote) onto the local text. Both replays must apply cleanly and agree —
+ * if they don't, the edits overlap (or are adjacent insertions whose order is ambiguous) and
+ * the caller falls back to a conflict copy. Returns null when no clean merge exists.
+ */
+export function mergeThreeWay(base: string, local: string, remote: string): string | null {
+  if (local === remote) return local;
+  if (base === local) return remote;
+  if (base === remote) return local;
+  const dmp = new DiffMatchPatch();
+  // Strict matching: fuzzy context matches would let a patch land on a line the other side
+  // rewrote, which is precisely the overlap we must not resolve silently.
+  dmp.Match_Threshold = 0.1;
+  dmp.Patch_DeleteThreshold = 0.1;
+  const apply = (from: string, to: string, onto: string): string | null => {
+    const patches = dmp.patch_make(from, to);
+    const [merged, results] = dmp.patch_apply(patches, onto) as [string, boolean[]];
+    return results.every(Boolean) ? merged : null;
+  };
+  const a = apply(base, local, remote);
+  if (a === null) return null;
+  const b = apply(base, remote, local);
+  if (b === null || a !== b) return null;
+  return a;
+}
+
+export interface SyncClientOptions {
+  /** Builds a conflict copy's title from the original (hosts add device label and time). */
+  conflictCopyTitle?: (title: string) => string;
 }
 
 export function encryptNoteForSync(note: NoteNode, notesKey: Uint8Array): EncryptedPayload {
@@ -85,7 +126,109 @@ export class SyncClient {
   constructor(
     private api: ApiClient,
     private session: UserSession,
+    private opts: SyncClientOptions = {},
   ) {}
+
+  /**
+   * Resolves a note whose local edits collide with a newer server version.
+   *
+   *  1. Same content on both sides (e.g. a re-push after a lost response): adopt the server copy.
+   *  2. Text notes with a recorded last-synced base: three-way merge; a clean merge is pushed
+   *     right away (CAS against the server version we just saw).
+   *  3. Otherwise (tables, no base, overlapping edits): the server version becomes the canonical
+   *     note and the local edits are kept in a clearly named conflict copy next to it, linked via
+   *     `conflictOf` so the UI can offer a side-by-side merge.
+   *
+   * Returns true when a conflict copy was created.
+   */
+  private async resolveNoteConflict(
+    local: NoteNode,
+    remote: NoteNode,
+    notesKey: Uint8Array,
+    onSave: (note: NoteNode) => Promise<void>,
+    storage: StorageAdapter | undefined,
+    localMap: Map<string, NoteNode>,
+  ): Promise<boolean> {
+    const commit = async (synced: NoteNode) => {
+      await onSave(synced);
+      localMap.set(synced.id, synced);
+      if (storage) await storage.saveNoteSyncBase(synced, notesKey);
+    };
+
+    const base = storage ? await storage.getNoteSyncBase(local.id, notesKey) : null;
+    const localTitleChanged = base ? local.title !== base.title : local.title !== remote.title;
+    const remoteTitleChanged = base ? remote.title !== base.title : false;
+    const title = localTitleChanged && !remoteTitleChanged ? local.title : remote.title;
+
+    let contentMd: string | null = null;
+    if (local.contentHash === remote.contentHash || local.contentMd === remote.contentMd) {
+      contentMd = remote.contentMd;
+    } else if (local.nodeType === 'note' && base) {
+      contentMd = mergeThreeWay(base.contentMd, local.contentMd, remote.contentMd);
+    }
+
+    if (contentMd !== null) {
+      if (contentMd === remote.contentMd && title === remote.title) {
+        await commit({ ...remote, syncStatus: 'synced' });
+        return false;
+      }
+      const merged: NoteNode = {
+        ...remote,
+        title,
+        contentMd,
+        contentHash: hashContent(contentMd),
+        version: Math.max(local.version, remote.version) + 1,
+        serverVersion: remote.version,
+        syncStatus: 'pending',
+        updatedAt: new Date().toISOString(),
+      };
+      const enc = encryptNoteForSync(merged, notesKey);
+      const res = await this.api.pushNote(this.session.token, merged.id, {
+        ciphertext: encodeWireCiphertext(enc),
+        version: merged.version,
+        content_hash: merged.contentHash,
+        base_version: remote.version,
+      });
+      if (res.conflict) {
+        // Lost another race in between — keep the merge locally; the next sync retries it.
+        await onSave(merged);
+        localMap.set(merged.id, merged);
+        return false;
+      }
+      await commit({ ...merged, syncStatus: 'synced', serverVersion: res.serverVersion ?? merged.version });
+      return false;
+    }
+
+    // Fallback: server copy is canonical, local edits move into a conflict copy.
+    const now = new Date().toISOString();
+    const makeTitle = this.opts.conflictCopyTitle ?? ((t: string) => `${t} (conflict copy)`);
+    const copy: NoteNode = {
+      ...local,
+      id: crypto.randomUUID(),
+      title: makeTitle(local.title),
+      conflictOf: local.id,
+      version: 1,
+      serverVersion: 0,
+      syncStatus: 'pending',
+      trashed: false,
+      updatedAt: now,
+    };
+    const encCopy = encryptNoteForSync(copy, notesKey);
+    const copyRes = await this.api.pushNote(this.session.token, copy.id, {
+      ciphertext: encodeWireCiphertext(encCopy),
+      version: copy.version,
+      content_hash: copy.contentHash,
+      base_version: 0,
+    });
+    if (copyRes.conflict) {
+      await onSave(copy);
+      localMap.set(copy.id, copy);
+    } else {
+      await commit({ ...copy, syncStatus: 'synced', serverVersion: copyRes.serverVersion ?? copy.version });
+    }
+    await commit({ ...remote, syncStatus: 'synced' });
+    return true;
+  }
 
   async syncAll(
     notes: NoteNode[],
@@ -110,15 +253,28 @@ export class SyncClient {
       const deletedStubs = await storage.listDeletedNoteStubs();
       for (const stub of deletedStubs) {
         const enc = encryptNoteForSync(stub, notesKey);
-        const pushResult = await this.api.pushNote(this.session.token, stub.id, {
+        await this.api.pushNote(this.session.token, stub.id, {
           ciphertext: encodeWireCiphertext(enc),
           version: stub.version,
           content_hash: stub.contentHash,
           deleted: true,
+          base_version: stub.serverVersion,
         });
-        if (!pushResult.conflict) await storage.deleteNote(stub.id);
+        // Accepted, or rejected because another device edited the note after we last saw it —
+        // in the latter case the edit wins: drop the tombstone and let the pull below restore
+        // the note with those edits.
+        await storage.deleteNote(stub.id);
       }
     }
+
+    // Lazily fetched full pull, only needed for 409s from a server that doesn't echo the
+    // current blob (older server builds).
+    let remoteItemsCache: SyncNoteItem[] | null = null;
+    const findRemote = async (noteId: string, echoed?: SyncNoteItem): Promise<SyncNoteItem | undefined> => {
+      if (echoed) return echoed;
+      remoteItemsCache ??= await this.api.pullNotes(this.session.token);
+      return remoteItemsCache.find((i) => i.note_id === noteId);
+    };
 
     for (const note of notes) {
       if (note.deleted || note.syncStatus === 'synced') continue;
@@ -127,22 +283,52 @@ export class SyncClient {
         ciphertext: encodeWireCiphertext(enc),
         version: note.version,
         content_hash: note.contentHash,
+        base_version: note.serverVersion,
       });
       if (pushResult.conflict) {
-        conflicts++;
-        const conflictCopy: NoteNode = {
-          ...note,
-          id: crypto.randomUUID(),
-          title: `${note.title} (冲突副本)`,
-          syncStatus: 'conflict',
-        };
-        await onSave(conflictCopy);
-        localMap.set(conflictCopy.id, conflictCopy);
+        const remoteItem = await findRemote(note.id, pushResult.serverItem);
+        if (!remoteItem) continue; // nothing to merge against; stays pending for the next sync
+        if (remoteItem.deleted) {
+          // Deleted on another device while we edited it: the edit wins, re-push on top of the
+          // tombstone's version.
+          const again = await this.api.pushNote(this.session.token, note.id, {
+            ciphertext: encodeWireCiphertext(enc),
+            version: Math.max(note.version, remoteItem.version + 1),
+            content_hash: note.contentHash,
+            base_version: remoteItem.version,
+          });
+          if (again.conflict) continue;
+          const synced: NoteNode = {
+            ...note,
+            version: Math.max(note.version, remoteItem.version + 1),
+            syncStatus: 'synced',
+            serverVersion: again.serverVersion ?? Math.max(note.version, remoteItem.version + 1),
+          };
+          await onSave(synced);
+          localMap.set(note.id, synced);
+          if (storage) await storage.saveNoteSyncBase(synced, notesKey);
+          pushed++;
+          continue;
+        }
+        const remote = decryptNoteFromSync(
+          note.id,
+          remoteItem.ciphertext,
+          notesKey,
+          remoteItem.version,
+          remoteItem.version,
+        );
+        if (await this.resolveNoteConflict(note, remote, notesKey, onSave, storage, localMap)) conflicts++;
+        else pushed++;
         continue;
       }
-      const synced = { ...note, syncStatus: 'synced' as const, serverVersion: note.version };
+      const synced = {
+        ...note,
+        syncStatus: 'synced' as const,
+        serverVersion: pushResult.serverVersion ?? note.version,
+      };
       await onSave(synced);
       localMap.set(note.id, synced);
+      if (storage) await storage.saveNoteSyncBase(synced, notesKey);
       pushed++;
     }
 
@@ -173,29 +359,27 @@ export class SyncClient {
       if (!local) {
         await onSave(remote);
         localMap.set(remote.id, remote);
+        if (storage) await storage.saveNoteSyncBase(remote, notesKey);
         pulled++;
         continue;
       }
       if (item.version > local.serverVersion && item.content_hash !== local.contentHash) {
-        if (local.syncStatus === 'pending') {
-          const conflictCopy: NoteNode = {
-            ...remote,
-            id: crypto.randomUUID(),
-            title: `${remote.title} (冲突副本)`,
-            syncStatus: 'conflict',
-          };
-          await onSave(conflictCopy);
-          localMap.set(conflictCopy.id, conflictCopy);
-          conflicts++;
+        if (local.syncStatus !== 'synced') {
+          // Local edits that could not be pushed above (e.g. a 409 without a usable remote):
+          // same merge/copy resolution as on push.
+          if (await this.resolveNoteConflict(local, remote, notesKey, onSave, storage, localMap)) conflicts++;
+          else pulled++;
         } else {
           await onSave(remote);
           localMap.set(remote.id, remote);
+          if (storage) await storage.saveNoteSyncBase(remote, notesKey);
           pulled++;
         }
       } else if (item.version > local.serverVersion) {
         const synced = { ...remote, syncStatus: 'synced' as const };
         await onSave(synced);
         localMap.set(synced.id, synced);
+        if (storage) await storage.saveNoteSyncBase(synced, notesKey);
         pulled++;
       }
     }
@@ -381,9 +565,10 @@ export class SyncClient {
   async syncAiSessions(
     storage: StorageAdapter,
     notesKey: Uint8Array,
-  ): Promise<{ pushed: number; pulled: number }> {
+  ): Promise<{ pushed: number; pulled: number; oversized: Array<{ id: string; title: string; bytes: number }> }> {
     let pushed = 0;
     let pulled = 0;
+    const oversized: Array<{ id: string; title: string; bytes: number }> = [];
 
     const pending = await storage.listPendingAiSessions(notesKey);
     for (const { session, deleted } of pending) {
@@ -396,8 +581,17 @@ export class SyncClient {
         trashed: session.trashed === true,
         updated_at: session.updatedAt,
       };
+      const ciphertext = encodeWireCiphertext(encryptJson(notesKey, payload));
+      // Sessions whose encrypted blob exceeds the server's request-body limit (32MB) are
+      // skipped and reported instead of attempted: the server resets the connection on an
+      // oversized PUT, which surfaces as an opaque "Failed to fetch" and used to abort the
+      // whole sync (typically sessions still holding pre-downscale full-size image base64).
+      if (ciphertext.length > MAX_AI_SESSION_PUSH_BYTES) {
+        oversized.push({ id: session.id, title: session.title, bytes: ciphertext.length });
+        continue;
+      }
       await this.api.pushAiSession(this.session.token, session.id, {
-        ciphertext: encodeWireCiphertext(encryptJson(notesKey, payload)),
+        ciphertext,
         updated_at: session.updatedAt,
         deleted,
       });
@@ -436,7 +630,7 @@ export class SyncClient {
       pulled++;
     }
 
-    return { pushed, pulled };
+    return { pushed, pulled, oversized };
   }
 }
 

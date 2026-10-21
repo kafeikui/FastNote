@@ -263,7 +263,9 @@ function TreeNode({
             {showSyncStatus && node.syncStatus === 'pending' && (
               <span className="fn-sync-dot" title={t('noteTree.pendingSync')} />
             )}
-            {node.syncStatus === 'conflict' && <span className="fn-conflict-dot" title={t('noteTree.conflict')} />}
+            {(node.syncStatus === 'conflict' || node.conflictOf) && (
+              <span className="fn-conflict-dot" title={t('noteTree.conflict')} />
+            )}
           </button>
         )}
         <div className="fn-tree-node__actions fn-tree-node__actions--hover">

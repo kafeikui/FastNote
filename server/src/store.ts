@@ -204,6 +204,13 @@ export class JsonRelayStore {
     return this.data.note_blobs.find((n) => n.user_id === userId && n.note_id === noteId)?.version;
   }
 
+  getNote(userId: string, noteId: string): NoteBlobRecord | undefined {
+    const row = this.data.note_blobs.find((n) => n.user_id === userId && n.note_id === noteId);
+    if (!row) return undefined;
+    const { user_id: _uid, ...rest } = row;
+    return rest;
+  }
+
   upsertNote(
     userId: string,
     noteId: string,

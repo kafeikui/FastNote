@@ -19,7 +19,7 @@ import {
   type EncryptedPayload,
 } from '@fastnote/crypto';
 
-const DB_VERSION = 6;
+const DB_VERSION = 7;
 
 export interface StorageOptions {
   /** Logical vault namespace — maps to IndexedDB database name. */
@@ -79,11 +79,37 @@ interface StoredAiSession {
   trashed?: boolean;
 }
 
+/**
+ * Last-synced snapshot of a note (title + content as they were when the note was last pushed or
+ * pulled), encrypted with notesKey. It is the "base" of the three-way merge that resolves
+ * concurrent edits from two devices; kept in its own store so ordinary note saves don't have to
+ * read-modify-write it.
+ */
+interface StoredNoteSyncBase {
+  id: string;
+  titleEnc: string;
+  titleNonce: string;
+  contentEnc: string;
+  contentNonce: string;
+  /** Server version this snapshot corresponds to. */
+  version: number;
+}
+
+export interface NoteSyncBase {
+  title: string;
+  contentMd: string;
+  version: number;
+}
+
 interface FastNoteDB extends DBSchema {
   vault_meta: { key: string; value: string };
   ai_sessions_local: {
     key: string;
     value: StoredAiSession;
+  };
+  note_sync_base: {
+    key: string;
+    value: StoredNoteSyncBase;
   };
   notes_local: {
     key: string;
@@ -123,6 +149,8 @@ interface StoredNote {
   deleted: number;
   /** Recycle-bin flag (1 = trashed); optional so pre-existing rows read as "not trashed". */
   trashed?: number;
+  /** Conflict-copy link (id of the canonical note), see NoteNode.conflictOf. */
+  conflictOf?: string;
   updatedAt: string;
 }
 
@@ -184,6 +212,10 @@ export interface StorageAdapter {
   saveNote(note: NoteNode, notesKey: Uint8Array): Promise<void>;
   deleteNote(id: string): Promise<void>;
   listDeletedNoteStubs(): Promise<NoteNode[]>;
+  /** Last-synced snapshot (three-way merge base) of a note, if one was recorded. */
+  getNoteSyncBase(id: string, notesKey: Uint8Array): Promise<NoteSyncBase | null>;
+  /** Records the note's current title/content as its last-synced snapshot. */
+  saveNoteSyncBase(note: NoteNode, notesKey: Uint8Array): Promise<void>;
   purgeDeleted(): Promise<void>;
   listAttachments(noteId: string, notesKey: Uint8Array): Promise<NoteAttachment[]>;
   loadAttachmentDecrypted(
@@ -334,6 +366,7 @@ function toNodeStub(r: StoredNote): NoteNode {
     syncStatus: r.syncStatus,
     deleted: r.deleted === 1,
     trashed: r.trashed === 1,
+    ...(r.conflictOf ? { conflictOf: r.conflictOf } : {}),
     updatedAt: r.updatedAt,
   };
 }
@@ -358,6 +391,7 @@ async function toStoredRow(note: NoteNode, notesKey: Uint8Array): Promise<Stored
     syncStatus: note.syncStatus,
     deleted: note.deleted ? 1 : 0,
     trashed: note.trashed ? 1 : 0,
+    ...(note.conflictOf ? { conflictOf: note.conflictOf } : {}),
     updatedAt: note.updatedAt,
   };
 }
@@ -421,6 +455,9 @@ export class WebStorageAdapter implements StorageAdapter {
           }
           if (oldVersion < 6) {
             db.createObjectStore('ai_sessions_local', { keyPath: 'id' });
+          }
+          if (oldVersion < 7) {
+            db.createObjectStore('note_sync_base', { keyPath: 'id' });
           }
         },
       });
@@ -498,6 +535,32 @@ export class WebStorageAdapter implements StorageAdapter {
   async deleteNote(id: string): Promise<void> {
     const db = await this.getDb();
     await db.delete('notes_local', id);
+    await db.delete('note_sync_base', id);
+  }
+
+  async getNoteSyncBase(id: string, notesKey: Uint8Array): Promise<NoteSyncBase | null> {
+    const db = await this.getDb();
+    const r = await db.get('note_sync_base', id);
+    if (!r) return null;
+    return {
+      title: await decryptStringNative(notesKey, unpack(r.titleEnc, r.titleNonce)),
+      contentMd: await decryptStringNative(notesKey, unpack(r.contentEnc, r.contentNonce)),
+      version: r.version,
+    };
+  }
+
+  async saveNoteSyncBase(note: NoteNode, notesKey: Uint8Array): Promise<void> {
+    const db = await this.getDb();
+    const t = pack(await encryptStringNative(notesKey, note.title));
+    const c = pack(await encryptStringNative(notesKey, note.contentMd));
+    await db.put('note_sync_base', {
+      id: note.id,
+      titleEnc: t.enc,
+      titleNonce: t.nonce,
+      contentEnc: c.enc,
+      contentNonce: c.nonce,
+      version: note.serverVersion,
+    });
   }
 
   /** Tombstoned note rows (no decryption), for pushing deletions to the server. */

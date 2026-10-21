@@ -1,6 +1,6 @@
 {
   "name": "@fastnote/sync",
-  "version": "0.31.0",
+  "version": "0.32.0",
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
@@ -12,9 +12,11 @@
     "@fastnote/shared": "workspace:*",
     "@fastnote/crypto": "workspace:*",
     "@fastnote/api": "workspace:*",
-    "@fastnote/storage": "workspace:*"
+    "@fastnote/storage": "workspace:*",
+    "diff-match-patch": "^1.0.5"
   },
   "devDependencies": {
+    "@types/diff-match-patch": "^1.0.36",
     "typescript": "^5.7.2"
   }
 }

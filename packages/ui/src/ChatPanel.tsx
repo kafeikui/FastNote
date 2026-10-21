@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ChatAttachmentRef, ChatMessage } from '@fastnote/shared';
 import { useT } from '@fastnote/i18n';
 import { ChatAttachmentContent } from './ChatAttachmentContent';
+import { nameClipboardFiles } from './clipboardFiles';
 
 const SCROLL_BOTTOM_THRESHOLD = 48;
 
@@ -174,17 +175,7 @@ export function ChatPanel({
     const files = Array.from(e.clipboardData?.files ?? []);
     if (files.length === 0) return;
     e.preventDefault();
-    const named = files.map((f) => {
-      // Clipboard screenshots arrive as a generic "image.png" with no meaningful name;
-      // timestamp them so repeated pastes stay distinguishable in the thread.
-      if (f.name && f.name !== 'image.png') return f;
-      const ext = f.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png';
-      const d = new Date();
-      const pad = (n: number) => String(n).padStart(2, '0');
-      const ts = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
-      return new File([f], `pasted-${ts}.${ext}`, { type: f.type });
-    });
-    setPendingFiles((prev) => [...prev, ...named]);
+    setPendingFiles((prev) => [...prev, ...nameClipboardFiles(files)]);
   }
 
   async function handleSyncHistory() {

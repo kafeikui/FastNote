@@ -27,4 +27,6 @@ export type { EmbeddedAttachmentChipProps } from './EmbeddedAttachmentChip';
 export { DropdownMenu } from './DropdownMenu';
 export type { DropdownMenuProps } from './DropdownMenu';
 export { ToolsPanel, ToolsSidebar } from './ToolsPanel';
+export { ConflictMergeView, ConflictBanner } from './ConflictMergeView';
+export type { ConflictMergeViewProps, ConflictBannerProps } from './ConflictMergeView';
 export type { ToolId } from './ToolsPanel';

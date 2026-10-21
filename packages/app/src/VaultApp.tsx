@@ -73,6 +73,7 @@ import {
   loadVaultRegistry,
   saveVaultRegistry,
   createVaultRegistryEntry,
+  loadDeviceLabel,
   type ProxySettings,
 } from '@fastnote/api';
 import {
@@ -110,7 +111,7 @@ import { META_KEYS, downloadBlob, isEditableContentNode, computeTreeMove, applyS
 import type { TreeItem } from '@fastnote/shared';
 import type { TreeSortMode } from '@fastnote/shared';
 import { createStorage } from '@fastnote/storage';
-import { SyncClient } from '@fastnote/sync';
+import { SyncClient, type SyncClientOptions } from '@fastnote/sync';
 import { I18nProvider, loadLocale, saveLocale, translate, type Locale, type TFunction } from '@fastnote/i18n';
 import {
   TableEditor,
@@ -151,6 +152,8 @@ import {
   DropdownMenu,
   ToolsPanel,
   ToolsSidebar,
+  ConflictBanner,
+  ConflictMergeView,
   type ToolId,
   type VaultListItem,
 } from '@fastnote/ui';
@@ -201,6 +204,18 @@ function buildUpdated(current: NoteNode, patch: Partial<NoteNode>): NoteNode {
     contentHash: hashContent(contentMd),
     syncStatus: 'pending',
     updatedAt: new Date().toISOString(),
+  };
+}
+
+/** Sync-client options: localized conflict-copy titles tagged with this device and the time. */
+function buildSyncOptions(t: TFunction): SyncClientOptions {
+  return {
+    conflictCopyTitle: (title) => {
+      const d = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const time = `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      return t('conflictMerge.copyTitle', { title: title || t('common.untitled'), device: loadDeviceLabel(), time });
+    },
   };
 }
 
@@ -1477,6 +1492,8 @@ export function VaultApp() {
   const collabSessionsRef = useRef(new Map<string, CollabSession>());
   const [collabUi, setCollabUi] = useState<Record<string, CollabStatus>>({});
   const [collabModal, setCollabModal] = useState<string | null>(null);
+  /** Conflict copy currently open in the side-by-side merge view. */
+  const [conflictMergeId, setConflictMergeId] = useState<string | null>(null);
   const [collabContentNonce, setCollabContentNonce] = useState<Record<string, number>>({});
   /** Room code of each active session, kept for display so the initiator can share it later. */
   const [collabRoomCodes, setCollabRoomCodes] = useState<Record<string, string>>({});
@@ -2314,11 +2331,16 @@ export function VaultApp() {
     const s = sessionRef.current;
     if (!k || !s) return;
     const client = new SyncClient(new ApiClient(serverUrl, locale), s);
-    const { pulled } = await client.syncAiSessions(storage, k.notesKey);
+    const { pulled, oversized } = await client.syncAiSessions(storage, k.notesKey);
     if (pulled > 0 && keysRef.current === k) {
       const list = await storage.listAiSessions(k.notesKey);
       setAiSessions(list);
       setActiveAiSessionId((cur) => (cur && list.some((n) => n.id === cur) ? cur : null));
+    }
+    // Everything else synced; thrown last so the tree's alert explains the skipped sessions.
+    if (oversized.length > 0) {
+      const list = oversized.map((o) => `${o.title} (${(o.bytes / 1024 / 1024).toFixed(1)}MB)`).join(', ');
+      throw new Error(t('aiPanel.syncTooLarge', { list }));
     }
   };
 
@@ -2661,11 +2683,31 @@ export function VaultApp() {
     const session = aiSessions.find((s) => s.id === sessionId && s.kind === 'session');
     if (!session || session.messages.length === 0) return;
     setAiRunError(null);
+    // The continuation session is created (in the same folder) and activated up front, so the
+    // summary visibly streams inside the new session rather than in the one being summarized.
+    const node: AiSessionNode = {
+      id: crypto.randomUUID(),
+      parentId: session.parentId,
+      kind: 'session',
+      title: t('aiWorkbench.summarySessionTitle', { title: session.title }),
+      messages: [],
+      sortOrder: Date.now(),
+      updatedAt: new Date().toISOString(),
+    };
+    setAiSessions((prev) => [...prev, node]);
+    persistAiSession(node);
+    setActiveAiSessionId(node.id);
     const startedAt = Date.now();
-    setAiRun({ sessionId, text: '', startedAt });
+    setAiRun({ sessionId: node.id, text: '', startedAt });
     const ac = new AbortController();
     aiAbortRef.current = ac;
     let acc = '';
+    /** Failed/aborted/empty run: drop the still-empty continuation session, return to the original. */
+    const rollback = () => {
+      setAiSessions((prev) => prev.filter((s) => s.id !== node.id));
+      void storage.deleteAiSession(node.id);
+      setActiveAiSessionId(sessionId);
+    };
     try {
       const client = new AnthropicClient(aiSettings.apiKey);
       const result = await client.streamMessage({
@@ -2678,11 +2720,12 @@ export function VaultApp() {
         signal: ac.signal,
         onDelta: (delta) => {
           acc += delta;
-          setAiRun({ sessionId, text: acc, startedAt });
+          setAiRun({ sessionId: node.id, text: acc, startedAt });
         },
       });
       const summary = (result.text || acc).trim();
       if (!summary) {
+        rollback();
         setAiRunError({
           sessionId,
           message: t('aiWorkbench.emptyReply', { reason: result.stopReason ?? 'unknown' }),
@@ -2690,22 +2733,12 @@ export function VaultApp() {
         return;
       }
       const now = new Date().toISOString();
-      const node: AiSessionNode = {
-        id: crypto.randomUUID(),
-        parentId: session.parentId,
-        kind: 'session',
-        title: t('aiWorkbench.summarySessionTitle', { title: session.title }),
-        messages: [
-          { role: 'user', content: `${t('aiWorkbench.summaryContextIntro')}\n\n${summary}`, ts: now },
-          { role: 'assistant', content: t('aiWorkbench.summaryContinueReply'), ts: now },
-        ],
-        sortOrder: Date.now(),
-        updatedAt: now,
-      };
-      setAiSessions((prev) => [...prev, node]);
-      persistAiSession(node);
-      setActiveAiSessionId(node.id);
+      handleAiMessagesChange(node.id, [
+        { role: 'user', content: `${t('aiWorkbench.summaryContextIntro')}\n\n${summary}`, ts: now },
+        { role: 'assistant', content: t('aiWorkbench.summaryContinueReply'), ts: now },
+      ]);
     } catch (err) {
+      rollback();
       if (!(err instanceof DOMException && err.name === 'AbortError')) {
         const message =
           err instanceof AnthropicTimeoutError
@@ -2897,6 +2930,59 @@ export function VaultApp() {
       new Set(remaining.filter((n) => isEditableContentNode(n) && !n.trashed).map((n) => n.id)),
     );
     void syncAttachmentsIfOnline();
+  };
+
+  /**
+   * Tells open render-mode editors to reload their content from state (the WYSIWYG editor owns
+   * its document and only re-reads on note switch). Used when content changes outside the
+   * editor: sync pulls/merges and the conflict merge view.
+   */
+  const bumpExternalContent = (ids: string[]) => {
+    if (ids.length === 0) return;
+    setCollabContentNonce((prev) => {
+      const next = { ...prev };
+      for (const id of ids) next[id] = (next[id] ?? 0) + 1;
+      return next;
+    });
+  };
+
+  /** Ids of notes whose content a sync changed under an open editor. */
+  const contentChangedIds = (prev: NoteNode[], next: NoteNode[]): string[] => {
+    const prevMap = new Map(prev.map((n) => [n.id, n]));
+    return next.filter((n) => prevMap.get(n.id)?.contentMd !== undefined && prevMap.get(n.id)!.contentMd !== n.contentMd).map((n) => n.id);
+  };
+
+  // --- Sync conflict copies: merge view actions ---------------------------------------------
+  const conflictMergeCopy = conflictMergeId ? notes.find((n) => n.id === conflictMergeId && !n.deleted) ?? null : null;
+  const conflictMergeCanonical =
+    conflictMergeCopy?.conflictOf
+      ? notes.find((n) => n.id === conflictMergeCopy.conflictOf && !n.deleted && !n.trashed) ?? null
+      : null;
+
+  /** Writes the merge result into the canonical note and permanently deletes the copy. */
+  const handleConflictSaveMerged = async (content: string) => {
+    if (!conflictMergeCopy || !conflictMergeCanonical) return;
+    setConflictMergeId(null);
+    // Delete first: handleDeleteMany rebuilds the list from its closure, which would otherwise
+    // clobber the functional update below.
+    await handleDeleteMany([conflictMergeCopy.id]);
+    if (content !== conflictMergeCanonical.contentMd) {
+      updateNoteById(conflictMergeCanonical.id, { contentMd: content });
+      // The render-mode editor owns its document; nudge it to reload the merged text.
+      bumpExternalContent([conflictMergeCanonical.id]);
+    }
+  };
+
+  const handleConflictDeleteCopy = async () => {
+    if (!conflictMergeCopy) return;
+    setConflictMergeId(null);
+    await handleDeleteMany([conflictMergeCopy.id]);
+  };
+
+  /** Detaches a conflict copy so it lives on as an ordinary note (clears the link). */
+  const handleConflictKeepCopy = (copyId: string) => {
+    updateNoteById(copyId, { conflictOf: undefined });
+    setConflictMergeId((cur) => (cur === copyId ? null : cur));
   };
 
   /** Collects `ids` plus every descendant, walking the full notes list (trashed included). */
@@ -3236,9 +3322,10 @@ export function VaultApp() {
     initialNotes: NoteNode[],
     baseUrl = serverUrl,
   ) => {
-    const client = new SyncClient(new ApiClient(baseUrl, locale), userSession);
+    const client = new SyncClient(new ApiClient(baseUrl, locale), userSession, buildSyncOptions(t));
     const result = await client.syncAll(initialNotes, derived.notesKey, saveNoteNow, storage);
     setNotes(result.notes);
+    bumpExternalContent(contentChangedIds(initialNotes, result.notes));
     // Pushes don't change local content, so the index only needs a rebuild when something was
     // actually pulled or merged.
     if (result.result.pulled > 0 || result.result.conflicts > 0) {
@@ -3432,9 +3519,10 @@ export function VaultApp() {
     setSyncStatus(t('vaultApp.syncing'));
     try {
       await ensureVaultSaltOnServer(session);
-      const client = new SyncClient(new ApiClient(serverUrl, locale), session);
+      const client = new SyncClient(new ApiClient(serverUrl, locale), session, buildSyncOptions(t));
       const result = await client.syncAll(notes, keys.notesKey, saveNoteNow, storage);
       setNotes(result.notes);
+      bumpExternalContent(contentChangedIds(notes, result.notes));
       if (result.result.pulled > 0 || result.result.conflicts > 0) {
         rebuildSearchIndex(result.notes);
       }
@@ -3899,6 +3987,13 @@ export function VaultApp() {
                 </div>
               </div>
             )}
+            <ConflictBanner
+              note={content}
+              notes={notes}
+              onCompare={setConflictMergeId}
+              onOpen={(id) => openNote(id)}
+              onKeepCopy={handleConflictKeepCopy}
+            />
             <div className="fn-tab-group__scroll fn-tab-group__scroll--table">
               <div className="fn-note" style={{ maxWidth: noteWidth }}>
                 {renderNoteResizeHandle()}
@@ -4044,6 +4139,13 @@ export function VaultApp() {
             {/* Wrap disabled in source mode: the pane stops scrolling vertically and CodeMirror
                 scrolls internally instead, pinning the horizontal scrollbar to the visible
                 bottom of the pane (it would otherwise sit below the last line, off-screen). */}
+            <ConflictBanner
+              note={content}
+              notes={notes}
+              onCompare={setConflictMergeId}
+              onOpen={(id) => openNote(id)}
+              onKeepCopy={handleConflictKeepCopy}
+            />
             <div
               className={`fn-tab-group__scroll${
                 mode === 'source' && !sourceWrap ? ' fn-tab-group__scroll--src-nowrap' : ''
@@ -4550,6 +4652,16 @@ export function VaultApp() {
         />
       )}
       {showAbout && <AboutModal onClose={() => setShowAbout(false)} version={__APP_VERSION__} />}
+      {conflictMergeCopy && (
+        <ConflictMergeView
+          canonical={conflictMergeCanonical}
+          copy={conflictMergeCopy}
+          onSaveMerged={handleConflictSaveMerged}
+          onDeleteCopy={handleConflictDeleteCopy}
+          onKeepCopy={() => handleConflictKeepCopy(conflictMergeCopy.id)}
+          onClose={() => setConflictMergeId(null)}
+        />
+      )}
       {collabModal &&
         (() => {
           const note = notes.find((n) => n.id === collabModal);

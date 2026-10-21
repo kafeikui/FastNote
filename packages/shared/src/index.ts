@@ -19,6 +19,12 @@ export interface NoteNode {
    * unlike `deleted`, which is a cleared sync tombstone). Syncs like any other edit.
    */
   trashed?: boolean;
+  /**
+   * Set on a conflict copy: the id of the canonical note this copy diverged from. The copy holds
+   * the local edits that lost a sync conflict (the server version became the canonical note);
+   * the user resolves it via the side-by-side merge view and deletes the copy afterwards.
+   */
+  conflictOf?: string;
   updatedAt: string;
 }
 
@@ -47,6 +53,8 @@ export interface SyncNotePayload {
   deleted: boolean;
   /** Recycle-bin flag; optional so blobs from older clients decode as "not trashed". */
   trashed?: boolean;
+  /** Conflict-copy link (see NoteNode.conflictOf); optional for blobs from older clients. */
+  conflict_of?: string;
   updated_at: string;
 }
 

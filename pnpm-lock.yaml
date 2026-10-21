@@ -467,7 +467,13 @@ importers:
       '@fastnote/storage':
         specifier: workspace:*
         version: link:../storage
+      diff-match-patch:
+        specifier: ^1.0.5
+        version: 1.0.5
     devDependencies:
+      '@types/diff-match-patch':
+        specifier: ^1.0.36
+        version: 1.0.36
       typescript:
         specifier: ^5.7.2
         version: 5.9.3
@@ -511,6 +517,9 @@ importers:
       '@tiptap/core':
         specifier: ^3.27.1
         version: 3.27.1(@tiptap/pm@3.27.1)
+      diff-match-patch:
+        specifier: ^1.0.5
+        version: 1.0.5
       dompurify:
         specifier: ^3.4.11
         version: 3.4.11
@@ -539,6 +548,9 @@ importers:
       '@tiptap/starter-kit':
         specifier: ^3.27.1
         version: 3.27.1
+      '@types/diff-match-patch':
+        specifier: ^1.0.36
+        version: 1.0.36
       '@types/katex':
         specifier: ^0.16.7
         version: 0.16.8

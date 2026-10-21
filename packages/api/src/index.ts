@@ -272,11 +272,23 @@ export class ApiClient {
     };
   }
 
+  /**
+   * Compare-and-set push: `base_version` is the server version the local edit started from. The
+   * server rejects (409) when its current version differs, which catches concurrent edits that
+   * both bumped the same base (a plain `version < server` check lets the second one overwrite the
+   * first). The 409 body carries the current server blob so the caller can merge without a pull.
+   */
   async pushNote(
     token: string,
     noteId: string,
-    body: { ciphertext: string; version: number; content_hash: string; deleted?: boolean },
-  ): Promise<{ conflict?: boolean; serverVersion?: number }> {
+    body: {
+      ciphertext: string;
+      version: number;
+      content_hash: string;
+      deleted?: boolean;
+      base_version?: number;
+    },
+  ): Promise<{ conflict?: boolean; serverVersion?: number; serverItem?: SyncNoteItem }> {
     const res = await fetch(this.url(`/api/v1/sync/notes/${noteId}`), {
       method: "PUT",
       headers: {
@@ -287,11 +299,12 @@ export class ApiClient {
     });
     this.assertAuthed(res);
     if (res.status === 409) {
-      const data = (await res.json()) as { server_version: number };
-      return { conflict: true, serverVersion: data.server_version };
+      const data = (await res.json()) as { server_version: number; current?: SyncNoteItem };
+      return { conflict: true, serverVersion: data.server_version, serverItem: data.current };
     }
     if (!res.ok) throw await this.httpError(res, `PUT /sync/notes/${noteId}`, "apiClient.syncPushFailed");
-    return {};
+    const ok = (await res.json().catch(() => ({}))) as { server_version?: number };
+    return typeof ok.server_version === "number" ? { serverVersion: ok.server_version } : {};
   }
 
   async pullNotes(token: string): Promise<SyncNoteItem[]> {
@@ -560,6 +573,35 @@ export function namespaceFromPath(dir: string): string {
 export function storageDbName(namespace?: string): string {
   const ns = sanitizeStorageNamespace(namespace ?? loadStorageNamespace());
   return ns === "default" ? "fastnote-vault" : `fastnote-vault-${ns}`;
+}
+
+const DEVICE_LABEL_KEY = "fastnote_device_label";
+
+/**
+ * Human-readable label for this device (platform + short random tag), generated once and kept
+ * in localStorage. Used to name sync conflict copies so the user can tell which device's edits
+ * they hold.
+ */
+export function loadDeviceLabel(): string {
+  const existing = localStorage.getItem(DEVICE_LABEL_KEY);
+  if (existing) return existing;
+  const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+  let platform = "Web";
+  if (/Android/i.test(ua)) platform = "Android";
+  else if (/iPhone|iPad/i.test(ua)) platform = "iOS";
+  else if (/Electron/i.test(ua)) {
+    if (/Macintosh|Mac OS/i.test(ua)) platform = "Mac";
+    else if (/Windows/i.test(ua)) platform = "Windows";
+    else platform = "Linux";
+  }
+  const tag = Math.random().toString(36).slice(2, 6).toUpperCase();
+  const label = `${platform}-${tag}`;
+  localStorage.setItem(DEVICE_LABEL_KEY, label);
+  return label;
+}
+
+export function saveDeviceLabel(label: string): void {
+  localStorage.setItem(DEVICE_LABEL_KEY, label.trim());
 }
 
 export function loadServerUrl(): string {
